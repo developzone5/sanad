@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sanad سند · A senior-engineer OS for Claude Code</title>
+<meta name="description" content="Sanad: a chain of proof for code — seven skills, one gated loop, and a safety net that runs every time. Nothing ships without proof." />
+<link rel="icon" href="logo.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script>document.documentElement.classList.add('js')</script>
+<style>
+  :root{
+    --bg:#16151b; --bg:oklch(0.168 0.012 286);
+    --bg-raise:#1d1b24; --bg-raise:oklch(0.205 0.014 286);
+    --ink:#f3f2f5; --ink:oklch(0.962 0.006 286);
+    --ink-2:#b0adba; --ink-2:oklch(0.745 0.014 286);
+    --ink-3:#8e8a99; --ink-3:oklch(0.62 0.016 286);
+    --line:#2b2933; --line:oklch(0.295 0.014 286);
+    --line-2:#38353f; --line-2:oklch(0.36 0.016 286);
+    --line-3:#5a5667; --line-3:oklch(0.50 0.016 286);
+    --violet:#a87cf0; --violet:oklch(0.72 0.16 300);
+    --cyan:#3fc6e3; --cyan:oklch(0.77 0.12 220);
+    --pink:#f17cb1; --pink:oklch(0.75 0.17 350);
+    --amber:#e2a747; --amber:oklch(0.83 0.13 78);
+    --green:#36c99a; --green:oklch(0.80 0.14 162);
+    --accent:var(--violet);
+    --focus:var(--cyan);
+    --ease:cubic-bezier(.2,.7,.2,1);
+    --serif:'Fraunces',Georgia,'Times New Roman',serif;
+    --sans:'Inter',system-ui,-apple-system,sans-serif;
+    --mono:'JetBrains Mono','SF Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--sans);background:var(--bg);color:var(--ink);font-size:16.5px;line-height:1.6;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;overflow-x:hidden}
+  ::selection{background:var(--violet);color:oklch(0.18 0.02 300)}
+  svg{display:block}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 32px}
+  @media(max-width:640px){.wrap{padding:0 22px}}
+  section{scroll-margin-top:84px}
+
+  /* focus + skip link */
+  a:focus-visible,button:focus-visible,.btn:focus-visible,.nav-dl:focus-visible{outline:2px solid var(--focus);outline-offset:3px;border-radius:8px}
+  .nav-right .links a:focus-visible::after{transform:scaleX(1)}
+  .skip{position:absolute;left:-9999px;top:0;z-index:200}
+  .skip:focus{left:10px;top:10px;background:var(--bg-raise);color:var(--ink);padding:9px 15px;border-radius:9px;outline:2px solid var(--focus)}
+
+  /* scroll rail */
+  .rail{position:fixed;top:0;left:0;right:0;height:2px;transform:scaleX(0);transform-origin:left;z-index:60;
+    background:linear-gradient(90deg,var(--violet),var(--cyan));will-change:transform}
+
+  @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+
+  /* ---- nav ---- */
+  nav{border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:50}
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:68px}
+  .wordmark{display:flex;align-items:center;gap:11px;font-weight:600;letter-spacing:-.01em}
+  .wordmark img{height:26px;width:auto}
+  .wordmark .muted{color:var(--ink-3);font-weight:400}
+  .nav-right{display:flex;align-items:center;gap:26px}
+  .nav-right .links{display:flex;gap:24px;font-size:.875rem;color:var(--ink-2)}
+  .nav-right .links a{position:relative;transition:color .15s}
+  .nav-right .links a::after{content:'';position:absolute;left:0;right:0;bottom:-6px;height:1px;background:var(--violet);transform:scaleX(0);transform-origin:left;transition:transform .3s var(--ease)}
+  .nav-right .links a:hover{color:var(--ink)}
+  .nav-right .links a:hover::after{transform:scaleX(1)}
+  .nav-dl{font-family:var(--mono);font-size:.8rem;color:var(--violet);border:1px solid var(--line-3);border-radius:8px;padding:7px 13px;transition:border-color .2s,background .2s}
+  .nav-dl:hover{border-color:var(--violet);background:oklch(0.72 0.16 300 / 0.08)}
+  @media(max-width:760px){.nav-right .links{display:none}}
+
+  /* ---- hero ---- */
+  .hero{display:grid;grid-template-columns:1.4fr 0.9fr;gap:56px;align-items:center;padding:88px 0 80px}
+  .hero>.hero-copy>*{animation:fadeUp .6s var(--ease) both}
+  .hero .kicker{animation-delay:.05s}
+  .hero h1{animation-delay:.15s}
+  .hero .lead{animation-delay:.26s}
+  .hero .actions{animation-delay:.37s}
+  .hero .hero-byline{animation-delay:.47s}
+  .hero-side{animation:fadeUp .7s var(--ease) both .3s}
+  .kicker{font-family:var(--mono);font-size:.78rem;letter-spacing:.04em;color:var(--ink-3);margin-bottom:26px;display:flex;align-items:center;gap:10px}
+  .kicker .tick{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green)}
+  .hero h1{font-family:var(--serif);font-weight:600;font-size:clamp(2.7rem,5.6vw,4.4rem);line-height:1.02;letter-spacing:-.025em;color:var(--ink)}
+  .hero h1 em{font-style:italic;font-weight:500;color:var(--violet)}
+  .lead{font-size:1.12rem;color:var(--ink-2);max-width:46ch;margin-top:26px;line-height:1.62}
+  .actions{display:flex;flex-wrap:wrap;gap:14px;margin-top:34px}
+  .btn{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-size:.92rem;padding:13px 22px;border-radius:11px;
+    transition:transform .22s var(--ease),background .2s,border-color .2s}
+  .btn svg{width:17px;height:17px;transition:transform .25s var(--ease)}
+  .btn-primary{background:var(--violet);color:oklch(0.16 0.03 300)}
+  .btn-primary:hover,.btn-primary:focus-visible{transform:translateY(-2px);background:oklch(0.77 0.16 300)}
+  .btn-primary:hover svg{transform:translateY(2px)}
+  .btn-ghost{color:var(--ink);border:1px solid var(--line-3)}
+  .btn-ghost:hover{border-color:var(--ink-2);transform:translateY(-2px)}
+  .hero-byline{margin-top:30px;font-size:.9rem;color:var(--ink-2)}
+  .hero-byline b{color:var(--ink);font-weight:600}
+  .hero-byline a{color:var(--cyan);font-weight:500;text-decoration:underline;text-underline-offset:2px}
+  .hero-byline a:hover{color:var(--violet)}
+
+  /* hero side: loop index panel */
+  .hero-side{display:flex;flex-direction:column;gap:18px;align-items:center}
+  .hero-logo{height:60px;width:auto;filter:drop-shadow(0 14px 34px oklch(0.1 0.05 300 / 0.5))}
+  .hero-index{width:100%;background:var(--bg-raise);border:1px solid var(--line);border-radius:16px;padding:18px 20px;font-family:var(--mono)}
+  .hi-head{display:flex;align-items:center;justify-content:space-between;padding-bottom:13px;margin-bottom:5px;border-bottom:1px solid var(--line);
+    color:var(--ink-3);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase}
+  .hero-index ol{list-style:none}
+  .hero-index li{display:grid;grid-template-columns:24px 1fr auto;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid oklch(0.295 0.014 286 / 0.55)}
+  .hero-index li:last-child{border-bottom:none}
+  .hi-n{color:var(--ink-3);font-size:.76rem}
+  .hi-c{color:var(--c);font-size:.78rem}
+  .hi-l{color:var(--ink-2);font-size:.74rem;letter-spacing:.02em}
+  @media(max-width:820px){
+    .hero{grid-template-columns:1fr;gap:30px;padding:60px 0 52px}
+    .hero-side{order:-1}
+    .hero-index{display:none}
+    .hero-logo{height:74px}
+  }
+
+  /* ---- section frame ---- */
+  .sec{padding:72px 0;border-top:1px solid var(--line)}
+  #loop{padding:96px 0}
+  #guards{padding:60px 0}
+  .sec-head{display:flex;align-items:flex-start;justify-content:space-between;gap:28px;margin-bottom:38px;flex-wrap:wrap}
+  .sec-head h2{font-family:var(--serif);font-weight:600;font-size:clamp(2.1rem,3.5vw,2.7rem);letter-spacing:-.025em;line-height:1.05;margin-top:6px}
+  .sec-head .note{font-size:.92rem;color:var(--ink-2);max-width:34ch;margin-top:10px}
+  .sec-head .note code{font-family:var(--mono);color:var(--violet)}
+  .idx{font-family:var(--mono);font-size:.78rem;color:var(--sec,var(--ink-3));letter-spacing:.08em}
+
+  /* ---- the loop ---- */
+  .loop{display:grid;grid-template-columns:repeat(7,1fr);border-top:1px solid var(--line-2);position:relative}
+  .loop::before{content:'';position:absolute;top:-1.5px;left:0;height:2px;width:100%;transform:scaleX(0);transform-origin:left;
+    background:linear-gradient(90deg,var(--cyan),var(--violet),var(--pink));transition:transform 1s var(--ease) .1s}
+  .loop:has(.reveal.in)::before{transform:scaleX(1)}
+  .loop .step{padding:26px 18px 10px;border-right:1px solid var(--line);position:relative;transition:transform .25s var(--ease),background .25s var(--ease)}
+  .loop .step:last-child{border-right:none}
+  .loop .step:hover{transform:translateY(-3px);background:oklch(0.205 0.014 286 / 0.5)}
+  .loop .step::after{content:'';position:absolute;top:-5px;left:18px;width:9px;height:9px;border-radius:50%;background:var(--c,var(--violet));
+    transform:scale(0);transition:transform .5s var(--ease) var(--d,0s)}
+  .loop .step.in::after{transform:scale(1)}
+  .step .num{font-family:var(--serif);font-size:2.3rem;font-weight:500;line-height:1;color:color-mix(in oklch,var(--c) 45%,var(--ink-3))}
+  .step .cmd{font-family:var(--mono);font-size:.78rem;color:var(--c,var(--violet));margin-top:18px}
+  .step h3{font-size:1.05rem;font-weight:600;margin-top:3px;letter-spacing:-.01em}
+  .step p{font-size:.84rem;color:var(--ink-2);margin-top:8px;line-height:1.5}
+  @media(max-width:820px){
+    .loop{grid-template-columns:1fr 1fr}
+    .loop .step:nth-child(even){border-right:none}
+    .loop .step{border-bottom:1px solid var(--line)}
+  }
+  @media(max-width:480px){.loop{grid-template-columns:1fr}.loop .step{border-right:none}}
+
+  /* ---- ledger (skills + guards) ---- */
+  .ledger{border-top:1px solid var(--line)}
+  .row{display:grid;grid-template-columns:215px 1fr 130px;gap:28px;padding:24px 4px;border-bottom:1px solid var(--line);align-items:baseline;
+    transition:background .25s var(--ease)}
+  .row:hover{background:oklch(0.205 0.014 286 / 0.55)}
+  .row .lead-c{display:flex;align-items:center;gap:11px}
+  .row .marker{width:7px;height:7px;border-radius:2px;background:var(--c,var(--violet));flex:none;transform:rotate(45deg);transition:box-shadow .25s var(--ease)}
+  .row:hover .marker{box-shadow:0 0 0 4px color-mix(in oklch,var(--c,var(--violet)) 24%,transparent)}
+  .row .lead-c code{font-family:var(--mono);font-size:.86rem;color:var(--ink)}
+  .row .body h3{font-size:1.05rem;font-weight:600;letter-spacing:-.01em;margin-bottom:4px}
+  .row .body p{font-size:.92rem;color:var(--ink-2);max-width:62ch}
+  .row .body code{font-family:var(--mono);font-size:.82em;color:var(--violet)}
+  .row .role{font-family:var(--mono);font-size:.74rem;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);text-align:right}
+  @media(max-width:760px){.row{grid-template-columns:1fr;gap:8px}.row .role{text-align:left}}
+
+  /* ---- dial table ---- */
+  .dial{border:1px solid var(--line);border-radius:14px;background:var(--bg-raise);padding:4px 20px;overflow-x:auto}
+  table{width:100%;border-collapse:collapse;min-width:440px}
+  th,td{text-align:left;padding:15px 4px;border-bottom:1px solid var(--line);font-size:.92rem}
+  tbody tr:last-child td{border-bottom:none}
+  th{font-family:var(--mono);font-size:.74rem;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);font-weight:400}
+  td{color:var(--ink-2)}
+  tbody tr{transition:background .2s var(--ease)}
+  tbody tr:hover{background:oklch(0.168 0.012 286 / 0.6)}
+  td:first-child code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  td .q{color:var(--ink-3)}
+  .tag-model{font-family:var(--mono);font-size:.78rem}
+  .tag-model.sonnet{color:var(--cyan)} .tag-model.opus{color:var(--violet)}
+
+  /* ---- download band ---- */
+  .get{display:grid;grid-template-columns:1fr auto;gap:40px;align-items:center;
+    background:var(--bg-raise);border:1px solid var(--line-2);border-radius:18px;padding:42px 44px;margin-top:6px}
+  .get h2{font-family:var(--serif);font-weight:600;font-size:2rem;letter-spacing:-.02em;margin-bottom:9px}
+  .get p{color:var(--ink-2);font-size:.95rem;max-width:52ch}
+  .get p code{font-family:var(--mono);color:var(--violet)}
+  .get .files{font-family:var(--mono);font-size:.8rem;color:var(--ink-3);margin-top:14px;line-height:1.9}
+  .get .files b{color:var(--cyan);font-weight:400}
+  @media(max-width:680px){.get{grid-template-columns:1fr;gap:24px;padding:30px}}
+
+  /* ---- footer ---- */
+  footer{border-top:1px solid var(--line);padding:46px 0}
+  .footer-row{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+  footer .left{display:flex;align-items:center;gap:13px}
+  footer img{height:34px;width:auto}
+  footer .sig{font-size:.9rem;color:var(--ink-2)}
+  footer .sig b{color:var(--ink);font-weight:600}
+  footer .sig a{color:var(--cyan);text-decoration:underline;text-underline-offset:2px}
+  footer .sig a:hover{color:var(--violet)}
+  footer .seq{font-family:var(--mono);font-size:.78rem;color:var(--ink-3)}
+
+  /* ---- reveal (progressive-enhancement gated) ---- */
+  .reveal{opacity:1}
+  .js .reveal{opacity:0;transform:translateY(14px);will-change:opacity,transform;
+    transition:opacity .5s var(--ease) var(--d,0s),transform .5s var(--ease) var(--d,0s)}
+  .js .reveal.in{opacity:1;transform:none;will-change:auto}
+  .loop .step:nth-child(1){--d:0ms}.loop .step:nth-child(2){--d:70ms}.loop .step:nth-child(3){--d:140ms}
+  .loop .step:nth-child(4){--d:210ms}.loop .step:nth-child(5){--d:280ms}.loop .step:nth-child(6){--d:350ms}.loop .step:nth-child(7){--d:420ms}
+  .ledger .row:nth-child(1){--d:0ms}.ledger .row:nth-child(2){--d:60ms}.ledger .row:nth-child(3){--d:120ms}
+  .ledger .row:nth-child(4){--d:180ms}.ledger .row:nth-child(5){--d:240ms}.ledger .row:nth-child(6){--d:300ms}.ledger .row:nth-child(7){--d:360ms}
+
+  @media(prefers-reduced-motion:reduce){
+    *{animation:none !important}
+    .reveal,.js .reveal{opacity:1 !important;transform:none !important;transition:none !important}
+    .loop .step::after{transform:scale(1) !important;transition:none !important}
+    .loop::before{transform:scaleX(1) !important;transition:none !important}
+    html{scroll-behavior:auto}
+    .rail{display:none}
+  }
+  @media(forced-colors:active){
+    .nav-dl,.btn,.dial,.get,.hero-index{border:1px solid CanvasText}
+    .loop .step::after,.row .marker{forced-color-adjust:none}
+  }
+</style>
+</head>
+<body>
+<a href="#main" class="skip">Skip to content</a>
+<div class="rail" aria-hidden="true"></div>
+
+<nav>
+  <div class="wrap">
+    <a class="wordmark" href="#top"><img src="logo.png" alt="Developzone" />Sanad <span class="muted">سند / Developzone</span></a>
+    <div class="nav-right">
+      <div class="links">
+        <a href="#loop">Loop</a>
+        <a href="#skills">Skills</a>
+        <a href="#dial">Braintrust</a>
+        <a href="#guards">Guardrails</a>
+      </div>
+      <a class="nav-dl" href="sanad.zip" download>↓ Download</a>
+    </div>
+  </div>
+</nav>
+
+<main id="main">
+  <section class="hero-section" id="top">
+    <div class="wrap hero">
+      <div class="hero-copy">
+        <div class="kicker"><span class="tick"></span>SANAD · CHAIN OF PROOF FOR CLAUDE CODE</div>
+        <h1>Nothing ships without a <em>verified chain of proof</em>.</h1>
+        <p class="lead"><b>Sanad</b> (سند) — the authenticated chain that makes a narration trustworthy, rebuilt for code. Seven skills on one gated loop: plan, decide, build, polish, verify, QA, ship. Underneath sits an always-on rulebook and an automatic safety net.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="sanad.zip" download>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
+            Download the setup
+          </a>
+          <a class="btn btn-ghost" href="README.md">Read the README</a>
+        </div>
+        <p class="hero-byline">By <b>Eng. Mohammed Almutairi</b> · <a href="https://developzone.net" target="_blank" rel="noopener noreferrer">Developzone.net</a></p>
+      </div>
+      <div class="hero-side">
+        <img class="hero-logo" src="logo.png" alt="" />
+        <aside class="hero-index" aria-hidden="true">
+          <div class="hi-head"><span>The loop</span><span>7 moves</span></div>
+          <ol>
+            <li style="--c:var(--cyan)"><span class="hi-n">01</span><span class="hi-c">/spec</span><span class="hi-l">Plan</span></li>
+            <li style="--c:var(--violet)"><span class="hi-n">02</span><span class="hi-c">/braintrust</span><span class="hi-l">Decide</span></li>
+            <li style="--c:var(--green)"><span class="hi-n">03</span><span class="hi-c">build</span><span class="hi-l">Standard</span></li>
+            <li style="--c:var(--pink)"><span class="hi-n">04</span><span class="hi-c">impeccable</span><span class="hi-l">Polish</span></li>
+            <li style="--c:var(--amber)"><span class="hi-n">05</span><span class="hi-c">/gate</span><span class="hi-l">Verify</span></li>
+            <li style="--c:var(--green)"><span class="hi-n">06</span><span class="hi-c">/qa</span><span class="hi-l">Test</span></li>
+            <li style="--c:var(--violet)"><span class="hi-n">07</span><span class="hi-c">/ship</span><span class="hi-l">Ship</span></li>
+          </ol>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- LOOP -->
+  <section class="sec" id="loop" style="--sec:var(--cyan)" aria-labelledby="loop-h">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <div><span class="idx">01 / THE LOOP</span><h2 id="loop-h">One task, seven moves</h2></div>
+        <p class="note">Each step is a skill I reach for on purpose. The rulebook (<code>CLAUDE.md</code>) runs beneath all of them.</p>
+      </div>
+      <div class="loop">
+        <div class="step reveal" style="--c:var(--cyan)">
+          <div class="num">01</div><div class="cmd">/spec</div><h3>Plan</h3>
+          <p>Capture the goal, the key decisions, and the plan in one file, so work that spans days never loses the thread.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--violet)">
+          <div class="num">02</div><div class="cmd">/braintrust</div><h3>Decide</h3>
+          <p>Torn between two approaches? Several expert viewpoints weigh in, and you get one clear recommendation.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--green)">
+          <div class="num">03</div><div class="cmd">always on</div><h3>Build</h3>
+          <p>Built to a senior engineer's standard: correct, secure, safe under load, with clean database migrations.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--pink)">
+          <div class="num">04</div><div class="cmd">impeccable</div><h3>Polish</h3>
+          <p>Refine the interface (layout, type, color, motion), and keep generated code complete, no skipped sections.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--amber)">
+          <div class="num">05</div><div class="cmd">/gate</div><h3>Verify</h3>
+          <p>Prove it actually works: builds, tests, security, and edge cases, shown with real output, not promises.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--green)">
+          <div class="num">06</div><div class="cmd">/qa</div><h3>QA</h3>
+          <p>Become a skeptical human tester: exercise the fix as a user, judge if it's actually good. Ship / Don't ship.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--violet)">
+          <div class="num">07</div><div class="cmd">/ship</div><h3>Ship</h3>
+          <p>A plain-language summary of what changed, then a draft pull request to a safe branch. You approve every push.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SKILLS -->
+  <section class="sec" id="skills" style="--sec:var(--violet)" aria-labelledby="skills-h">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <div><span class="idx">02 / SKILLS</span><h2 id="skills-h">The seven in detail</h2></div>
+        <p class="note">Nothing runs in the background. Each skill loads only when you call it.</p>
+      </div>
+      <div class="ledger">
+        <div class="row reveal" style="--c:var(--cyan)">
+          <div class="lead-c"><span class="marker"></span><code>/spec</code></div>
+          <div class="body"><h3>spec</h3><p>Keeps one living spec file per feature (goal, decisions, plan, risks, log), so a long feature stays on course across many sessions.</p></div>
+          <div class="role">Plan</div>
+        </div>
+        <div class="row reveal" style="--c:var(--violet)">
+          <div class="lead-c"><span class="marker"></span><code>/braintrust</code></div>
+          <div class="body"><h3>braintrust</h3><p>For a tough call, it brings in 3 to 5 expert viewpoints (pragmatist, architect, skeptic, performance, product). Each makes its case, then you get one clear recommendation. Runs entirely on Claude, no API keys.</p></div>
+          <div class="role">Decide</div>
+        </div>
+        <div class="row reveal" style="--c:var(--amber)">
+          <div class="lead-c"><span class="marker"></span><code>/gate</code></div>
+          <div class="body"><h3>gate</h3><p>Checks the change against my full Definition of Done and security list: builds, tests, security, and edge cases, with every claim backed by real command output.</p></div>
+          <div class="role">Verify</div>
+        </div>
+        <div class="row reveal" style="--c:var(--green)">
+          <div class="lead-c"><span class="marker"></span><code>/qa</code></div>
+          <div class="body"><h3>qa</h3><p>The human-QA gate after <code>/gate</code>: stop being the author, become a skeptical tester in front of the running change. Exploratory user testing, acceptance criteria, usability feel, regression by feel — degrades to API/job/data QA when there's no UI. Gate proves the code is correct; qa judges whether the fix is actually good. Ends in a Ship / Don't ship verdict.</p></div>
+          <div class="role">Test</div>
+        </div>
+        <div class="row reveal" style="--c:var(--violet)">
+          <div class="lead-c"><span class="marker"></span><code>/ship</code></div>
+          <div class="body"><h3>ship</h3><p>Writes a plain-language brief of the change (what, why, proof, impact), then opens a draft pull request on a safe branch, never straight to production, and waits for your approval.</p></div>
+          <div class="role">Ship</div>
+        </div>
+        <div class="row reveal" style="--c:var(--green)">
+          <div class="lead-c"><span class="marker"></span><code>full-output</code></div>
+          <div class="body"><h3>full-output-enforcement</h3><p>Guarantees complete, ready-to-paste code: no <code>// ...</code>, no TODOs, no skipped sections, even when the output runs long.</p></div>
+          <div class="role">Complete</div>
+        </div>
+        <div class="row reveal" style="--c:var(--pink)">
+          <div class="lead-c"><span class="marker"></span><code>impeccable</code></div>
+          <div class="body"><h3>impeccable</h3><p>Designs and refines interfaces end to end: layout, typography, color, motion, accessibility, and right-to-left support, grounded in a real design system.</p></div>
+          <div class="role">Design</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DIAL -->
+  <section class="sec" id="dial" style="--sec:var(--amber)" aria-labelledby="dial-h">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <div><span class="idx">03 / BRAINTRUST</span><h2 id="dial-h">Scale the room to the question</h2></div>
+        <p class="note">One word sets how many advisors deliberate, and how deeply. Only the advisors drop to a lighter model; the final recommendation always runs on your main model.</p>
+      </div>
+      <div class="dial reveal">
+        <table>
+          <thead><tr><th>Dial</th><th>Advisors</th><th>Model</th><th>Depth</th></tr></thead>
+          <tbody>
+            <tr><td><code>low</code> <span class="q">quick</span></td><td>2</td><td><span class="tag-model sonnet">Sonnet</span></td><td>1 round</td></tr>
+            <tr><td><code>medium</code> <span class="q">default</span></td><td>3</td><td><span class="tag-model sonnet">Sonnet</span></td><td>1 round</td></tr>
+            <tr><td><code>high</code> <span class="q">deep</span></td><td>4</td><td><span class="tag-model opus">Opus</span></td><td>+ cross-examination</td></tr>
+            <tr><td><code>max</code> <span class="q">thorough</span></td><td>5</td><td><span class="tag-model opus">Opus</span></td><td>+ cross-exam, + synthesis critic</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- GUARDRAILS -->
+  <section class="sec" id="guards" style="--sec:var(--green)" aria-labelledby="guards-h">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <div><span class="idx">04 / GUARDRAILS</span><h2 id="guards-h">The safety net</h2></div>
+        <p class="note">Always on, predictable, cheap. They stay out of the way until they are needed.</p>
+      </div>
+      <div class="ledger">
+        <div class="row reveal" style="--c:var(--amber)">
+          <div class="lead-c"><span class="marker"></span><code>pre-commit</code></div>
+          <div class="body"><h3>Secrets guard</h3><p>A lightweight check that runs only on <code>git commit</code> and <code>git push</code>, and blocks it if the change carries a hardcoded secret, a staged <code>.env</code>, or an AI-attribution line in a commit. It is plain script (no AI, no delay), and if it ever errors it lets you through rather than locking up your terminal.</p></div>
+          <div class="role">hooks/</div>
+        </div>
+        <div class="row reveal" style="--c:var(--cyan)">
+          <div class="lead-c"><span class="marker"></span><code>Stop hook</code></div>
+          <div class="body"><h3>End-of-turn nudge</h3><p>Prints the loop after every turn, so the next move is always one keystroke away: <code>/spec · /braintrust · /gate · /qa · /ship</code>.</p></div>
+          <div class="role">settings</div>
+        </div>
+        <div class="row reveal" style="--c:var(--green)">
+          <div class="lead-c"><span class="marker"></span><code>CLAUDE.md</code></div>
+          <div class="body"><h3>The rulebook</h3><p>Always-on: senior backend bar, the security gate, Definition of Done, git and PR flow, and a hard "be short by default" rule.</p></div>
+          <div class="role">global</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DOWNLOAD -->
+  <section class="sec" id="get" aria-labelledby="get-h">
+    <div class="wrap">
+      <div class="get reveal">
+        <div>
+          <h2 id="get-h">Take the whole setup</h2>
+          <p>One zip with the rulebook, settings, all seven skills, and the secrets guard. Drop it into your <code>~/.claude</code> and re-login.</p>
+          <div class="files"><b>CLAUDE.md</b> · <b>settings.json</b> · <b>skills/</b> · <b>hooks/</b> · <b>README.md</b></div>
+        </div>
+        <a class="btn btn-primary" href="sanad.zip" download>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
+          Download the setup
+        </a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <div class="left">
+      <img src="logo.png" alt="" />
+      <span class="sig">Built and maintained by <b>Eng. Mohammed Almutairi</b> · <a href="https://developzone.net" target="_blank" rel="noopener noreferrer">Developzone.net</a></span>
+    </div>
+    <span class="seq">plan → decide → build → polish → verify → qa → ship</span>
+  </div>
+</footer>
+
+<script>
+  const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function countUp(el) {
+    const target = parseInt(el.textContent, 10) || 0;
+    if (RM || !target) { el.textContent = String(target).padStart(2, '0'); return; }
+    const dur = 600, t0 = performance.now();
+    (function tick(now) {
+      const p = Math.min(1, (now - t0) / dur);
+      const e = 1 - Math.pow(1 - p, 3);
+      el.textContent = String(Math.round(e * target)).padStart(2, '0');
+      if (p < 1) requestAnimationFrame(tick);
+    })(t0);
+  }
+
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (!e.isIntersecting) return;
+      e.target.classList.add('in');
+      const num = e.target.querySelector(':scope > .num');
+      if (num) countUp(num);
+      io.unobserve(e.target);
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' });
+  document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+
+  const rail = document.querySelector('.rail');
+  let ticking = false;
+  function updateRail() {
+    const h = document.documentElement;
+    const max = h.scrollHeight - h.clientHeight;
+    rail.style.transform = 'scaleX(' + (max > 0 ? h.scrollTop / max : 0) + ')';
+    ticking = false;
+  }
+  addEventListener('scroll', () => { if (!ticking) { requestAnimationFrame(updateRail); ticking = true; } }, { passive: true });
+  updateRail();
+</script>
+</body>
+</html>

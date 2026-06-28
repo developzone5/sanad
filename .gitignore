@@ -1,0 +1,17 @@
+# Stale build artifacts — superseded by sanad.zip
+claude-setup.zip
+claude-setup (2).zip
+
+# OS / editor junk
+desktop.ini
+.DS_Store
+Thumbs.db
+*~
+.vscode/
+.idea/
+
+# Secrets must never enter this repo
+.env
+*.env
+.credentials.json
+settings.local.json

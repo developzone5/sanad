@@ -1,0 +1,37 @@
+{
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "model": "opus",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["C:\\Users\\Asus\\.claude\\hooks\\precommit-guard.js"],
+            "if": "Bash(git *)",
+            "timeout": 15,
+            "statusMessage": "Scanning commit/push for secrets + AI attribution..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"console.log(JSON.stringify({systemMessage:'Done? /spec (plan) | /braintrust (decide) | /gate (verify) | /qa (human test) | /ship (push)'}))\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "autoUpdatesChannel": "latest",
+  "skipWorkflowUsageWarning": true
+}
