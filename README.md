@@ -1,6 +1,10 @@
-# Sanad سند — a senior-engineer operating system for Claude Code
+# Sanad سند
 
-> **Sanad** (سند) — in Islamic scholarship, the authenticated *chain of proof* that makes a narration trustworthy: nothing is accepted until its chain is unbroken and scrutinized. This framework is that idea for code — **nothing ships without a verified chain of proof.** An always-on rulebook plus a gated loop (`spec → braintrust → gate → qa → ship`), built by Eng. Mohammed Almutairi · Developzone.net.
+**A professional engineering framework for Claude Code** — an always-on rulebook plus a gated loop (`spec → braintrust → gate → qa → ship`) where nothing ships without proof.
+
+> *Sanad* (سند) — the verified chain that authenticates a narration; nothing is accepted until the chain is unbroken. Same idea, applied to code.
+
+Built by **Eng. Mohammed Almutairi** · Developzone.net
 
 Portable copy of my global Claude Code config. Move this whole folder to a new PC and install.
 
