@@ -37,6 +37,7 @@ Portable copy of my global Claude Code config. Move this whole folder to a new P
 | **ship** | `/ship` | Teach-back brief (what changed + why + proof + blast radius), then push to **staging** and open a **DRAFT PR**. Never main/master/prod. Stops for my approval before pushing. |
 | **full-output-enforcement** | (applied to a task) | Forces complete, unabridged code output — bans `// ...`, `TODO`, placeholder elisions; handles token-limit splits cleanly. Use when I need exhaustive, copy-paste-ready output. |
 | **impeccable** | (frontend tasks) | Frontend UI work: design, redesign, audit, critique, polish — layout, typography, color, motion, accessibility, responsive, RTL, design systems. Fits my Tailwind/Alpine/Razor frontend. |
+| **demo** | `/demo` | A paced, screen-share-friendly **walkthrough** of Sanad. Prints a menu, then renders one card per skill on request (`spec → braintrust → gate → qa → ship`, plus the helpers), each with a short description and an illustrative example. A guided tour for showing people what the loop is — **not a real run**: it never builds, tests, commits, or opens PRs. `/demo all` plays every card in order; `/demo <n>` jumps to one. |
 
 ---
 
