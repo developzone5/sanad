@@ -173,6 +173,30 @@ test('real hook processes bind checked content and preserve native HTTP failures
     assert.equal(decision(complete, 'git push origin HEAD:main'), 'deny');
     assert.equal(decision(complete, 'gh pr merge 1 --merge'), 'deny');
     assert.equal(decision(complete, 'git reset --hard'), 'ask');
+    // Same-tree memo on a real repository: a branch switch that keeps HEAD's tree
+    // identical to the verified one needs no rerun; a dirty worktree does.
+    const stopDecision = entries => {
+      fs.writeFileSync(transcript, entries.map(JSON.stringify).join('\n'));
+      const output = execFileSync(process.execPath, [path.join(hooks, 'stop-gate.js')], {
+        cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 20000,
+        input: JSON.stringify({ cwd: repo, transcript_path: transcript, hook_event_name: 'Stop' }),
+      });
+      const parsed = output ? JSON.parse(output) : {};
+      return { decision: parsed.decision || 'allow', message: parsed.systemMessage || parsed.reason || '' };
+    };
+    git(['switch', '-c', 'memo/same-tree']);
+    const switched = [...complete, call('switch', 'git switch -c memo/same-tree'), result('switch', { exitCode: 0, stdout: 'Switched to a new branch', stderr: '' })];
+    assert.equal(decision(switched), 'allow', lastReason);
+    const stop = stopDecision(switched);
+    assert.equal(stop.decision, 'allow', stop.message);
+    assert.match(stop.message, /identical to the one the last passing evidence check verified/);
+    fs.appendFileSync(path.join(repo, 'src/App.cs'), '// dirty\n');
+    assert.equal(decision(switched), 'deny', 'a dirty worktree is not the verified tree');
+    assert.equal(stopDecision(switched).decision, 'block', 'a dirty worktree still needs its own check');
+    git(['checkout', '--', 'src/App.cs']);
+    assert.equal(decision(switched), 'allow', lastReason);
+    git(['switch', 'fix/probe']);
+    t.diagnostic('Real Git: branch switch with an identical tree -> allowed without a rerun; dirty tree -> denied.');
     t.diagnostic('Real CLI: plain curl HTTP 500 exited 0 -> deny; failure-aware curl exited 22 -> deny; same-command HTTP 200 retry -> allow. No push or PR executed.');
     fs.appendFileSync(path.join(repo, 'src/App.cs'), '// Unchecked later content.\n');
     git(['add', '--', 'src/App.cs']);

@@ -150,7 +150,7 @@ Five plain Node scripts, wired in `settings.json`. No model calls, no latency ta
 
 | Hook | Event | What it enforces |
 |---|---|---|
-| `policy-guard.js` | PreToolUse (Bash, PowerShell) | Branch, destructive-action and publishing controls. A push or PR needs a completed evidence receipt, a finished reviewer run after the last change, then `REVIEW: PASS` and `GATE: PASS`. Refuses `git add .`, pushes to `main`/`prod`, merges and releases. |
+| `policy-guard.js` | PreToolUse (Bash, PowerShell) | Branch, destructive-action and publishing controls. A push or PR needs a completed evidence receipt, a finished reviewer run after the last change, then `REVIEW: PASS` and `GATE: PASS`. Refuses `git add .`, pushes to `main`/`prod`, merges and releases. Prose-only pushes need no code proof. A git switch/pull/merge that leaves HEAD identical to the verified tree needs no rerun (same-tree memo). |
 | `precommit-guard.js` | PreToolUse | Denies a commit or push that carries a hardcoded secret (new files included), a credential file or AI attribution. |
 | `csharpier-guard.js` | PreToolUse | Denies a commit with unformatted or partly staged `.cs` files. |
 | `stop-gate.js` | Stop | After a code change, missing, failed or pending verification blocks the turn once, then warns honestly. A dev server is not verification; a real test run is. |
@@ -206,6 +206,18 @@ No. Everything runs inside Claude Code on Claude models. The hooks are plain Nod
 **Will it push or merge for me?**
 Never. It opens a draft PR to the integration branch after your explicit yes. `main`, `master` and `prod` are refused by the guard.
 
+**My repo only has `main`.**
+Name it as the integration branch in that clone, yourself, once:
+
+```bash
+git config sanad.integration main
+```
+
+The guard then treats `main` like `staging`: pushes ask, PRs are allowed, and the evidence rules still apply. Claude is not allowed to set `sanad.*` keys; the guard asks first.
+
+**I am editing Sanad's own hooks and skills.**
+Set `git config sanad.lane workflow` in that clone. The independent reviewer is skipped for that lane; the evidence receipt and `GATE: PASS` are still required.
+
 **I only want the hooks.**
 Copy `hooks/` and the `hooks` section of `settings.json`. Run `node --test` in `hooks/tests` to confirm.
 
@@ -223,6 +235,8 @@ Issues and pull requests are welcome. CI installs Sanad on a clean Windows runne
 cd hooks/tests && node --test
 cd skills/gate/tests && node --test
 ```
+
+One test needs a real TypeScript install and skips otherwise; point `WORKFLOW_TYPESCRIPT_RUNNER` at any `node_modules/typescript/bin/tsc` to run it.
 
 Keep the skills stack-neutral; project-specific lessons belong in that project's memory, not here.
 

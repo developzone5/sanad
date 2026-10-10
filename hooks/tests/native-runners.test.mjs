@@ -8,24 +8,27 @@ import scan from '../lib/transcript-scan.js';
 import target from '../lib/verification-target.cjs';
 import { runCommand } from '../../skills/gate/scripts/evidence.mjs';
 
-const tsc = process.env.WORKFLOW_TYPESCRIPT_RUNNER || 'C:/Users/Asus/source/repos/EduQuest/eduquest-frontend/node_modules/typescript/bin/tsc';
+// A real TypeScript install is machine-specific: WORKFLOW_TYPESCRIPT_RUNNER names <any>/node_modules/typescript/bin/tsc
+// (CI sets it; workflow-install.sh finds one under ~/source/repos). The recognition test needs only the path shape.
+const tsc = process.env.WORKFLOW_TYPESCRIPT_RUNNER || '';
+const tscShape = tsc || 'C:/work/app/node_modules/typescript/bin/tsc';
 const npm = path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
 const quote = words => words.map(word => '"' + word + '"').join(' ');
 const message = (role, content) => ({ type: role, message: { role, content } });
 
 test('native Node package entrypoints are recognized without accepting arbitrary scripts', () => {
-  assert.equal(scan.segmentIsVerify(quote([process.execPath, tsc, '--noEmit', '-p', 'app config.json'])), true);
+  assert.equal(scan.segmentIsVerify(quote([process.execPath, tscShape, '--noEmit', '-p', 'app config.json'])), true);
   assert.equal(scan.segmentIsVerify(quote([process.execPath, npm, 'run', 'check'])), true);
   assert.equal(scan.segmentIsVerify(quote([process.execPath, npm.replace('npm-cli.js', 'npx-cli.js'), 'tsc', '--noEmit'])), true);
-  assert.equal(scan.segmentIsVerify(quote([process.execPath, tsc.replace('/bin/tsc', '/lib/tsc.js'), '--noEmit'])), true);
-  assert.equal(scan.segmentIsVerify(quote([process.execPath, tsc, '--listFilesOnly'])), false);
+  assert.equal(scan.segmentIsVerify(quote([process.execPath, tscShape.replace('/bin/tsc', '/lib/tsc.js'), '--noEmit'])), true);
+  assert.equal(scan.segmentIsVerify(quote([process.execPath, tscShape, '--listFilesOnly'])), false);
   assert.equal(scan.segmentIsVerify(quote([process.execPath, 'scripts/tsc.js', '--noEmit'])), false);
   assert.equal(scan.segmentIsVerify(quote([process.execPath, 'scripts/npm-cli.js', 'run', 'check'])), false);
   assert.equal(scan.segmentIsVerify(quote([process.execPath, '-e', 'process.exit(0)', 'run', 'check'])), false);
 });
 
 // Needs a real TypeScript install; point WORKFLOW_TYPESCRIPT_RUNNER at <any>/node_modules/typescript/bin/tsc.
-const noTsc = fs.existsSync(tsc) ? false : 'no TypeScript runner at ' + tsc + ' (set WORKFLOW_TYPESCRIPT_RUNNER)';
+const noTsc = tsc && fs.existsSync(tsc) ? false : 'set WORKFLOW_TYPESCRIPT_RUNNER to an installed node_modules/typescript/bin/tsc';
 test('installed native TypeScript and npm runners produce usable source-bound receipts', { skip: noTsc }, async t => {
   assert.ok(fs.existsSync(npm), 'Installed npm Node entrypoint is required.');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'native-runner-proof-'));

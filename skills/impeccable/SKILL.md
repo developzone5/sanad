@@ -22,7 +22,7 @@ Two files at the project root, case-insensitive:
 Load both in one call:
 
 ```bash
-node C:/Users/Asus/.claude/skills/impeccable/scripts/load-context.mjs
+node "$HOME/.claude/skills/impeccable/scripts/load-context.mjs"
 ```
 
 Consume the full JSON output. Never pipe through `head`, `tail`, `grep`, or `jq`.
@@ -149,7 +149,7 @@ Setup (context gathering, register) is already loaded by then; sub-commands don'
 **Pin** creates a standalone shortcut so `/<command>` invokes `/impeccable <command>` directly. **Unpin** removes it. The script writes to every harness directory present in the project.
 
 ```bash
-node C:/Users/Asus/.claude/skills/impeccable/scripts/pin.mjs <pin|unpin> <command>
+node "$HOME/.claude/skills/impeccable/scripts/pin.mjs" <pin|unpin> <command>
 ```
 
 Valid `<command>` is any command from the table above. Report the script's result concisely — confirm the new shortcut on success, relay stderr verbatim on error.

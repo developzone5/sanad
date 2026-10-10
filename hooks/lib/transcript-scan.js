@@ -386,7 +386,7 @@ function taskNotification(entry) {
 }
 
 function scanTranscript(transcriptPath) {
-  const res = { lastEdit: -1, lastEditPath: '', lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastGate: -1, lastGateVerdict: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
+  const res = { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastGate: -1, lastGateVerdict: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
   let lines;
   try { lines = readTranscript(transcriptPath).split('\n'); } catch (e) { return res; }
 
@@ -461,10 +461,10 @@ function scanTranscript(transcriptPath) {
       }
 
       if (blk.type === 'tool_use' && blk.input && typeof blk.input === 'object') {
-        const rec = { editSeq: -1, editPath: '', verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1 };
+        const rec = { editSeq: -1, editPath: '', nonGitEditSeq: -1, verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1 };
         if (EDIT_TOOLS.has(blk.name)) {
           const p = String(blk.input.file_path || blk.input.notebook_path || '');
-          if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; }
+          if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; }
         } else if (SHELL_TOOLS.has(blk.name)) {
           const segs = splitSegments(String(blk.input.command || ''));
           // A failed compound command must be retried as a whole; a success in
@@ -484,7 +484,7 @@ function scanTranscript(transcriptPath) {
             if (segs.length === 1 && segmentIsProvider(segs[i])) rec.providerSeq = frac;
             if (segs.length === 1 && /^git(?:\.exe)?\s+range-diff\s/i.test(String(segs[i]).trim())) rec.rangeDiffSeq = frac;
             const paths = segmentEditPaths(expanded[i]).filter((p) => !(stashBundle && p === '<git>' && /\bstash\b/i.test(segs[i])));
-            if (paths.length) { rec.editSeq = frac; rec.editPath = paths[0]; }
+            if (paths.length) { rec.editSeq = frac; rec.editPath = paths[0]; if (paths.some((p) => p !== '<git>')) rec.nonGitEditSeq = frac; }
           }
         } else if (blk.name === 'Agent' && REVIEWER_PROMPT.test(String(blk.input.prompt || ''))) {
           reviewerCalls.set(blk.id, seq);                  // agent id arrives with the result
@@ -528,6 +528,8 @@ function scanTranscript(transcriptPath) {
       // An Edit/Write that errored changed nothing; a shell segment that
       // wrote a file usually did, even if a later segment failed.
       if (rec.editSeq > res.lastEdit) { res.lastEdit = rec.editSeq; res.lastEditPath = rec.editPath; }
+      // The last edit that was not a git merge/switch/pull: the same-tree memo falls back to it.
+      if ((rec.nonGitEditSeq ?? -1) > res.lastNonGitEdit) res.lastNonGitEdit = rec.nonGitEditSeq;
     }
     if (rec.verifySeq !== -1) {
       const receipt = rec.evidence ? checkReceipt(blk, entry) : null;

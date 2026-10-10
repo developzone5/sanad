@@ -96,6 +96,20 @@ function headIsPushed() { return git(['branch', '-r', '--contains', 'HEAD']) !==
 
 const PROD_BRANCH = /^(main|master|prod|production|release(\/.+)?)$/i;
 const INTEGRATION_BRANCH = /^(staging|develop|dev)$/i;
+// A clone may name its own integration branch (`git config sanad.integration main`
+// for a solo repo whose only branch is main) and its lane (`sanad.lane workflow`:
+// Sanad's own hooks/skills need no independent reviewer, per CLAUDE.md). The human
+// sets both in that clone; the guard asks before Claude writes a `sanad.*` key.
+let _sanadConfig;
+function sanadConfig(key) {
+  if (!_sanadConfig || _sanadConfig.cwd !== gitCwd) {   // one command can address several clones (git -C …)
+    _sanadConfig = { cwd: gitCwd, integration: git(['config', '--get', 'sanad.integration']), lane: git(['config', '--get', 'sanad.lane']).toLowerCase() };
+  }
+  return _sanadConfig[key];
+}
+function isIntegration(b) { const c = sanadConfig('integration'); return INTEGRATION_BRANCH.test(b) || (!!c && String(b).toLowerCase() === c.toLowerCase()); }
+function isProd(b) { const c = sanadConfig('integration'); return PROD_BRANCH.test(b) && !(c && String(b).toLowerCase() === c.toLowerCase()); }
+const INTEGRATION_HINT = 'staging/develop/dev, or the branch this clone names with `git config sanad.integration`';
 // Only untracked build output inside the effective directory (or anything in the
 // temp folder) is exempt from delete confirmation — judged on the RESOLVED path.
 const GENERATED_DIR = /^(?:bin|obj|node_modules|dist|build|out|coverage|TestResults|\.vite|\.cache|\.next|\.turbo)$/i;
@@ -157,8 +171,15 @@ function checkGit(g) {
     case 'merge':
     case 'rebase': {
       const b = currentBranch();
-      if (PROD_BRANCH.test(b) || INTEGRATION_BRANCH.test(b))
+      if (isProd(b) || isIntegration(b))
         ask('`git ' + g.sub + '` while on shared branch `' + b + '` — CLAUDE.md: never merge into a shared/prod branch locally; use a PR');
+      return;
+    }
+    case 'config': {
+      // `sanad.integration` / `sanad.lane` relax this guard for the clone: the human sets them.
+      const reads = has(/^(?:--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/);
+      const key = a.find((t) => /^sanad\./i.test(t));
+      if (key && !reads) ask('`git config ' + key + '` changes how this guard treats the clone (integration branch / lane) — the human sets it, not Claude');
       return;
     }
     case 'worktree':
@@ -258,8 +279,8 @@ function checkPush(a, cliConfig) {
     if (d && d !== 'HEAD') dsts.push(d);
   }
 
-  const prod = dsts.find((d) => PROD_BRANCH.test(d));
-  if (prod) deny('this push targets `' + prod + '` — CLAUDE.md: push feature branches to the integration branch (staging/develop/dev) via a PR, never main/master/prod/release/*.');
+  const prod = dsts.find((d) => isProd(d));
+  if (prod) deny('this push targets `' + prod + '` — CLAUDE.md: push feature branches to the integration branch (' + INTEGRATION_HINT + ') via a PR, never main/master/prod/release/*.');
 
   // Deleting a remote ref publishes no code; retain its separate approval below.
   if (publishesCode) {
@@ -267,7 +288,7 @@ function checkPush(a, cliConfig) {
     catch (e) { deny('push verification could not be completed. Resolve the missing or unreadable evidence before publishing.'); }
   }
 
-  const integ = dsts.find((d) => INTEGRATION_BRANCH.test(d));
+  const integ = dsts.find((d) => isIntegration(d));
   if (integ) ask('direct push to the integration branch `' + integ + '` bypasses the PR flow');
   if (force) ask('force-push rewrites pushed history (never on a shared branch)');
   if (del) ask('deleting a remote branch');
@@ -280,47 +301,57 @@ function gateCheck(base) {
   publishBase = base || null;
   cachedBase = undefined; cachedPaths = undefined;
   const files = pushCodePaths();
+  if (files.length === 0) return;                      // prose-only publish: nothing to verify
   const tp = input.transcript_path;
   if (!tp || !fs.existsSync(tp)) {
-    if (files.length > 0) deny('outgoing code has no session verification evidence. Run the review and /gate in this session before pushing.');
+    deny('outgoing code has no session verification evidence. Run the review and /gate in this session before pushing.');
     return;
   }
   let r;
   try { r = scan.scanTranscript(tp); } catch (e) { deny('verification transcript could not be read. Re-run review and /gate before pushing.'); return; }
   if (!r) { deny('verification transcript could not be scanned. Re-run review and /gate before pushing.'); return; }
-  if (r.lastEdit === -1 && files.length === 0) return;
   const checked = r.completedCheck;
   const root = gitRaw(['rev-parse', '--show-toplevel']).trim().replace(/\\/g, '/').toLowerCase();
   const tree = gitRaw(['rev-parse', 'HEAD^{tree}']).trim();
-  if (!checked || r.lastBoundCheck <= r.lastEdit ||
-      String(checked.source?.toplevel || '').replace(/\\/g, '/').toLowerCase() !== root ||
-      checked.source?.treeBefore !== tree || checked.source?.treeAfter !== tree) {
+  const treeMatches = !!checked && String(checked.source?.toplevel || '').replace(/\\/g, '/').toLowerCase() === root &&
+    checked.source?.treeBefore === tree && checked.source?.treeAfter === tree;
+  // Same-tree memo: a git switch/pull/merge that left HEAD identical to the tree the
+  // last passing evidence check verified needs no rerun; only earlier real edits count.
+  let status = null;
+  try { status = gitRaw(['status', '--porcelain']); } catch (e) { status = null; }
+  const treeVerified = treeMatches && r.lastEditPath === '<git>' && status === '';
+  const lastEdit = treeVerified ? r.lastNonGitEdit : r.lastEdit;
+  if (!treeMatches || r.lastBoundCheck <= lastEdit) {
     deny('publishing requires a completed evidence.mjs check of this repository and the exact outgoing tree. Run the final check through skills/gate/scripts/evidence.mjs; bare output or a written PASS cannot replace it. Commit or ignore unrelated untracked files before checking.');
   }
   const file = r.lastEditPath === '<git>' ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
-  if (r.lastVerify <= r.lastEdit || r.lastFailedVerify !== -1 || r.lastPendingVerify !== -1) {
+  if (r.lastVerify <= lastEdit || r.lastFailedVerify !== -1 || r.lastPendingVerify !== -1) {
     deny('code has missing, failing, or pending verification' + file + '. Complete the checks, collect their results, then run review and /gate. For a malformed command or lost result that cannot be retried, use the recovery procedure in skills/gate/reference/command-evidence.md; never rerun destructive setup just to clear evidence.');
   }
-  if (r.lastGate <= Math.max(r.lastEdit, r.lastVerifyResult) || r.lastGateVerdict !== 'PASS') {
+  if (r.lastGate <= Math.max(lastEdit, r.lastVerifyResult) || r.lastGateVerdict !== 'PASS') {
     deny('code requires `GATE: PASS` after the last edit and completed verification' + file + '. ' +
          'Run /gate (Definition of Done + security checklist, real quoted output), present the ship brief, get the explicit yes — then push.');
   }
-  if (r.lastReview <= r.lastEdit || r.lastReviewVerdict !== 'PASS' || r.lastGate <= r.lastReview) {
-    deny('code requires `REVIEW: PASS` after the last edit and before the passing gate' + file + '. ' +
-         'Run the independent Claude reviewer (/sanad Step 3.5) on the final source, fix its findings, then re-gate.');
-  }
-  // The verdict must rest on a real reviewer run: an agent whose prompt starts
-  // "You are the independent reviewer", launched (or continued) after the last
-  // change and completed before the verdict. A reused review (promotion) instead
-  // needs a `git range-diff` equivalence check after the last change.
-  const reused = /\breused\b/i.test(r.lastReviewText || '') && r.lastRangeDiff > r.lastEdit;
-  if (!reused && (r.lastReviewerRun <= r.lastEdit || r.lastReviewerResult === -1 || r.lastReview <= r.lastReviewerResult)) {
-    deny('`REVIEW: PASS` needs a completed independent reviewer run after the last change' + file + '. ' +
-         'Launch (or continue) the Sanad Step 3.5 reviewer — its prompt starts "You are the independent reviewer" — collect its finished report, then write the verdict. ' +
-         'A promotion that reuses a review labels the verdict "reused" and runs `git range-diff` after the last change.');
+  // Workflow lane (`git config sanad.lane workflow`, set by the human): Sanad's own
+  // hooks/skills skip the independent reviewer per CLAUDE.md; evidence and gate stay.
+  if (sanadConfig('lane') !== 'workflow') {
+    if (r.lastReview <= lastEdit || r.lastReviewVerdict !== 'PASS' || r.lastGate <= r.lastReview) {
+      deny('code requires `REVIEW: PASS` after the last edit and before the passing gate' + file + '. ' +
+           'Run the independent Claude reviewer (/sanad Step 3.5) on the final source, fix its findings, then re-gate.');
+    }
+    // The verdict must rest on a real reviewer run: an agent whose prompt starts
+    // "You are the independent reviewer", launched (or continued) after the last
+    // change and completed before the verdict. A reused review (promotion) instead
+    // needs a `git range-diff` equivalence check after the last change.
+    const reused = /\breused\b/i.test(r.lastReviewText || '') && r.lastRangeDiff > lastEdit;
+    if (!reused && (r.lastReviewerRun <= lastEdit || r.lastReviewerResult === -1 || r.lastReview <= r.lastReviewerResult)) {
+      deny('`REVIEW: PASS` needs a completed independent reviewer run after the last change' + file + '. ' +
+           'Launch (or continue) the Sanad Step 3.5 reviewer — its prompt starts "You are the independent reviewer" — collect its finished report, then write the verdict. ' +
+           'A promotion that reuses a review labels the verdict "reused" and runs `git range-diff` after the last change.');
+    }
   }
   const relational = relationalCodeChanged();
-  if (relational && (r.lastProviderRun <= r.lastEdit || r.lastFailedProvider !== -1 || r.lastPendingProvider !== -1 || r.lastGate <= r.lastProviderResult)) {
+  if (relational && (r.lastProviderRun <= lastEdit || r.lastFailedProvider !== -1 || r.lastPendingProvider !== -1 || r.lastGate <= r.lastProviderResult)) {
     deny('code adds ExecuteUpdate/ExecuteDelete, raw SQL or a migration and has no completed real-provider run after the last edit' + file + '. ' +
          'Exercise the affected flow against MySQL (docker exec … mysql, a live API request, or the smoke script), quote it in the gate, then re-review and re-gate. Unrepeatable malformed checks require the documented recovery procedure in skills/gate/reference/command-evidence.md.');
   }
@@ -354,7 +385,7 @@ let publishBase = null, cachedBase, cachedPaths;
 function pushBase() {
   if (cachedBase !== undefined) return cachedBase;
   if (publishBase) return cachedBase = gitRaw(['merge-base', 'origin/' + publishBase, 'HEAD']).trim();
-  for (const b of ['staging', 'develop', 'dev']) {
+  for (const b of [sanadConfig('integration'), 'staging', 'develop', 'dev'].filter(Boolean)) {
     if (git(['rev-parse', '--verify', '--quiet', 'origin/' + b])) return cachedBase = gitRaw(['merge-base', 'origin/' + b, 'HEAD']).trim();
   }
   const base = git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
@@ -408,10 +439,10 @@ function checkGh(g, raw) {
       else if (/^-H.+/.test(x)) head = x.slice(2);
       else if (x === '--draft' || x === '-d') draft = true;
     }
-    if (act === 'create' && base === null) deny('`gh pr create` without an explicit `--base` — CLAUDE.md: never rely on the default base; pass `--base <integration branch>` (staging/develop/dev).');
+    if (act === 'create' && base === null) deny('`gh pr create` without an explicit `--base` — CLAUDE.md: never rely on the default base; pass `--base <integration branch>` (' + INTEGRATION_HINT + ').');
     if (base !== null) {
-      if (PROD_BRANCH.test(base)) deny('PR base `' + base + '` — CLAUDE.md: PRs target the integration branch only, never main/master/prod/release/*.');
-      else if (!INTEGRATION_BRANCH.test(base)) ask('PR base `' + base + '` is not the integration branch (staging/develop/dev)');
+      if (isProd(base)) deny('PR base `' + base + '` — CLAUDE.md: PRs target the integration branch only, never main/master/prod/release/*.');
+      else if (!isIntegration(base)) ask('PR base `' + base + '` is not the integration branch (' + INTEGRATION_HINT + ')');
     }
     if (act === 'create' && !draft) ask('non-draft PR — CLAUDE.md "Draft until proven": open as DRAFT unless every Definition-of-Done item passed');
     if (act === 'create') {
@@ -421,8 +452,8 @@ function checkGh(g, raw) {
         const commit = gitRaw(['rev-parse', '--verify', 'HEAD^{commit}']).trim();
         const upstream = git(['rev-parse', '--verify', '@{u}^{commit}']);
         if (!upstream || upstream !== commit) deny('push the verified branch first; the PR upstream must match the checked-out HEAD.');
-        if (base && INTEGRATION_BRANCH.test(base)) gateCheck(base);
-        else deny('PR creation requires an explicit integration base (staging/develop/dev) for evidence validation.');
+        if (base && isIntegration(base)) gateCheck(base);
+        else deny('PR creation requires an explicit integration base (' + INTEGRATION_HINT + ') for evidence validation.');
       } catch { deny('PR verification could not be completed. Resolve missing repository or evidence before publishing.'); }
     }
     return;
