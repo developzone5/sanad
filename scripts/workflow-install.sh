@@ -11,6 +11,14 @@
 # 4. Install, run the hook and gate suites, and append one line to ~/.claude/backups/RELEASES.md.
 set -euo pipefail
 
+# A candidate may contain this very script. Bash reads a script as it runs, so
+# overwriting it mid-install corrupts the run: always execute from a scratch copy.
+if [ -z "${WORKFLOW_INSTALL_COPY:-}" ]; then
+  _copy="$(mktemp "${TMPDIR:-/tmp}/workflow-install.XXXXXX")"
+  cp "${BASH_SOURCE[0]}" "$_copy"
+  WORKFLOW_INSTALL_COPY=1 exec bash "$_copy" "$@"
+fi
+
 CAND="${1:?candidate dir}"; BASE="${2:?base dir}"; NAME="${3:?release name}"
 C="$HOME/.claude"; A="$HOME/.agents/skills"
 B="$C/backups/$NAME"
@@ -43,6 +51,12 @@ for f in "${changed[@]}"; do L="$(live "$f")"; mkdir -p "$(dirname "$L")"; cp "$
 for f in "${removed[@]}"; do rm -f "$(live "$f")"; done
 echo "INSTALLED ${#changed[@]} changed, ${#removed[@]} removed. Backup: $B"
 
+# The native-runner test needs a real TypeScript install; use any repo's copy when the caller set none.
+if [ -z "${WORKFLOW_TYPESCRIPT_RUNNER:-}" ]; then
+  for c in "$HOME"/source/repos/*/node_modules/typescript/bin/tsc "$HOME"/source/repos/*/*/node_modules/typescript/bin/tsc; do
+    [ -f "$c" ] && export WORKFLOW_TYPESCRIPT_RUNNER="$c" && break
+  done
+fi
 hooks=$(cd "$C/hooks/tests" && node --test 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ')
 gate=$(cd "$C/skills/gate/tests" && node --test 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ')
 echo "hooks: $hooks"; echo "gate: $gate"

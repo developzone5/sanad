@@ -32,7 +32,7 @@ Sessions in different terminals do NOT see each other; the project's work-tracke
 
 - **`In progress — <branch>`** on a task = a terminal owns it. Other terminals must not touch that task or its files.
 - **Claim before you start, update when you merge** (In progress → Done, from the merging terminal).
-- **Single source of truth = the copy in the MAIN checkout** (the original repo directory, e.g. `C:\Users\Asus\source\repos\EduQuest\...`), read/updated by absolute path from every worktree. Each worktree has its own stale copy of this tracked file — never use the local copy for coordination.
+- **Single source of truth = the copy in the MAIN checkout** (the original repo directory, e.g. `<your repos folder>\EduQuest\...`), read/updated by absolute path from every worktree. Each worktree has its own stale copy of this tracked file — never use the local copy for coordination.
 - Every session working in a worktree reads the board FIRST, before touching code.
 
 ## The two standing guardrails (repeat them in the report)

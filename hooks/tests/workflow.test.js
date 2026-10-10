@@ -75,6 +75,8 @@ function invoke(hook, entries, options = {}) {
           if (args[0] === 'diff' && args.includes('--unified=0')) return options.relationalPatch || (options.relationalDiff ? '+++ b/src/App.cs\n+        await rows.ExecuteUpdateAsync(u => u);' : '');
           if (args[0] === 'diff' && options.smallDiff) return '10\t0\tsrc/App.cs';
           if (args[0] === 'diff') return (options.codeCwd ? path.resolve(opts.cwd) !== path.resolve(options.codeCwd) : options.docsOnly) ? '10\t0\tREADME.md' : '100\t0\tsrc/App.cs';
+          if (args[0] === 'status') { if (options.clean === undefined) throw Error('Unexpected git call: status'); return options.clean ? '' : ' M src/App.cs\n'; }
+          if (args[0] === 'config' && args[1] === '--get') { if (args[2] === 'sanad.integration') return options.integration || ''; if (args[2] === 'sanad.lane') return options.lane || ''; }
           if (args[0] === 'merge-base') return 'synthetic-base';
           if (args[0] === 'rev-parse') return 'origin/feature/check';
           throw Error('Unexpected git call: ' + args.join(' '));
@@ -165,6 +167,43 @@ test('git merge, reset, stash pop and branch switches count as code changes', ()
 
 // The independent Claude reviewer's verdict is the written REVIEW line: it must follow the last edit and precede the gate.
 const checkedCode = () => [...edit(), ...command('test', 'dotnet test'), ...boundCheck()];
+
+test('same-tree memo: a git-only change that leaves HEAD identical to the verified tree needs no rerun', () => {
+  const switched = [...checkedCode(), ...command('switch', 'git switch main', 'Switched to branch main')];
+  const allowed = invoke('stop-gate.js', switched, { clean: true });
+  assert.equal(allowed.decision, 'allow');
+  assert.match(allowed.output.systemMessage, /identical to the one the last passing evidence check verified/);
+  assert.equal(invoke('stop-gate.js', switched, { clean: false }).decision, 'block', 'a dirty worktree is not the verified tree');
+  assert.equal(invoke('stop-gate.js', switched, { clean: true, changedTree: true }).decision, 'block', 'a different HEAD tree needs its own check');
+  assert.equal(invoke('stop-gate.js', switched).decision, 'block', 'no git status answer: no memo');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...command('test', 'dotnet test'), ...command('switch', 'git switch main', 'ok')], { clean: true }).decision, 'block', 'a bare test run carries no tree: no memo');
+  assert.equal(invoke('stop-gate.js', [...checkedCode(), ...edit(), ...command('switch', 'git switch main', 'ok')], { clean: true }).decision, 'block', 'a real edit after the check still needs verification');
+  const published = [...checkedCode(), ...reviewedPass(), verdict('GATE: PASS'), ...command('switch', 'git switch main', 'ok')];
+  assert.equal(invoke('policy-guard.js', published, { clean: true }).decision, 'allow');
+  assert.equal(invoke('policy-guard.js', published, { clean: false }).decision, 'deny');
+  assert.equal(invoke('policy-guard.js', published, { clean: true, changedTree: true }).decision, 'deny');
+});
+test('a prose-only push needs no code proof even after session edits', () => {
+  assert.equal(invoke('policy-guard.js', edit(), { docsOnly: true }).decision, 'allow');
+});
+test('a clone may name its integration branch; Claude may not set it', () => {
+  const push = (opts) => invoke('policy-guard.js', [], { docsOnly: true, input: { tool_input: { command: 'git push origin main' } }, ...opts });
+  assert.equal(push({}).decision, 'deny');
+  assert.equal(push({ integration: 'main' }).decision, 'ask', 'a named integration branch: a direct push asks, like staging');
+  const pr = (opts) => invoke('policy-guard.js', [], { docsOnly: true, input: { tool_input: { command: 'gh pr create --base main --draft --title "docs"' } }, ...opts });
+  assert.equal(pr({}).decision, 'deny');
+  assert.equal(pr({ integration: 'main' }).decision, 'allow');
+  assert.equal(invoke('policy-guard.js', [], { input: { tool_input: { command: 'git config sanad.integration main' } } }).decision, 'ask');
+  assert.equal(invoke('policy-guard.js', [], { input: { tool_input: { command: 'git config --local sanad.lane workflow' } } }).decision, 'ask');
+  assert.equal(invoke('policy-guard.js', [], { input: { tool_input: { command: 'git config --get sanad.integration' } } }).decision, 'allow');
+});
+test('the workflow lane skips the reviewer but not the evidence receipt or the gate', () => {
+  const unreviewed = [...checkedCode(), verdict('GATE: PASS')];
+  assert.equal(invoke('policy-guard.js', unreviewed).decision, 'deny');
+  assert.equal(invoke('policy-guard.js', unreviewed, { lane: 'workflow' }).decision, 'allow');
+  assert.equal(invoke('policy-guard.js', checkedCode(), { lane: 'workflow' }).decision, 'deny', 'GATE: PASS is still required');
+  assert.equal(invoke('policy-guard.js', [...edit(), ...command('test', 'dotnet test'), verdict('GATE: PASS')], { lane: 'workflow' }).decision, 'deny', 'the evidence receipt is still required');
+});
 test('a REVIEW: PASS after the last edit and before the gate allows push', () => assert.equal(invoke('policy-guard.js', [...checkedCode(), ...reviewedPass(), verdict('GATE: PASS')]).decision, 'allow'));
 test('verified code with a gate but no review verdict is denied for the review', () => {
   const r = invoke('policy-guard.js', [...checkedCode(), verdict('GATE: PASS')], { smallDiff: true });

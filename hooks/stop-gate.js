@@ -62,14 +62,39 @@ if (!r) allow();
 
 if (r.lastEdit === -1) allow();
 
+// Same-tree memo. A git switch/pull/merge counts as a change, but when the
+// checked-out source is byte-identical to the tree the last passing
+// source-bound evidence check verified, nothing new exists to verify. Tree
+// identity is the same proof the push guard relies on. Any git error → no memo.
+function gitRead(args) {
+  try {
+    return require('child_process').execFileSync('git', args, { cwd: input.cwd || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000, windowsHide: true }).trim();
+  } catch (e) { return null; }
+}
+function verifiedTreeCheckedOut() {
+  const s = r.completedCheck && r.completedCheck.source;
+  if (!s || !s.toplevel || !/^[0-9a-f]{40,64}$/i.test(String(s.treeAfter || ''))) return false;
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const top = gitRead(['rev-parse', '--show-toplevel']);
+  if (!top || norm(top) !== norm(s.toplevel)) return false;
+  if (gitRead(['status', '--porcelain']) !== '') return false;             // null (error) or dirty: no memo
+  return gitRead(['rev-parse', 'HEAD^{tree}']) === s.treeAfter;
+}
+const treeVerified = r.lastEditPath === '<git>' && verifiedTreeCheckedOut();
+const lastEdit = treeVerified ? r.lastNonGitEdit : r.lastEdit;
+const memo = treeVerified ? ' The checked-out tree is identical to the one the last passing evidence check verified (' + r.completedCheck.source.treeAfter.slice(0, 12) + '), so the git-only change needs no rerun.' : '';
+
 // A failure declared with `PROBE EXPECTED:` (a review probe that proves someone
 // else's bug) does not block the stop; the push guard still counts it.
-const failedAfterEdit = (r.lastFailedVerifyStop ?? r.lastFailedVerify) > r.lastEdit;
-const pendingAfterEdit = r.lastPendingVerify > r.lastEdit;
-if (!failedAfterEdit && !pendingAfterEdit && r.lastVerify > r.lastEdit) {
-  out({ systemMessage: 'A verification command completed successfully after the last code edit. This is not the full Definition-of-Done: finish /gate with behavior evidence before /ship.' });
+const failedAfterEdit = (r.lastFailedVerifyStop ?? r.lastFailedVerify) > lastEdit;
+const pendingAfterEdit = r.lastPendingVerify > lastEdit;
+if (!failedAfterEdit && !pendingAfterEdit && lastEdit === -1) {
+  out({ systemMessage: 'No code change since the last passing evidence check.' + memo });
 }
-if (!failedAfterEdit && !pendingAfterEdit && r.lastProbeFailure > r.lastEdit) {
+if (!failedAfterEdit && !pendingAfterEdit && r.lastVerify > lastEdit) {
+  out({ systemMessage: 'A verification command completed successfully after the last code edit.' + memo + ' This is not the full Definition-of-Done: finish /gate with behavior evidence before /ship.' });
+}
+if (!failedAfterEdit && !pendingAfterEdit && r.lastProbeFailure > lastEdit) {
   out({ systemMessage: 'Declared review probe(s) failed as expected. That is evidence about the code under review, not verification of your own change; the push guard still refuses while they fail.' });
 }
 const file = r.lastEditPath === '<git>' ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';

@@ -53,7 +53,9 @@ try {
   const stale = fetched ? '' : ' (⚠ last fetched state — fetch failed)';
   const branch = run('git', ['rev-parse', '--abbrev-ref', 'HEAD']) || '(detached)';
   const remotes = run('git', ['branch', '-r', '--format=%(refname:short)']).split('\n').map((s) => s.trim());
-  const integ = ['staging', 'develop', 'dev'].find((b) => remotes.includes('origin/' + b)) || null;
+  // A clone may name its own integration branch (`git config sanad.integration main` on a solo repo).
+  const configured = run('git', ['config', '--get', 'sanad.integration']);
+  const integ = [configured, 'staging', 'develop', 'dev'].filter(Boolean).find((b) => remotes.includes('origin/' + b)) || null;
   const PROD = /^(main|master|prod|production|release(\/.+)?)$/i;
 
   const lines = [];
