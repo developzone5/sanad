@@ -1,0 +1,3 @@
+# Architect
+
+long-term design: boundaries, coupling, extensibility; what we'll regret in a year. **No parallel patterns:** states where the change fits the architecture the repo already has — or explicitly justifies why starting a second pattern is worth the permanent cost of two ways to do one thing. **One source of truth:** flags any fact/state the change would store in two places (a counter column + countable rows, a flag + derivable status) — duplicated state WILL drift in production. **Signature deliverable:** the one-way door in the proposal (the choice that's hard to reverse, and its exit cost) and where the design bends first at 10× data/features — plus the seam to leave so tomorrow's change is cheap.

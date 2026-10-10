@@ -249,7 +249,7 @@
       <div class="hero-copy">
         <div class="kicker"><span class="tick"></span>SANAD · CHAIN OF PROOF FOR CLAUDE CODE</div>
         <h1>Nothing ships without a <em>verified chain of proof</em>.</h1>
-        <p class="lead"><b>Sanad</b> (سند) — the authenticated chain that makes a narration trustworthy, rebuilt for code. Seven skills on one gated loop: plan, decide, build, polish, verify, QA, ship. Underneath sits an always-on rulebook and an automatic safety net.</p>
+        <p class="lead"><b>Sanad</b> (سند) — the authenticated chain that makes a narration trustworthy, rebuilt for code. One command, <code>/sanad</code>, runs one gated loop: understand, check facts, design, build and prove, independent review, gate, ship. Underneath sits an always-on rulebook and an automatic safety net.</p>
         <div class="actions">
           <a class="btn btn-primary" href="sanad.zip" download>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
@@ -262,15 +262,14 @@
       <div class="hero-side">
         <img class="hero-logo" src="logo.png" alt="" />
         <aside class="hero-index" aria-hidden="true">
-          <div class="hi-head"><span>The loop</span><span>7 moves</span></div>
+          <div class="hi-head"><span>The loop</span><span>6 moves</span></div>
           <ol>
-            <li style="--c:var(--cyan)"><span class="hi-n">01</span><span class="hi-c">/spec</span><span class="hi-l">Plan</span></li>
-            <li style="--c:var(--violet)"><span class="hi-n">02</span><span class="hi-c">/braintrust</span><span class="hi-l">Decide</span></li>
-            <li style="--c:var(--green)"><span class="hi-n">03</span><span class="hi-c">build</span><span class="hi-l">Standard</span></li>
-            <li style="--c:var(--pink)"><span class="hi-n">04</span><span class="hi-c">impeccable</span><span class="hi-l">Polish</span></li>
-            <li style="--c:var(--amber)"><span class="hi-n">05</span><span class="hi-c">/gate</span><span class="hi-l">Verify</span></li>
-            <li style="--c:var(--green)"><span class="hi-n">06</span><span class="hi-c">/qa</span><span class="hi-l">Test</span></li>
-            <li style="--c:var(--violet)"><span class="hi-n">07</span><span class="hi-c">/ship</span><span class="hi-l">Ship</span></li>
+            <li style="--c:var(--cyan)"><span class="hi-n">01</span><span class="hi-c">understand</span><span class="hi-l">Done means</span></li>
+            <li style="--c:var(--amber)"><span class="hi-n">02</span><span class="hi-c">facts</span><span class="hi-l">Prove</span></li>
+            <li style="--c:var(--violet)"><span class="hi-n">03</span><span class="hi-c">/braintrust</span><span class="hi-l">Design</span></li>
+            <li style="--c:var(--green)"><span class="hi-n">04</span><span class="hi-c">build</span><span class="hi-l">Prove</span></li>
+            <li style="--c:var(--pink)"><span class="hi-n">05</span><span class="hi-c">review</span><span class="hi-l">Independent</span></li>
+            <li style="--c:var(--violet)"><span class="hi-n">06</span><span class="hi-c">/gate · /ship</span><span class="hi-l">Ship</span></li>
           </ol>
         </aside>
       </div>
@@ -281,37 +280,33 @@
   <section class="sec" id="loop" style="--sec:var(--cyan)" aria-labelledby="loop-h">
     <div class="wrap">
       <div class="sec-head reveal">
-        <div><span class="idx">01 / THE LOOP</span><h2 id="loop-h">One task, seven moves</h2></div>
-        <p class="note">Each step is a skill I reach for on purpose. The rulebook (<code>CLAUDE.md</code>) runs beneath all of them.</p>
+        <div><span class="idx">01 / THE LOOP</span><h2 id="loop-h">One task, six moves</h2></div>
+        <p class="note">Every request enters <code>/sanad</code>. Questions get a direct answer; real implementation runs these six steps, each with one exit rule. The rulebook (<code>CLAUDE.md</code>) runs beneath all of them.</p>
       </div>
       <div class="loop">
         <div class="step reveal" style="--c:var(--cyan)">
-          <div class="num">01</div><div class="cmd">/spec</div><h3>Plan</h3>
-          <p>Capture the goal, the key decisions, and the plan in one file, so work that spans days never loses the thread.</p>
-        </div>
-        <div class="step reveal" style="--c:var(--violet)">
-          <div class="num">02</div><div class="cmd">/braintrust</div><h3>Decide</h3>
-          <p>Torn between two approaches? Several expert viewpoints weigh in, and you get one clear recommendation.</p>
-        </div>
-        <div class="step reveal" style="--c:var(--green)">
-          <div class="num">03</div><div class="cmd">always on</div><h3>Build</h3>
-          <p>Built to a professional engineering standard: correct, secure, safe under load, with clean database migrations.</p>
-        </div>
-        <div class="step reveal" style="--c:var(--pink)">
-          <div class="num">04</div><div class="cmd">impeccable</div><h3>Polish</h3>
-          <p>Refine the interface (layout, type, color, motion), and keep generated code complete, no skipped sections.</p>
+          <div class="num">01</div><div class="cmd">understand</div><h3>Done means</h3>
+          <p>3 to 8 checkable results in your words, including what must NOT change. Unclear? One question, not a guess.</p>
         </div>
         <div class="step reveal" style="--c:var(--amber)">
-          <div class="num">05</div><div class="cmd">/gate</div><h3>Verify</h3>
-          <p>Prove it actually works: builds, tests, security, and edge cases, shown with real output, not promises.</p>
-        </div>
-        <div class="step reveal" style="--c:var(--green)">
-          <div class="num">06</div><div class="cmd">/qa</div><h3>QA</h3>
-          <p>Become a skeptical human tester: exercise the fix as a user, judge if it's actually good. Ship / Don't ship.</p>
+          <div class="num">02</div><div class="cmd">facts</div><h3>Check the facts</h3>
+          <p>Every outside fact the design depends on is proven with a real sample, or written down as an open assumption you accept.</p>
         </div>
         <div class="step reveal" style="--c:var(--violet)">
-          <div class="num">07</div><div class="cmd">/ship</div><h3>Ship</h3>
-          <p>A plain-language summary of what changed, then a draft pull request to a safe branch. You approve every push.</p>
+          <div class="num">03</div><div class="cmd">/braintrust</div><h3>Design</h3>
+          <p>Bounded work is routed directly. Uncertain or sensitive work gets a panel of specialists and one boss decision.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--green)">
+          <div class="num">04</div><div class="cmd">build</div><h3>Build and prove</h3>
+          <p>Red before green for a bug. Tests through the public entry point, the real provider when data writes change, run for real.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--pink)">
+          <div class="num">05</div><div class="cmd">review</div><h3>Independent review</h3>
+          <p>A fresh read-only reviewer reads the frozen source for bugs, missed requirements and data or security risk. Exit: REVIEW: PASS.</p>
+        </div>
+        <div class="step reveal" style="--c:var(--violet)">
+          <div class="num">06</div><div class="cmd">/gate · /ship</div><h3>Gate and ship</h3>
+          <p>The gate runs once on the final source with real output. Then a short ship brief, a draft PR to a safe branch, and your explicit yes.</p>
         </div>
       </div>
     </div>
@@ -321,10 +316,15 @@
   <section class="sec" id="skills" style="--sec:var(--violet)" aria-labelledby="skills-h">
     <div class="wrap">
       <div class="sec-head reveal">
-        <div><span class="idx">02 / SKILLS</span><h2 id="skills-h">The seven in detail</h2></div>
-        <p class="note">Nothing runs in the background. Each skill loads only when you call it.</p>
+        <div><span class="idx">02 / SKILLS</span><h2 id="skills-h">The skills in detail</h2></div>
+        <p class="note"><code>/sanad</code> is always the entry point. The others are the steps it reaches for.</p>
       </div>
       <div class="ledger">
+        <div class="row reveal" style="--c:var(--cyan)">
+          <div class="lead-c"><span class="marker"></span><code>/sanad</code></div>
+          <div class="body"><h3>sanad</h3><p>The task loop itself. Classifies each request (teach, check, implement), routes implementation before any edit, then walks the six steps and talks in one line per stage.</p></div>
+          <div class="role">Loop</div>
+        </div>
         <div class="row reveal" style="--c:var(--cyan)">
           <div class="lead-c"><span class="marker"></span><code>/spec</code></div>
           <div class="body"><h3>spec</h3><p>Keeps one living spec file per feature (goal, decisions, plan, risks, log), so a long feature stays on course across many sessions.</p></div>
@@ -332,18 +332,13 @@
         </div>
         <div class="row reveal" style="--c:var(--violet)">
           <div class="lead-c"><span class="marker"></span><code>/braintrust</code></div>
-          <div class="body"><h3>braintrust</h3><p>For a tough call, it brings in 3 to 5 expert viewpoints (pragmatist, architect, skeptic, performance, product). Each makes its case, then you get one clear recommendation. Runs entirely on Claude, no API keys.</p></div>
+          <div class="body"><h3>braintrust</h3><p>For a tough call, it seats 2 to 6 specialists for the open questions (pragmatist, architect, skeptic, performance, product, database, security, authenticity). Each makes its case, then a separate boss reviews every report and gives one clear recommendation. Runs entirely on Claude, no API keys.</p></div>
           <div class="role">Decide</div>
         </div>
         <div class="row reveal" style="--c:var(--amber)">
           <div class="lead-c"><span class="marker"></span><code>/gate</code></div>
           <div class="body"><h3>gate</h3><p>Checks the change against my full Definition of Done and security list: builds, tests, security, and edge cases, with every claim backed by real command output.</p></div>
           <div class="role">Verify</div>
-        </div>
-        <div class="row reveal" style="--c:var(--green)">
-          <div class="lead-c"><span class="marker"></span><code>/qa</code></div>
-          <div class="body"><h3>qa</h3><p>The human-QA gate after <code>/gate</code>: stop being the author, become a skeptical tester in front of the running change. Exploratory user testing, acceptance criteria, usability feel, regression by feel — degrades to API/job/data QA when there's no UI. Gate proves the code is correct; qa judges whether the fix is actually good. Ends in a Ship / Don't ship verdict.</p></div>
-          <div class="role">Test</div>
         </div>
         <div class="row reveal" style="--c:var(--violet)">
           <div class="lead-c"><span class="marker"></span><code>/ship</code></div>
@@ -369,16 +364,16 @@
     <div class="wrap">
       <div class="sec-head reveal">
         <div><span class="idx">03 / BRAINTRUST</span><h2 id="dial-h">Scale the room to the question</h2></div>
-        <p class="note">One word sets how many advisors deliberate, and how deeply. Only the advisors drop to a lighter model; the final recommendation always runs on your main model.</p>
+        <p class="note">One word caps how many specialists sit. Each seat uses the model strongest for its lens; a separate boss always reviews the reports and makes the call.</p>
       </div>
       <div class="dial reveal">
         <table>
-          <thead><tr><th>Dial</th><th>Advisors</th><th>Model</th><th>Depth</th></tr></thead>
+          <thead><tr><th>Dial</th><th>Specialists</th><th>Seat models</th><th>Boss</th></tr></thead>
           <tbody>
-            <tr><td><code>low</code> <span class="q">quick</span></td><td>2</td><td><span class="tag-model sonnet">Sonnet</span></td><td>1 round</td></tr>
-            <tr><td><code>medium</code> <span class="q">default</span></td><td>3</td><td><span class="tag-model sonnet">Sonnet</span></td><td>1 round</td></tr>
-            <tr><td><code>high</code> <span class="q">deep</span></td><td>4</td><td><span class="tag-model opus">Opus</span></td><td>+ cross-examination</td></tr>
-            <tr><td><code>max</code> <span class="q">thorough</span></td><td>5</td><td><span class="tag-model opus">Opus</span></td><td>+ cross-exam, + synthesis critic</td></tr>
+            <tr><td><code>low</code> <span class="q">quick</span></td><td>2</td><td><span class="tag-model opus">Opus</span> deep-risk · <span class="tag-model sonnet">Sonnet</span> practical</td><td>Fable, xhigh</td></tr>
+            <tr><td><code>medium</code> <span class="q">default</span></td><td>2–3</td><td><span class="tag-model opus">Opus</span> deep-risk · <span class="tag-model sonnet">Sonnet</span> practical</td><td>Fable, xhigh</td></tr>
+            <tr><td><code>high</code> <span class="q">deep</span></td><td>up to 4</td><td><span class="tag-model opus">Opus</span> deep-risk · <span class="tag-model sonnet">Sonnet</span> practical</td><td>Fable, xhigh</td></tr>
+            <tr><td><code>xhigh / max</code> <span class="q">on request</span></td><td>up to 6</td><td><span class="tag-model opus">Opus</span> deep-risk · <span class="tag-model sonnet">Sonnet</span> practical</td><td>Fable, xhigh</td></tr>
           </tbody>
         </table>
       </div>
@@ -390,18 +385,28 @@
     <div class="wrap">
       <div class="sec-head reveal">
         <div><span class="idx">04 / GUARDRAILS</span><h2 id="guards-h">The safety net</h2></div>
-        <p class="note">Always on, predictable, cheap. They stay out of the way until they are needed.</p>
+        <p class="note">Deterministic Node scripts. They stay out of the way until a rule is about to be broken.</p>
       </div>
       <div class="ledger">
         <div class="row reveal" style="--c:var(--amber)">
-          <div class="lead-c"><span class="marker"></span><code>pre-commit</code></div>
-          <div class="body"><h3>Secrets guard</h3><p>A lightweight check that runs only on <code>git commit</code> and <code>git push</code>, and blocks it if the change carries a hardcoded secret, a staged <code>.env</code>, or an AI-attribution line in a commit. It is plain script (no AI, no delay), and if it ever errors it lets you through rather than locking up your terminal.</p></div>
+          <div class="lead-c"><span class="marker"></span><code>policy-guard</code></div>
+          <div class="body"><h3>Publishing guard</h3><p>Publishing needs completed passing verification, a real evidence receipt, a finished reviewer run after the last change, then <code>REVIEW: PASS</code> and <code>GATE: PASS</code>. Protected branches and destructive commands are refused.</p></div>
           <div class="role">hooks/</div>
         </div>
         <div class="row reveal" style="--c:var(--cyan)">
-          <div class="lead-c"><span class="marker"></span><code>Stop hook</code></div>
-          <div class="body"><h3>End-of-turn nudge</h3><p>Prints the loop after every turn, so the next move is always one keystroke away: <code>/spec · /braintrust · /gate · /qa · /ship</code>.</p></div>
-          <div class="role">settings</div>
+          <div class="lead-c"><span class="marker"></span><code>precommit-guard</code></div>
+          <div class="body"><h3>Secrets guard</h3><p>Denies a commit that carries a hardcoded secret (new files included), a credential file, or an AI-attribution line. Plain script, no AI, no delay.</p></div>
+          <div class="role">hooks/</div>
+        </div>
+        <div class="row reveal" style="--c:var(--pink)">
+          <div class="lead-c"><span class="marker"></span><code>stop-gate</code></div>
+          <div class="body"><h3>Definition-of-Done gate</h3><p>After a code change, missing, failed or pending verification blocks the turn once, then warns honestly. A dev server is not verification; a real test run is.</p></div>
+          <div class="role">hooks/</div>
+        </div>
+        <div class="row reveal" style="--c:var(--amber)">
+          <div class="lead-c"><span class="marker"></span><code>csharpier · session</code></div>
+          <div class="body"><h3>Format and state</h3><p>Unformatted or partly staged C# files cannot be committed. Every session starts by printing branch, ahead/behind, uncommitted count and PR state.</p></div>
+          <div class="role">hooks/</div>
         </div>
         <div class="row reveal" style="--c:var(--green)">
           <div class="lead-c"><span class="marker"></span><code>CLAUDE.md</code></div>
@@ -418,8 +423,8 @@
       <div class="get reveal">
         <div>
           <h2 id="get-h">Take the whole setup</h2>
-          <p>One zip with the rulebook, settings, all seven skills, and the secrets guard. Drop it into your <code>~/.claude</code> and re-login.</p>
-          <div class="files"><b>CLAUDE.md</b> · <b>settings.json</b> · <b>skills/</b> · <b>hooks/</b> · <b>README.md</b></div>
+          <p>One zip with the rulebook, settings, every skill, the pinned agents and all five guards with their tests. Drop it into your <code>~/.claude</code> and re-login.</p>
+          <div class="files"><b>CLAUDE.md</b> · <b>settings.json</b> · <b>skills/</b> · <b>hooks/</b> · <b>agents/</b> · <b>scripts/</b> · <b>README.md</b></div>
         </div>
         <a class="btn btn-primary" href="sanad.zip" download>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
@@ -436,7 +441,7 @@
       <img src="logo.png" alt="" />
       <span class="sig">Built and maintained by <b>Eng. Mohammed Almutairi</b> · <a href="https://developzone.net" target="_blank" rel="noopener noreferrer">Developzone.net</a></span>
     </div>
-    <span class="seq">plan → decide → build → polish → verify → qa → ship</span>
+    <span class="seq">understand → facts → design → build → review → gate → ship</span>
   </div>
 </footer>
 

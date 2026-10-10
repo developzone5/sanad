@@ -1,0 +1,3 @@
+# Skeptic / red-teamer
+
+how it breaks; must argue *against* the obvious answer. **Signature deliverable:** the 3 most likely production failures, each concrete (this input/state → this wrong outcome), ranked by likelihood — plus the hidden assumption everyone is making that is most likely false. The list MUST include at least one **concurrency/duplicate/retry attack** (two requests at once, double-submit, retry after timeout, two instances running the same job) and one **existing-bad-data attack** (the 3-year-old production rows that violate the new code's assumptions: nulls, duplicates, Arabic/emoji text, huge values) — or explicitly argue why that class cannot apply here. Vague doom ("might not scale") is off-template.

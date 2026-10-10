@@ -26,10 +26,10 @@ Chat is overhead. No recap, no tutorial output, no pasting PRODUCT / DESIGN bodi
 ## Start
 
 ```bash
-node .agents/skills/impeccable/scripts/live.mjs
+node C:/Users/Asus/.claude/skills/impeccable/scripts/live.mjs
 ```
 
-Output JSON: `{ ok, serverPort, serverToken, pageFiles, hasProduct, product, productPath, hasDesign, design, designPath, migrated }`. `pageFiles` is the list of HTML entries the live script was injected into. Keep PRODUCT.md and DESIGN.md in mind for variant generation — **DESIGN.md wins on visual decisions; PRODUCT.md wins on strategic/voice decisions.** If `migrated: true`, the loader auto-renamed legacy `.impeccable.md` to `PRODUCT.md`; mention this once and suggest `$impeccable document` for the matching DESIGN.md.
+Output JSON: `{ ok, serverPort, serverToken, pageFiles, hasProduct, product, productPath, hasDesign, design, designPath, migrated }`. `pageFiles` is the list of HTML entries the live script was injected into. Keep PRODUCT.md and DESIGN.md in mind for variant generation — **DESIGN.md wins on visual decisions; PRODUCT.md wins on strategic/voice decisions.** If `migrated: true`, the loader auto-renamed legacy `.impeccable.md` to `PRODUCT.md`; mention this once and suggest `/impeccable document` for the matching DESIGN.md.
 
 `serverPort` and `serverToken` belong to the small **Impeccable live helper** HTTP server (serves `/live.js`, SSE, and `/poll`). That port is **not** your dev server and is usually not the URL you open to view the app. The browser page is whatever origin serves one of the `pageFiles` entries (Vite / Next / Bun / tunnel / LAN hostname).
 
@@ -39,7 +39,7 @@ If output is `{ ok: false, error: "config_missing" | "config_invalid", path }`, 
 
 ```
 LOOP:
-  node .agents/skills/impeccable/scripts/live-poll.mjs   # default long timeout; no --timeout=
+  node C:/Users/Asus/.claude/skills/impeccable/scripts/live-poll.mjs   # default long timeout; no --timeout=
   Read JSON; dispatch on "type"
 
   "generate"  → Handle Generate; reply done; LOOP
@@ -74,7 +74,7 @@ Reading annotations precisely:
 ### 2. Wrap the element
 
 ```bash
-node .agents/skills/impeccable/scripts/live-wrap.mjs --id EVENT_ID --count EVENT_COUNT --element-id "ELEMENT_ID" --classes "class1,class2" --tag "div"
+node C:/Users/Asus/.claude/skills/impeccable/scripts/live-wrap.mjs --id EVENT_ID --count EVENT_COUNT --element-id "ELEMENT_ID" --classes "class1,class2" --tag "div"
 ```
 
 Flag mapping — keep them separate, don't collapse into `--query`:
@@ -239,7 +239,7 @@ The carbonize cleanup step (see below) reads that comment and bakes the chosen v
 ### 8. Signal done
 
 ```bash
-node .agents/skills/impeccable/scripts/live-poll.mjs --reply EVENT_ID done --file RELATIVE_PATH
+node C:/Users/Asus/.claude/skills/impeccable/scripts/live-poll.mjs --reply EVENT_ID done --file RELATIVE_PATH
 ```
 
 `RELATIVE_PATH` is relative to project root (`public/index.html`, `src/App.tsx`, etc.) — the browser fetches source directly if the dev server lacks HMR.
@@ -340,7 +340,7 @@ When the poll returns `exit`, proceed to cleanup. If the poll is still running a
 ## Cleanup
 
 ```bash
-node .agents/skills/impeccable/scripts/live-server.mjs stop
+node C:/Users/Asus/.claude/skills/impeccable/scripts/live-server.mjs stop
 ```
 
 Stops the HTTP server and runs `live-inject.mjs --remove` to strip `localhost:…/live.js` from the HTML entry. To stop the server but keep the inject tag (for a quick restart), use `stop --keep-inject`. `config.json` persists for future sessions.
@@ -426,7 +426,7 @@ If `config.cspChecked === true`, skip this entire section. You already asked thi
 Otherwise, run the detection helper:
 
 ```bash
-node .agents/skills/impeccable/scripts/detect-csp.mjs
+node C:/Users/Asus/.claude/skills/impeccable/scripts/detect-csp.mjs
 ```
 
 Output: `{ shape, signals }` where `shape` is one of `append-arrays`, `append-string`, `middleware`, `meta-tag`, or `null`. The shape is named by *patch mechanism*, so one template covers many frameworks.

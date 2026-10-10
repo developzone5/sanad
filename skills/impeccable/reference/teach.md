@@ -12,14 +12,14 @@ Every other impeccable command reads these files before doing any work.
 Run the shared loader first so you know what already exists:
 
 ```bash
-node .agents/skills/impeccable/scripts/load-context.mjs
+node C:/Users/Asus/.claude/skills/impeccable/scripts/load-context.mjs
 ```
 
 The output tells you whether PRODUCT.md and/or DESIGN.md already exist. If `migrated: true`, legacy `.impeccable.md` was auto-renamed to `PRODUCT.md`. Mention this once to the user.
 
 Decision tree:
 - **Neither file exists (empty project or no context yet)**: do Steps 2-4 (write PRODUCT.md), then decide on DESIGN.md based on whether there's code to analyze.
-- **PRODUCT.md exists, DESIGN.md missing**: skip to Step 5 — offer to run `$impeccable document` for DESIGN.md.
+- **PRODUCT.md exists, DESIGN.md missing**: skip to Step 5 — offer to run `/impeccable document` for DESIGN.md.
 - **PRODUCT.md exists but has no `## Register` section (legacy)**: add it. Infer a hypothesis from the codebase (see Step 2), confirm with the user, write the field.
 - **Both exist**: ask the user directly to clarify what you cannot infer. which to refresh. Skip the one the user doesn't want changed.
 - **Just DESIGN.md exists (unusual)**: do Steps 2-4 to produce PRODUCT.md.
@@ -113,14 +113,14 @@ Write to `PROJECT_ROOT/PRODUCT.md`. If `.impeccable.md` existed, the loader alre
 
 ## Step 5: Decide on DESIGN.md
 
-Offer `$impeccable document` either way. Two paths:
+Offer `/impeccable document` either way. Two paths:
 
 - **Code exists** (CSS tokens, components, a running site): "I can generate a DESIGN.md that captures your visual system (colors, typography, components) so variants stay on-brand. Want to do that now?"
 - **Pre-implementation** (empty project): "I can seed a starter DESIGN.md from five quick questions about color strategy, type direction, motion energy, and references. You can re-run once there's code, to capture the real tokens. Want to do that now?"
 
-If the user agrees, delegate to `$impeccable document` (it auto-detects scan vs seed). Load its reference and follow that flow.
+If the user agrees, delegate to `/impeccable document` (it auto-detects scan vs seed). Load its reference and follow that flow.
 
-If the user prefers to skip, mention they can run `$impeccable document` any time later.
+If the user prefers to skip, mention they can run `/impeccable document` any time later.
 
 ## Step 6: Confirm and wrap up
 
@@ -130,8 +130,8 @@ Summarize:
 - The 3-5 strategic principles from PRODUCT.md that will guide future work
 - If DESIGN.md is pending, remind the user how to generate it later
 
-**Critical: re-run the loader to refresh session context.** After writing PRODUCT.md, run `node .agents/skills/impeccable/scripts/load-context.mjs` one final time and let its full JSON output land in conversation. This ensures subsequent commands in this session use the freshly-written PRODUCT.md, not a stale earlier version.
+**Critical: re-run the loader to refresh session context.** After writing PRODUCT.md, run `node C:/Users/Asus/.claude/skills/impeccable/scripts/load-context.mjs` one final time and let its full JSON output land in conversation. This ensures subsequent commands in this session use the freshly-written PRODUCT.md, not a stale earlier version.
 
-If teach was invoked as a blocker by another impeccable command (e.g. the user ran `$impeccable polish` with no PRODUCT.md), resume that original task now with the fresh context.
+If teach was invoked as a blocker by another impeccable command (e.g. the user ran `/impeccable polish` with no PRODUCT.md), resume that original task now with the fresh context.
 
 Optionally ask the user directly to clarify what you cannot infer. whether they'd like a brief summary of PRODUCT.md appended to AGENTS.md for easier agent reference. If yes, append a short **Design Context** pointer section there.

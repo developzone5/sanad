@@ -1,9 +1,85 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "attribution": {
     "commit": "",
-    "pr": ""
+    "pr": "",
+    "sessionUrl": false
   },
-  "model": "opus",
+  "permissions": {
+    "allow": [
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git branch*)",
+      "Bash(git show*)",
+      "Bash(git blame*)",
+      "Bash(git add *)",
+      "Bash(git commit*)",
+      "Bash(git fetch*)",
+      "PowerShell(git add *)",
+      "PowerShell(git commit*)",
+      "PowerShell(git fetch*)",
+      "PowerShell(git status*)",
+      "PowerShell(git log*)",
+      "PowerShell(git diff*)",
+      "PowerShell(git branch*)",
+      "PowerShell(git show*)",
+      "PowerShell(git blame*)",
+      "PowerShell(Get-ChildItem*)",
+      "PowerShell(Get-Content*)",
+      "PowerShell(Test-Path*)",
+      "PowerShell(Get-Command*)",
+      "Bash(dotnet build*)",
+      "Bash(dotnet test*)",
+      "Bash(dotnet watch*)",
+      "Bash(dotnet run*)",
+      "Bash(dotnet ef*)",
+      "Bash(npm test*)",
+      "Bash(npm ci*)",
+      "Bash(pnpm *)",
+      "Bash(yarn *)",
+      "Bash(pytest*)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr list*)",
+      "Bash(gh pr checks*)",
+      "Bash(gh pr diff*)",
+      "Bash(gh run list*)",
+      "Bash(gh run view*)",
+      "Bash(gh repo view*)",
+      "PowerShell(dotnet build*)",
+      "PowerShell(dotnet test*)",
+      "PowerShell(dotnet watch*)",
+      "PowerShell(dotnet run*)",
+      "PowerShell(dotnet ef*)",
+      "PowerShell(npm test*)",
+      "PowerShell(npm ci*)",
+      "PowerShell(pnpm *)",
+      "PowerShell(yarn *)",
+      "PowerShell(pytest*)",
+      "PowerShell(gh pr view*)",
+      "PowerShell(gh pr list*)",
+      "PowerShell(gh pr checks*)",
+      "PowerShell(gh pr diff*)",
+      "PowerShell(gh run list*)",
+      "PowerShell(gh run view*)",
+      "PowerShell(gh repo view*)",
+      "Read(~/.claude/codex-reviews/**)"
+    ],
+    "deny": [
+      "Bash(gh pr merge*)",
+      "PowerShell(gh pr merge*)",
+      "Bash(gh release create*)",
+      "PowerShell(gh release create*)",
+      "Bash(git add .)",
+      "PowerShell(git add .)",
+      "Bash(git add -A*)",
+      "PowerShell(git add -A*)"
+    ],
+    "ask": [
+      "Bash(git push*)",
+      "PowerShell(git push*)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -12,10 +88,63 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["C:\\Users\\Asus\\.claude\\hooks\\precommit-guard.js"],
-            "if": "Bash(git *)",
-            "timeout": 15,
-            "statusMessage": "Scanning commit/push for secrets + AI attribution..."
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\policy-guard.js"
+            ],
+            "timeout": 25,
+            "statusMessage": "policy-guard: checking the command against CLAUDE.md rules..."
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\precommit-guard.js"
+            ],
+            "timeout": 30,
+            "statusMessage": "precommit-guard: scanning any commit/push for secrets + AI attribution..."
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\csharpier-guard.js"
+            ],
+            "if": "Bash(git*)",
+            "timeout": 90,
+            "statusMessage": "Checking CSharpier formatting on the .cs files in this commit/push..."
+          }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\policy-guard.js"
+            ],
+            "timeout": 25,
+            "statusMessage": "policy-guard: checking the command against CLAUDE.md rules..."
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\precommit-guard.js"
+            ],
+            "timeout": 30,
+            "statusMessage": "precommit-guard: scanning any commit/push for secrets + AI attribution..."
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\csharpier-guard.js"
+            ],
+            "if": "PowerShell(git*)",
+            "timeout": 90,
+            "statusMessage": "Checking CSharpier formatting on the .cs files in this commit/push..."
           }
         ]
       }
@@ -25,12 +154,44 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node -e \"console.log(JSON.stringify({systemMessage:'Done? /spec (plan) | /braintrust (decide) | /gate (verify) | /qa (human test) | /ship (push)'}))\"",
-            "timeout": 10
+            "command": "node",
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\stop-gate.js"
+            ],
+            "timeout": 20,
+            "statusMessage": "Checking Definition-of-Done gate..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\session-start.js"
+            ],
+            "timeout": 45,
+            "statusMessage": "Reading git/PR state..."
           }
         ]
       }
     ]
+  },
+  "outputStyle": "Concise",
+  "effortLevel": "medium",
+  "modelSettings": {
+    "claude-fable-5-1": {
+      "effortLevel": "xhigh"
+    },
+    "claude-opus-5": {
+      "effortLevel": "medium"
+    },
+    "claude-opus-5-5": {
+      "effortLevel": "xhigh"
+    }
   },
   "autoUpdatesChannel": "latest",
   "skipWorkflowUsageWarning": true
