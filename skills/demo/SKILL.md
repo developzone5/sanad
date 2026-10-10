@@ -2,6 +2,7 @@
 name: demo
 description: Interactive, screen-shareable walkthrough of the Sanad framework. Shows a numbered menu of the skills; the user picks one and you render a short description plus a realistic example of what running it looks like, one card at a time. Presentation only — never create files, spawn agents, run git, or open PRs. Use when the user types /demo or wants to show/explain Sanad to a group.
 disable-model-invocation: true
+argument-hint: "[all | card number or skill name]"
 ---
 
 <!-- Author: Eng. Mohammed Almutairi - Developzone.net -->
@@ -10,19 +11,35 @@ disable-model-invocation: true
 
 A paced, interactive tour to **show people what Sanad is and what each skill looks like**. The user drives it: print the menu, they pick a card, you render that card, then offer the next.
 
-**This is a presentation, NOT a run.** Do not create files, spawn subagents, run git, or open PRs. Every "How it looks" block below is an illustration — render it verbatim. Never claim a real build/test/PR happened; if asked to run something for real, point them at the actual skill (`/spec`, `/gate`, …) instead.
+**This is a presentation, NOT a run.** Make no tool calls: do not create files, spawn subagents, run git or shell commands, or open PRs. Every "How it looks" block below is a scripted illustration — render it verbatim. Never claim a real build/test/PR happened; if asked to run something for real, point them at the actual skill (`/spec`, `/gate`, …) instead.
+
+Loop order: **spec → braintrust → gate → ship**. **`/sanad`** (card 0) runs the whole loop on one task in a single command.
 
 ## How to run it
 
 1. Print the **Intro + menu** (below). Keep it tight.
-2. **Wait** for the user to pick a number or skill name. Do not dump all cards at once.
-3. Render the matching **card** exactly as scripted — box, short description, "How it looks", one-line takeaway (`→`).
-4. After each card, offer the next step in one line: `next` (next link in loop order), a number/name to jump, or `menu`.
-5. **One card per message** — screen-share friendly. Hold the *delete-your-own-comment* example as the through-line across the five loop cards so it tells one continuous story.
-6. `/demo all` → render cards 1→5 in order, then the outro. `/demo <n>` or `/demo <name>` → jump straight to that card.
-7. After card 5 (`/ship`), show the **Outro**.
+2. **Wait** for the user to pick a number or skill name. Never dump all cards at once.
+3. Render the matching **card** exactly as scripted — box, "How it looks", one-line takeaway (`→`).
+4. After each card, offer the next step in one line: `next`, a number/name to jump, or `menu`.
+   - `next` after cards 0–3 → the next card in loop order.
+   - `next` after card 4 (`/ship`) → the **Outro**.
+5. Always close the tour on the **Outro** — it is the call to action, whether they walked 1→4 or jumped around.
 
-Loop order: **spec → braintrust → gate → qa → ship**. Helpers: **impeccable**, **full-output-enforcement**.
+Arguments:
+
+- `/demo` → intro + menu, then wait.
+- `/demo all` → the full deck in one response: cards 0→4 in order, then the Outro. This is the one exception to one-card-per-message — use it for a handout or scroll-through, not a live tour.
+- `/demo <n>` or `/demo <name>` → jump straight to that card. Partial names count: `brain` → card 2.
+- Anything unrecognized → one line ("Didn't catch that — pick a number.") and reprint the menu.
+
+## Presentation rules
+
+- **One card per message** (except `/demo all`) — screen-share friendly; the audience reads at talking pace.
+- **Cards render inside a fenced code block, byte-for-byte.** The boxes are hand-aligned for a monospace font — never reflow, translate, or decorate them; add no emoji or commentary inside the fence.
+- The **delete-your-own-comment** example is the through-line of the four loop cards — one continuous story: card 1 specs it, 2 decides it, 3 proves it, 4 ships it. Point that out as you go.
+- Questions mid-tour: answer in one or two lines, then re-offer `next | menu`.
+- Narrate around the cards in the audience's language (Arabic or English); the cards themselves stay verbatim.
+- Never fake a "live" run to impress the room — an invented pass is exactly what Sanad exists to prevent. If someone asks whether the output is real, say it is a scripted illustration and point them at the real skill to try afterwards.
 
 ---
 
@@ -32,14 +49,11 @@ Loop order: **spec → braintrust → gate → qa → ship**. Helpers: **impecca
   سند SANAD — the loop. each card = one link in the chain.
   nothing ships until every link is checked.
 
+   0  /sanad       one task → the whole loop
    1  /spec        plan it → one saved file
    2  /braintrust  many helpers → one answer
    3  /gate        prove it builds and passes
-   4  /qa          test it like a real user
-   5  /ship        explain it → draft PR (staging only)
-   ─ helpers ─
-   6  impeccable               make the UI look good
-   7  full-output-enforcement  full code, no “…/TODO”
+   4  /ship        explain it → draft PR (never prod)
 ```
 
 Then ask: *“Pick a number (or say `all`).”*
@@ -48,13 +62,36 @@ Then ask: *“Pick a number (or say `all`).”*
 
 ## Cards
 
+### 0 · /sanad — run the loop
+
+```
+┌─ 0 · /sanad — run the loop ──────────────────────┐
+│ Hand it one task. It runs the whole chain:       │
+│ decide → build → prove → ask before the push.    │
+└──────────────────────────────────────────────────┘
+```
+
+**How it looks** — you type: `/sanad let users delete their own comment`
+
+```
+  ▸ db impact?    yes — new column + hot query    (DB optimizer seated)
+  ▸ /braintrust   → soft-delete + tombstone; index the filter column
+  ▸ build         → migration + endpoint + tests
+  ▸ /gate         → build clean · 5/5 tests · IDOR 404 · index proven
+  ▸ ship?         → brief printed…  Approve the push?  ▌
+```
+
+→ one command runs every link — and the push still waits for you.
+
+---
+
 ### 1 · /spec — plan
 
 ```
-┌─ 1 · /spec — plan ──────────────────────────────┐
+┌─ 1 · /spec — plan ───────────────────────────────┐
 │ Save the plan and choices in ONE file,           │
 │ kept with the code. Next time you don't          │
-│ have to remember any of it.                       │
+│ have to remember any of it.                      │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -90,7 +127,7 @@ Then ask: *“Pick a number (or say `all`).”*
 ### 2 · /braintrust — decide
 
 ```
-┌─ 2 · /braintrust — decide ──────────────────────┐
+┌─ 2 · /braintrust — decide ───────────────────────┐
 │ A few Claude helpers argue, each from a          │
 │ different view. Then ONE clear answer.           │
 └──────────────────────────────────────────────────┘
@@ -117,7 +154,7 @@ Then ask: *“Pick a number (or say `all`).”*
 ### 3 · /gate — verify
 
 ```
-┌─ 3 · /gate — verify ────────────────────────────┐
+┌─ 3 · /gate — verify ─────────────────────────────┐
 │ Run the full check. Show the real output —       │
 │ never a guessed pass. No output = no claim.      │
 └──────────────────────────────────────────────────┘
@@ -139,36 +176,10 @@ Then ask: *“Pick a number (or say `all`).”*
 
 ---
 
-### 4 · /qa — human test
+### 4 · /ship — push
 
 ```
-┌─ 4 · /qa — human test ──────────────────────────┐
-│ Stop being the coder. Be a picky user on         │
-│ the live app. Ends in Ship / Don't ship.         │
-└──────────────────────────────────────────────────┘
-```
-
-**How it looks** — you type: `/qa`
-
-```
-  SHIP / DON'T SHIP  →  SHIP ✅
-
-  Tested as a user (not a fixture):
-   • Delete my comment → gone, shows “[deleted]”.       ✓
-   • Delete it again   → already gone, no error.         ✓
-   • Try another user's comment → blocked, 404.          ✓
-   • Tamper the id in the request → still 404.           ✓
-  Defects: none blocking.   Polish: add an “Undo” toast.
-```
-
-→ a real person says it's good. Passing gate + bad QA = no ship.
-
----
-
-### 5 · /ship — push
-
-```
-┌─ 5 · /ship — push ──────────────────────────────┐
+┌─ 4 · /ship — push ───────────────────────────────┐
 │ Explain the change, then open a DRAFT PR         │
 │ to staging. Never main/prod. Asks first.         │
 └──────────────────────────────────────────────────┘
@@ -190,63 +201,17 @@ Then ask: *“Pick a number (or say `all`).”*
 
 ---
 
-### 6 · impeccable — frontend polish
-
-```
-┌─ 6 · impeccable — frontend polish ──────────────┐
-│ Check and polish the UI — layout, text,          │
-│ color, motion, access, RTL. Looks, not logic.    │
-└──────────────────────────────────────────────────┘
-```
-
-**How it looks** — pointed at the comment thread:
-
-```
-  Audit ▸ 6 findings
-   ✗ Delete button + timestamp misaligned (8px drift)
-   ✗ “[deleted]” tombstone grey-on-grey — fails contrast (2.9:1)
-   ✗ No confirm or undo → accidental deletes are permanent
-   ✓ Fix: align baseline, AA contrast, confirm + undo toast
-   ↻ RTL checked: action menu mirrors, the timestamp stays LTR
-```
-
-→ turns “it works” into “it feels right” — the look-and-feel layer.
-
----
-
-### 7 · full-output-enforcement — complete code
-
-```
-┌─ 7 · full-output-enforcement — complete code ───┐
-│ No “… rest unchanged”, no TODO, no half-code.    │
-│ Whole file, ready to paste. For big files.       │
-└──────────────────────────────────────────────────┘
-```
-
-**How it looks** — applied to a long file:
-
-```
-  ✗ banned   // ... existing code ...
-  ✗ banned   throw new NotImplementedException();
-  ✓ emits    the complete method / file, every line
-  ✓ too long → clean split: “part 1/2” + the exact resume point
-```
-
-→ when you need the real, full code — not an outline you finish.
-
----
-
 ## Outro
 
 ```
-  That's the chain:  plan → decide → check → user-test → push.
+  That's the chain:  plan → decide → check → push.
   every link checked → it ships.  one bad link → it stops.
 
   try it on your own change:
+    /sanad       one task → the whole loop, end to end
     /spec        plan a feature that spans sessions
     /braintrust  "<your hard design question>"
     /gate        prove the change works
-    /qa          test it like a user
     /ship        explain it → DRAFT PR to staging
 
   under it all: CLAUDE.md — the always-on senior-engineer rulebook.

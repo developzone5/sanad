@@ -2,7 +2,7 @@ Shape the UX and UI for a feature before any code is written. This command produ
 
 **Scope**: Design planning only. This command does NOT write code. It produces the thinking that makes code good.
 
-**Output**: A design brief that can be handed off to $impeccable craft, or directly to $impeccable for freeform implementation. When visual direction probes are used, the images are supporting artifacts, not the primary output.
+**Output**: A design brief that can be handed off to /impeccable craft, or directly to /impeccable for freeform implementation. When visual direction probes are used, the images are supporting artifacts, not the primary output.
 
 ## Philosophy
 
@@ -133,4 +133,4 @@ Anything unresolved that the implementer should resolve during build.
 
 ask the user directly to clarify what you cannot infer. Get explicit confirmation of the brief before finishing. If the user disagrees with any part, revisit the relevant discovery questions.
 
-Once confirmed, the brief is complete. The user can now hand it to $impeccable, or use it to guide any other implementation approach. (If the user wants the full discovery-then-build flow in one step, they should use $impeccable craft instead, which runs this command internally.)
+Once confirmed, the brief is complete. The user can now hand it to /impeccable, or use it to guide any other implementation approach. (If the user wants the full discovery-then-build flow in one step, they should use /impeccable craft instead, which runs this command internally.)

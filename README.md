@@ -1,6 +1,6 @@
 # Sanad سند
 
-**A professional engineering framework for Claude Code** — an always-on rulebook plus a gated loop (`spec → braintrust → gate → qa → ship`) where nothing ships without proof.
+**A professional engineering framework for Claude Code** — an always-on rulebook plus one gated task loop (`/sanad`: understand → check facts → design → build and prove → independent review → gate → ship) where nothing ships without proof.
 
 > *Sanad* (سند) — the verified chain that authenticates a narration; nothing is accepted until the chain is unbroken. Same idea, applied to code.
 
@@ -12,17 +12,47 @@ Portable copy of my global Claude Code config. Move this whole folder to a new P
 
 ## Install on a new PC
 
-1. Install Claude Code.
+1. Install Claude Code and Node.js (the hooks and tests run on Node).
 2. Copy these into `%USERPROFILE%\.claude\` (create the folder if missing), overwriting:
    - `CLAUDE.md`      → my global engineering rules (senior backend bar, security gate, Definition of Done, git/PR flow)
-   - `settings.json`  → model (opus) and hooks
-   - `skills\`        → my custom skills (see below)
-   - `hooks\`         → the pre-commit/push secrets guard (see Hooks below)
-3. **Fix the hook path for this PC.** `settings.json` points the guard at an absolute path:
-   `C:\Users\Asus\.claude\hooks\precommit-guard.js`. If your Windows username isn't `Asus`,
-   edit that path in `settings.json`. (If it's wrong the guard just no-ops — it never blocks you.)
+   - `settings.json`  → models, effort per model, permissions and the hooks
+   - `skills\`        → the skills (see below)
+   - `hooks\`         → the deterministic guards (see Hooks below)
+   - `agents\`        → the pinned reviewer / expert / worker agent types (see Models below)
+   - `scripts\workflow-install.sh` → installs a tested change to this workflow as one versioned release
+3. **Fix the hook paths for this PC.** `settings.json` points every hook at an absolute path under
+   `C:\Users\Asus\.claude\hooks\`. If your Windows username isn't `Asus`, edit those paths.
 4. Run `claude` and **log in** — credentials are NOT in this bundle (security); re-authenticate.
 5. Restart Claude so skills + hooks load. Verify with `/help` and `/hooks`.
+6. Prove the guards work on your machine:
+
+```
+cd %USERPROFILE%\.claude\hooks\tests && node --test
+cd %USERPROFILE%\.claude\skills\gate\tests && node --test
+```
+
+---
+
+## The loop — `/sanad`
+
+Every request enters `/sanad`. It first decides what kind of request it is:
+
+- **Teaching / explanation** → answered directly. No build, no panel.
+- **Check my work** → the smallest relevant check, and an honest "what is still unverified".
+- **Implement / fix** → routed before any edit. Clearly bounded work is self-routed (`direct` or `review`); uncertain or sensitive work goes to a routing boss that picks `review` or a `braintrust` panel.
+
+A substantive implementation then runs six steps, each with one exit rule:
+
+| Step | Name | Exit rule |
+|---|---|---|
+| 1 | Understand | `Done means`: 3–8 checkable results, including what must NOT change |
+| 2 | Check the facts | every outside fact proven with a real sample, or listed as an open assumption |
+| 3 | Design | the smallest change that meets `Done means`, plus the touch list |
+| 4 | Build and prove | red before green for a bug; real output for every claim |
+| 5 | Independent review | one fresh read-only reviewer on frozen source → `REVIEW: PASS` |
+| 6 | Gate and ship | `/gate` once on the final source → `GATE: PASS`, then the ship brief and the explicit yes |
+
+The chat shows one `▸ stage: verdict` line per stage, a braintrust result of at most 6 short lines, and a final ship brief under 12 lines. Full evidence is kept and shown only when asked.
 
 ---
 
@@ -30,45 +60,67 @@ Portable copy of my global Claude Code config. Move this whole folder to a new P
 
 | Skill | Invoke | What it does |
 |---|---|---|
-| **spec** | `/spec` | Creates/updates one lean, committed spec file per feature (goal, decisions, plan/checklist, risks, running log) for work that spans multiple sessions. Manual-only. |
-| **braintrust** | `/braintrust <question>` | Convenes 3–5 independent Claude advisors (Pragmatist, Architect, Skeptic, Performance, Product) who each argue their own lens, then I synthesize **one decisive recommendation** with attribution. Claude-only — no external models/keys. Effort dial `low→max` scales advisors (2→5) and depth; advisors run Sonnet at low/medium, Opus at high/max. |
-| **gate** | `/gate` | Runs my Definition-of-Done + security gate from CLAUDE.md against the current change — builds, tests, red-teams, security-checks — with **real quoted command output**. The automated proof. |
-| **qa** | `/qa` | The **human-QA gate** after `/gate`: stop being the author, become a skeptical tester in front of the running change. Exploratory user testing, acceptance-criteria check, usability/UX feel, regression by feel — degrades to API/job/data QA when there's no UI. Ends in a **Ship / Don't ship** verdict. Gate proves the code is *correct*; qa judges whether the fix is *actually good*. |
-| **ship** | `/ship` | Teach-back brief (what changed + why + proof + blast radius), then push to **staging** and open a **DRAFT PR**. Never main/master/prod. Stops for my approval before pushing. |
-| **full-output-enforcement** | (applied to a task) | Forces complete, unabridged code output — bans `// ...`, `TODO`, placeholder elisions; handles token-limit splits cleanly. Use when I need exhaustive, copy-paste-ready output. |
-| **impeccable** | (frontend tasks) | Frontend UI work: design, redesign, audit, critique, polish — layout, typography, color, motion, accessibility, responsive, RTL, design systems. Fits my Tailwind/Alpine/Razor frontend. |
-| **demo** | `/demo` | A paced, screen-share-friendly **walkthrough** of Sanad. Prints a menu, then renders one card per skill on request (`spec → braintrust → gate → qa → ship`, plus the helpers), each with a short description and an illustrative example. A guided tour for showing people what the loop is — **not a real run**: it never builds, tests, commits, or opens PRs. `/demo all` plays every card in order; `/demo <n>` jumps to one. |
+| **sanad** | automatic / `/sanad` | The entry point for every request. Routes it, then runs the loop above for real implementation. |
+| **sanad-implementation** | internal | The xhigh-effort implementation stage Sanad switches into after routing. Not user-invocable. |
+| **braintrust** | `/braintrust <question>` | Seats 2–6 independent Claude specialists for the open questions (Pragmatist, Architect, Skeptic, Performance, Product advocate, Database optimizer, Security auditor, Authenticity reviewer), then a separate boss reviews every report and gives **one evidence-backed recommendation**. Claude-only, no API keys. Effort dial `low→max` caps the room. |
+| **gate** | `/gate` | Runs the Definition-of-Done + security gate against the current change — build, tests, red-team, security checklist — with **real quoted command output**. Ends in `GATE: PASS` or `GATE: FAIL`. |
+| **ship** | `/ship` | Teach-back brief (what & why / proof / risk / left / target), then publishes the branch to the **integration branch** as a **DRAFT PR**. Never main/master/prod. Stops for the explicit yes first. Also owns PR review and promotion (cherry-pick) rules. |
+| **spec** | `/spec` | One lean, committed spec file per multi-session feature (goal, decisions, plan, risks, log). Manual-only. |
+| **worktree** | `/worktree` | A parallel git worktree with its own branch, so a second session can work a second track. |
+| **demo** | `/demo` | A paced, screen-share walkthrough of the loop (`/sanad → /spec → /braintrust → /gate → /ship`). Presentation only — never builds, tests, commits or opens PRs. |
+| **full-output-enforcement** | (applied to a task) | Forces complete, unabridged code output — bans `// ...`, `TODO`, placeholder elisions. |
+| **impeccable** | (frontend tasks) | Frontend UI work: design, redesign, audit, critique, polish — layout, typography, color, motion, accessibility, responsive, RTL. |
 
 ---
 
-## The workflow (how they fit together)
+## Models — each in its strength
 
-1. **Plan** multi-session feature work → `/spec` (durable spec committed with the code).
-2. **Decide** a hard design/architecture fork → `/braintrust` (advisor panel → one call).
-3. **Build** to the senior backend bar in `CLAUDE.md` (correctness, concurrency, security, EF/migrations).
-4. **Frontend polish** when a view needs it → `impeccable`; need complete code → `full-output-enforcement`.
-5. **Verify** the code is correct → `/gate` (proof, not claims).
-6. **QA as a human** the fix is actually good → `/qa` (Ship / Don't ship; a green gate with a failing qa still doesn't ship).
-7. **Ship** → `/ship` (teach-back, then DRAFT PR to **staging** — never prod; I approve the push).
+| Role | Model | Agent type (`agents\`) |
+|---|---|---|
+| Routing boss / braintrust final reviewer | Fable 5.1, xhigh | `routing-boss` (read-only; judges, never writes code) |
+| Main worker (all behavior code) | Opus 5.5 | the main session |
+| Deep-risk braintrust seats | Opus 5.5, xhigh | `braintrust-expert` (read-only) |
+| Practical braintrust seats | Sonnet 5.5, xhigh | `braintrust-expert-sonnet` (read-only) |
+| Independent reviewer, sensitive change | Opus 5.5, xhigh | `independent-reviewer` (read-only) |
+| Independent reviewer, routine change | Sonnet 5.5, xhigh | `routine-reviewer` (read-only; can `ESCALATE` to Opus) |
+| Mechanical edits + evidence chores | Sonnet 5.5, medium | `sonnet-worker` |
 
-`CLAUDE.md` is the always-on rulebook; the skills are the on-demand steps of the loop. The chain — and the Stop-hook nudge — reads:
-`/spec (plan) · /braintrust (decide) · /gate (verify) · /qa (human test) · /ship (push)`.
+Haiku is not used. The main session is the only editor of behavior code; reviewers advise.
+
+---
+
+## Hooks — the gate is automatic
+
+All deterministic Node scripts under `hooks\`, wired in `settings.json`. Fix the cause when one fires; never bypass it.
+
+- **`policy-guard.js`** (PreToolUse, Bash + PowerShell) — branch, destructive-action and publishing controls. Publishing needs completed passing verification, a source-bound evidence receipt, a completed reviewer run after the last change, then `REVIEW: PASS` and `GATE: PASS`.
+- **`precommit-guard.js`** (PreToolUse) — denies a commit or publish carrying a secret (new files included), a credential file or AI attribution.
+- **`csharpier-guard.js`** (PreToolUse) — denies a commit with unformatted or partly staged `.cs` files.
+- **`stop-gate.js`** (Stop) — after a code change, missing/failed/pending verification blocks once, then warns honestly.
+- **`session-start.js`** (SessionStart) — prints branch, ahead/behind, uncommitted count and PR state.
+- **`hooks\lib\`** — shared helpers (shell command parsing, transcript scan, verification target). **`hooks\tests\`** — the suite (`node --test`).
+
+Evidence helper: `skills\gate\scripts\evidence.mjs` records a real command run as the receipt the publishing guard checks.
+
+---
+
+## Changing the workflow itself
+
+Workflow edits (skills, hooks, `CLAUDE.md`, settings, agents) ship as a release, not an in-place edit:
+
+```
+bash ~/.claude/scripts/workflow-install.sh <candidate> <base> <release-name>
+```
+
+It checks for drift, backs up every replaced file to `backups\<release-name>\`, installs, runs both test suites and appends one line to `backups\RELEASES.md`.
 
 ---
 
 ## Deliberately NOT included
 
 - `.credentials.json` — auth token (a secret; never copy it around — re-login instead)
-- `settings.local.json` — removed (machine-local permission overrides; not needed)
-- caches, `history.jsonl`, `sessions/`, `projects/`, `telemetry/`, `daemon/`, `shell-snapshots/`
-- third-party plugins (none enabled — this setup is plugin-free)
-- per-project `memory/` (lives under each project, tied to that project's path)
-
----
-
-## Hooks
-
-- **`hooks\precommit-guard.js`** (PreToolUse) — a deterministic, fail-open guard. It only inspects `git commit` / `git push` and **blocks** the command if the change carries a hardcoded secret (private key, AWS key, connection-string password, a long quoted secret/API key), a staged `.env` file, or AI attribution (`Co-Authored-By: Claude` / "Generated with Claude Code"). Anything else → it does nothing. No LLM calls, so it adds no latency tax and can't wrongly block your shell (any error → it allows).
-- **Stop hook** — prints the end-of-turn reminder: `Done? /spec (plan) | /braintrust (decide) | /gate (verify) | /qa (human test) | /ship (push)`.
-
-> History note: earlier this config had LLM prompt-hooks that fired a review on *every* Bash/Edit command (an `if`-scoping quirk). They were replaced by the single deterministic guard above — same protection that matters most, none of the over-firing. Deep reviews stay on-demand via `/gate`, `/code-review`, `/security-review`.
+- `settings.local.json` — machine-local permission overrides
+- the `autoMode.environment` block of `settings.json` — describes my private repos and hosts
+- caches, `history.jsonl`, `sessions/`, `projects/`, `telemetry/`, `shell-snapshots/`, `backups/`
+- per-project `memory/` and project-specific scripts (they live under each project)
+- third-party plugins and synced marketplace skills

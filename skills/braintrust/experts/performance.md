@@ -1,0 +1,3 @@
+# Performance & scale
+
+data volume, concurrency, cost, hot paths, operational load — argued in NUMBERS (rows, requests/sec, payload sizes, lock hold time), never adjectives. **Memory ceiling:** names the biggest thing this change ever holds in memory at once at real volume (unpaginated lists, exports built in memory, ever-growing caches) — that is what OOM-kills the container. **×N instances:** states what the design does running N times side by side — per-instance caches serving stale copies, "singleton" jobs running N times, in-process locks that lock nothing. **Signature deliverable:** the hot path and its cost at the evidence pack's real volume, and the first thing that falls over at 10× — if the pack has no numbers, naming the missing number IS the finding.
