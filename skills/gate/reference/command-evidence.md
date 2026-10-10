@@ -29,7 +29,7 @@ default per-stream ceiling; exceeding it fails the check instead of certifying
 truncated evidence. Summarize the saved logs only after collecting completion.
 
 ```powershell
-node C:/Users/Asus/.claude/skills/gate/scripts/evidence.mjs --spec "C:/Users/Asus/AppData/Local/Temp/gate-check.json"
+node ~/.claude/skills/gate/scripts/evidence.mjs --spec "<absolute path to>/gate-check.json"
 ```
 
 The Stop/push scanner recognizes the installed helper's standalone completion

@@ -8,8 +8,10 @@ const staged = path.resolve(__dirname, '../../..');
 const candidate = fs.existsSync(path.join(staged, 'claude/skills/sanad/SKILL.md'));
 const canonicalRoot = candidate ? path.join(staged, 'claude/skills') : path.join(os.homedir(), '.claude/skills');
 const entryRoot = candidate ? path.join(staged, 'agents/skills') : path.join(os.homedir(), '.agents/skills');
+// The Codex mirror is optional and machine-local; without it these two tests have nothing to compare.
+const noMirror = fs.existsSync(entryRoot) ? false : 'Codex mirror (' + entryRoot + ') is not installed on this machine';
 
-test('Codex workflow entrypoints resolve to one current canonical procedure', () => {
+test('Codex workflow entrypoints resolve to one current canonical procedure', { skip: noMirror }, () => {
   for (const name of ['sanad', 'braintrust', 'gate', 'ship', 'spec']) {
     const canonical = fs.readFileSync(path.join(canonicalRoot, name, 'SKILL.md'), 'utf8');
     const entry = fs.readFileSync(path.join(entryRoot, name, 'SKILL.md'), 'utf8');
@@ -20,7 +22,7 @@ test('Codex workflow entrypoints resolve to one current canonical procedure', ()
     assert.doesNotMatch(entry, /## Step |## Flow|## Template|built-in \*\*`\/verify`/);
   }
 });
-test('the security checklist entrypoint resolves to the canonical checklist', () => {
+test('the security checklist entrypoint resolves to the canonical checklist', { skip: noMirror }, () => {
   const entry = fs.readFileSync(path.join(entryRoot, 'gate/security-checklist.md'), 'utf8');
   assert.ok(entry.includes('C:/Users/Asus/.claude/skills/gate/security-checklist.md'));
   assert.match(fs.readFileSync(path.join(canonicalRoot, 'gate/security-checklist.md'), 'utf8'), /Access control/);

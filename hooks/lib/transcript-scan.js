@@ -353,8 +353,9 @@ function verificationResult(block, entry) {
 
 function isEvidenceCommand(segment) {
   const words = tokenize(segment);
+  // The installed helper lives under some user's .claude folder; any other evidence.mjs is a stray script.
   return words.length === 4 && /^node(?:\.exe)?$/i.test((words[0] || '').split(/[\\/]/).pop()) &&
-    words[1].replace(/\\/g, '/').toLowerCase() === 'c:/users/asus/.claude/skills/gate/scripts/evidence.mjs' && words[2] === '--spec';
+    /(?:^|\/)\.claude\/skills\/gate\/scripts\/evidence\.mjs$/i.test((words[1] || '').replace(/\\/g, '/')) && words[2] === '--spec';
 }
 
 function checkReceipt(block, entry) {

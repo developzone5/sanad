@@ -24,8 +24,9 @@ test('native Node package entrypoints are recognized without accepting arbitrary
   assert.equal(scan.segmentIsVerify(quote([process.execPath, '-e', 'process.exit(0)', 'run', 'check'])), false);
 });
 
-test('installed native TypeScript and npm runners produce usable source-bound receipts', async t => {
-  assert.ok(fs.existsSync(tsc), 'Installed frontend TypeScript runner is required.');
+// Needs a real TypeScript install; point WORKFLOW_TYPESCRIPT_RUNNER at <any>/node_modules/typescript/bin/tsc.
+const noTsc = fs.existsSync(tsc) ? false : 'no TypeScript runner at ' + tsc + ' (set WORKFLOW_TYPESCRIPT_RUNNER)';
+test('installed native TypeScript and npm runners produce usable source-bound receipts', { skip: noTsc }, async t => {
   assert.ok(fs.existsSync(npm), 'Installed npm Node entrypoint is required.');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'native-runner-proof-'));
   const repo = path.join(scratch, 'project with spaces');

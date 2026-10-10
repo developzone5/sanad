@@ -120,10 +120,10 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000) throw new Error('Timeout must be 1..3600000 ms.');
   fs.mkdirSync(outputRoot, { recursive: true });
   let source = null, sourceFailure = null, toplevel;
-  try { toplevel = fs.realpathSync(sourceGit(cwd, ['rev-parse', '--show-toplevel'])); }
+  try { toplevel = fs.realpathSync.native(sourceGit(cwd, ['rev-parse', '--show-toplevel'])); }
   catch { sourceFailure = 'Cannot bind source: cwd is not an accessible Git repository.'; }
   if (toplevel) {
-    const relative = path.relative(toplevel, fs.realpathSync(outputRoot));
+    const relative = path.relative(toplevel, fs.realpathSync.native(outputRoot));
     if (relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))) throw new Error('Evidence output must be outside the source repository.');
     try { source = { toplevel, treeBefore: sourceTree(toplevel), treeAfter: null }; }
     catch { sourceFailure = 'Cannot capture the Git source tree before verification.'; }
@@ -131,7 +131,7 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
   const runDir = fs.mkdtempSync(path.join(outputRoot, 'check-'));
   const stdout = evidenceLog(path.join(runDir, 'stdout.log'), { maxBytes, secrets });
   const stderr = evidenceLog(path.join(runDir, 'stderr.log'), { maxBytes, secrets });
-  const receipt = { runId: crypto.randomUUID(), executable: redact(executable, secrets), args: args.map(a => redact(a, secrets)), cwd: fs.realpathSync(cwd), source, startedAt: new Date().toISOString(), status: 'running' };
+  const receipt = { runId: crypto.randomUUID(), executable: redact(executable, secrets), args: args.map(a => redact(a, secrets)), cwd: fs.realpathSync.native(cwd), source, startedAt: new Date().toISOString(), status: 'running' };
   fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
   const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let failure = null, fallback;
@@ -156,7 +156,7 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
   stdout.close(); stderr.close();
   if (source) {
     try {
-      if (fs.realpathSync(sourceGit(cwd, ['rev-parse', '--show-toplevel'])) !== source.toplevel) throw new Error('Repository changed.');
+      if (fs.realpathSync.native(sourceGit(cwd, ['rev-parse', '--show-toplevel'])) !== source.toplevel) throw new Error('Repository changed.');
       source.treeAfter = sourceTree(source.toplevel);
       if (source.treeBefore !== source.treeAfter) sourceFailure = 'Verified source changed while the command was running.';
     } catch { sourceFailure = 'Cannot capture the Git source tree after verification.'; }

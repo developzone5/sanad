@@ -19,7 +19,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
   <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-skills%20%7C%20agents%20%7C%20hooks-7c3aed.svg" />
-  <img alt="Tests" src="https://img.shields.io/badge/tests-175%20passing-brightgreen.svg" />
+  <a href="https://github.com/developzone5/sanad/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/developzone5/sanad/actions/workflows/tests.yml/badge.svg" /></a>
   <a href="https://github.com/developzone5/sanad/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/developzone5/sanad?style=flat" /></a>
 </p>
 
@@ -217,7 +217,7 @@ A plugin does not load `CLAUDE.md` as context or apply model effort settings, an
 
 ## Contributing
 
-Issues and pull requests are welcome. Workflow changes must keep both suites green:
+Issues and pull requests are welcome. CI installs Sanad on a clean Windows runner and runs both suites on every PR. Locally:
 
 ```bash
 cd hooks/tests && node --test

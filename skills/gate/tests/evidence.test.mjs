@@ -30,7 +30,7 @@ test('computed source ignores forged source, preserves the index and survives co
   const result = await runCommand({ executable: process.execPath, args: ['-e', 'console.log("checked")'], cwd: repo, outputRoot: root, source: { toplevel: 'forged', treeBefore: 'fake', treeAfter: 'fake' } });
   assert.equal(result.status, 'passed');
   assert.deepEqual(fs.readFileSync(path.join(repo, '.git', 'index')), index);
-  assert.equal(result.source.toplevel, fs.realpathSync(repo));
+  assert.equal(result.source.toplevel, fs.realpathSync.native(repo));
   assert.match(result.source.treeBefore, /^[0-9a-f]{40,64}$/);
   assert.equal(result.source.treeBefore, result.source.treeAfter);
   git('add', 'app.js', 'new.js'); git('commit', '-qm', 'checked content');
@@ -74,7 +74,7 @@ test('inherited Git redirection cannot bind a different repository', async () =>
     process.env.GIT_INDEX_FILE = path.join(other.repo, '.git', 'index');
     const result = await runCommand({ executable: process.execPath, args: ['-e', 'console.log("checked")'], cwd: repo, outputRoot: root });
     assert.equal(result.status, 'passed');
-    assert.equal(result.source.toplevel, fs.realpathSync(repo));
+    assert.equal(result.source.toplevel, fs.realpathSync.native(repo));
     for (const key of Object.keys(previous)) delete process.env[key];
     assert.equal(result.source.treeAfter, git('rev-parse', 'HEAD^{tree}'));
   } finally {
