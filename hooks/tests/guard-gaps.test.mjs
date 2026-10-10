@@ -106,6 +106,27 @@ const fakeAwsKey = ['AK', 'IA', 'FIXTUREFIXTURE00'].join('');
 const envFixture = 'FIXTURE_ONLY=not-a-credential\n';
 const msys = p => p.replace(/^([A-Za-z]):\\/, (_, d) => '/' + d.toLowerCase() + '/').replace(/\\/g, '/');
 
+test('F2: a differently spelled but identical directory still gets the build-output exemption', () => {
+  // The guard must judge the real target, not its spelling: a junction to the repo, or a
+  // Windows short (8.3) name such as RUNNER~1 on GitHub runners, names the same folder.
+  const cwd = repo('del-alias');
+  fs.mkdirSync(path.join(cwd, 'bin')); fs.writeFileSync(path.join(cwd, 'bin', 'out.dll'), 'x');
+  const alias = path.join(root, 'del-alias-link');
+  fs.symlinkSync(cwd, alias, 'junction');
+  assert.equal(decide('policy-guard.js', 'Remove-Item -Recurse -Force bin', { cwd: alias }).decision, 'allow', 'cwd through a junction');
+  const escape = path.join(root, 'elsewhere'); fs.mkdirSync(escape); fs.mkdirSync(path.join(escape, 'bin'));
+  fs.symlinkSync(escape, path.join(cwd, 'vendor'), 'junction');
+  assert.equal(decide('policy-guard.js', 'Remove-Item -Recurse -Force vendor/bin', { cwd }).decision, 'ask', 'a junction that leaves the repo still asks');
+  if (process.platform === 'win32') {
+    const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      "(New-Object -ComObject Scripting.FileSystemObject).GetFolder('" + cwd.replace(/'/g, "''") + "').ShortPath"], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    const short = probe.status === 0 ? probe.stdout.trim() : '';
+    if (short && fs.existsSync(short) && short.toLowerCase() !== cwd.toLowerCase()) {
+      assert.equal(decide('policy-guard.js', 'Remove-Item -Recurse -Force bin', { cwd: short }).decision, 'allow', 'cwd given as a short 8.3 path: ' + short);
+    }
+  }
+  assert.ok(fs.existsSync(path.join(cwd, 'bin', 'out.dll')), 'the hook never executes the command');
+});
 test('F1: the secret scan reads the repository the command actually targets', () => {
   const victim = repo('f1-victim');
   fs.writeFileSync(path.join(victim, '.env'), envFixture);

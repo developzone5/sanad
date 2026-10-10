@@ -545,12 +545,14 @@ function catastrophicPath(r) {
 }
 function disposable(target, base) {
   if (!target) return false;
+  let real;
   try {
     if (fs.lstatSync(target).isSymbolicLink()) return false;          // symlinks and junctions: the delete could follow them
-    if (!samePath(fs.realpathSync.native(target), target)) return false;
+    real = fs.realpathSync.native(target);                            // judge the real folder: short 8.3 names and linked ancestors resolved
   } catch (e) { return false; }                                       // missing or unreadable: never assume harmless
-  if (SHELL_OPTS.tmp && inside(target, SHELL_OPTS.tmp)) return true;
-  if (!base || !inside(target, base) || !GENERATED_DIR.test(path.basename(target))) return false;
+  const realOf = (p) => { try { return fs.realpathSync.native(p); } catch (e) { return p; } };
+  if (SHELL_OPTS.tmp && inside(real, realOf(SHELL_OPTS.tmp))) return true;
+  if (!base || !inside(real, realOf(base)) || !GENERATED_DIR.test(path.basename(real))) return false;
   try {
     return execFileSync('git', ['ls-files', '-z', '--', target], { cwd: base, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000, windowsHide: true }) === '';
   } catch (e) { return /not a git repository/i.test(String(e.stderr || '')); }   // tracked content is never build output
