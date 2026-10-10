@@ -297,6 +297,14 @@ test('saved native red and matching green use check identity across evidence fil
     ...command('red', evidenceCommand('red'), 'CHECK_COMPLETED ' + JSON.stringify(checkRecord({ status: 'failed', nativeExitCode: 1 })), true),
     ...command('green', evidenceCommand('green'), 'CHECK_COMPLETED ' + JSON.stringify(checkRecord()))]).decision, 'allow');
 });
+test('the evidence helper counts under any user\'s .claude folder, and only there', () => {
+  const elsewhere = 'node /home/dev/.claude/skills/gate/scripts/evidence.mjs --spec "/tmp/checks/green.json"';
+  assert.equal(invoke('stop-gate.js', [...edit(), ...command('green', elsewhere, 'CHECK_COMPLETED ' + JSON.stringify(checkRecord()))]).decision, 'allow');
+  const windowsUser = 'node "C:\\Users\\Other User\\.claude\\skills\\gate\\scripts\\evidence.mjs" --spec "C:/checks/green.json"';
+  assert.equal(invoke('stop-gate.js', [...edit(), ...command('green', windowsUser, 'CHECK_COMPLETED ' + JSON.stringify(checkRecord()))]).decision, 'allow');
+  const stray = 'node C:/tools/evidence.mjs --spec "C:/checks/green.json"';
+  assert.equal(invoke('stop-gate.js', [...edit(), ...command('green', stray, 'CHECK_COMPLETED ' + JSON.stringify(checkRecord()))]).decision, 'block');
+});
 test('saved native failures cannot be cleared by another check or directory', () => {
   for (const change of [{ cwd: 'C:/elsewhere' }, { args: ['build'] }, { args: ['test', 'Other.Tests.csproj'] }, { status: 'failed', nativeExitCode: 4 }]) {
     assert.equal(invoke('stop-gate.js', [...edit(),

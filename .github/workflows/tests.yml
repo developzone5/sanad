@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    name: install + hook and gate suites (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install TypeScript for the native-runner test
+        shell: pwsh
+        run: npm install --no-save --prefix "$env:RUNNER_TEMP/tsfixture" typescript@5
+
+      - name: Install Sanad into this runner's .claude (fresh machine)
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\install.ps1 -SkipTests
+
+      - name: Hook suite (from the installed copy)
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        env:
+          WORKFLOW_TYPESCRIPT_RUNNER: ${{ runner.temp }}/tsfixture/node_modules/typescript/bin/tsc
+        run: |
+          Set-Location (Join-Path $env:USERPROFILE '.claude\hooks\tests')
+          node --test
+
+      - name: Gate suite (from the installed copy)
+        shell: pwsh
+        run: |
+          Set-Location (Join-Path $env:USERPROFILE '.claude\skills\gate\tests')
+          node --test
