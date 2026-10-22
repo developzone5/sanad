@@ -26,7 +26,7 @@ const models = {
 
 test('every installed Codex role pins xhigh and its assigned Codex model', {skip:noCodex}, () => {
   for (const [name, model] of Object.entries(models)) {
-    const text = fs.readFileSync(path.join(codexRoot, 'agents', name + '.toml'), 'utf8');
+    const text = fs.readFileSync(path.join(codexRoot, 'agents', name + '.toml'), 'utf8').replaceAll('\r\n','\n');
     assert.match(text, new RegExp(`^name = "${name}"$`, 'm'));
     assert.match(text, new RegExp(`^model = "${model.replaceAll('.', '\\.')}"$`, 'm'));
     assert.match(text, /^model_reasoning_effort = "xhigh"$/m, name);
