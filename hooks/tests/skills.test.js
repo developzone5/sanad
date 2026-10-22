@@ -16,8 +16,8 @@ const noMirror = fs.existsSync(entryRoot) ? false : 'Codex mirror (' + entryRoot
 
 test('Codex workflow entrypoints resolve to one current canonical procedure', { skip: noMirror }, () => {
   for (const name of ['sanad', 'braintrust', 'gate', 'ship', 'spec']) {
-    const canonical = fs.readFileSync(path.join(canonicalRoot, name, 'SKILL.md'), 'utf8');
-    const entry = fs.readFileSync(path.join(entryRoot, name, 'SKILL.md'), 'utf8');
+    const canonical = fs.readFileSync(path.join(canonicalRoot, name, 'SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
+    const entry = fs.readFileSync(path.join(entryRoot, name, 'SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
     assert.ok(entry.includes(canonicalLink + name + '/SKILL.md') || entry.includes('~/.claude/skills/' + name + '/SKILL.md'));
     const canonicalFront = /^---\r?\n[\s\S]*?\r?\n---/.exec(canonical)[0];
     const expectedFront = name === 'sanad' ? canonicalFront.replace('effort: medium', 'effort: xhigh') : canonicalFront;
