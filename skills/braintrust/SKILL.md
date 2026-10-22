@@ -1,21 +1,23 @@
 ---
 name: braintrust
 effort: xhigh
-description: Convene independent Claude specialists (Opus 5.5 for deep-risk seats, Sonnet 5.5 for practical seats), then a Fable 5.1 boss reviews every report and delivers one evidence-backed recommendation. Use when the Sanad boss selects a panel for complex, substantial, uncertain or sensitive implementation, or when the user types /braintrust, says "ask the braintrust" or "consult the braintrust", or wants several independent expert perspectives or a deliberation before committing to a design, plan, or hard decision. Claude-only — no external models, no API keys. Supports an effort dial (low/medium/high/xhigh/max) that selects specialist count and risk coverage.
-argument-hint: "<question> [effort=low|medium|high|xhigh|max] [advisors=N] [model=sonnet|opus|fable]"
+description: Convene independent specialists and a separate boss using the task's selected Claude or Codex engine. Use for a Sanad-selected panel or an explicit braintrust request. All Codex roles and panel advisors use xhigh; the deliberation dial selects seat count and risk coverage, not runtime effort.
+argument-hint: "<question> [engine=claude|codex] [effort=low|medium|high|xhigh|max] [advisors=N]"
 ---
 
 <!-- Author: Eng. Mohammed Almutairi - Developzone.net -->
 
-# /braintrust — Claude-only deliberation
+# /braintrust — independent deliberation
 
-Convene N independent specialists (Opus 5.5 for deep-risk seats, Sonnet 5.5 for practical seats), each arguing from a distinct lens, then one separate Fable 5.1 boss reviews every report and produces the recommendation. Specialists work at xhigh effort; the boss also uses xhigh. Every advisor is a Claude subagent — no OpenAI/Gemini, no `.env`, no API keys, no network calls. The braintrust is *input*; your synthesis is the *product*.
+Reuse the saved task engine; for a standalone task, ask once using [engines.md](../sanad/reference/engines.md), recommending the current chat engine. Convene N independent specialists on that engine, each arguing from a distinct lens, then a separate boss reviews every report and produces the recommendation. Specialists and boss use xhigh. Use native agents and the existing signed-in host; no new API keys or `.env` files. The braintrust is *input*; your synthesis is the *product*.
 
 ## Step 1 — Parse the effort dial + the question
 
-Everything after `/braintrust` (or the topic of "ask the braintrust about…") is the QUESTION. Look for an effort directive — accept either an explicit token (`effort=high`) or a natural word — and **strip it (and any `advisors=`/`model=` override) from the question**. An explicit directive always wins.
+Everything after `/braintrust` (or the topic of "ask the braintrust about…") is the QUESTION. Look for an effort directive — accept either an explicit token (`effort=high`) or a natural word — and **strip it (and any `engine=`/`advisors=`/`model=` override) from the question**. An explicit directive always wins.
 
-**Automatic invocation (user choice 2026-09-21):** Sanad first uses a brief Fable boss assessment under [boss-routing.md](../sanad/reference/boss-routing.md). Convene this panel only for its `braintrust` route: complex, substantial, uncertain or sensitive implementation. `direct` and `review` routes skip the panel. Explicit requests for braintrust still run. Reuse the routing boss, its assessment and evidence, and completed decisions for unchanged continuations. New evidence invalidates only affected conclusions. Teaching, explanations, checks without implementation, standalone reviews and docs do not automatically convene a panel. Size the panel with the seat rules below.
+**Automatic invocation (user choice 2026-09-21):** Sanad first uses a brief selected-engine boss assessment under [boss-routing.md](../sanad/reference/boss-routing.md). Convene this panel only for its `braintrust` route: complex, substantial, uncertain or sensitive implementation. `direct` and `review` routes skip the panel. Explicit requests for braintrust still run. Reuse the routing boss, its assessment and evidence, and completed decisions for unchanged continuations. New evidence invalidates only affected conclusions. Teaching, explanations, checks without implementation, standalone reviews and docs do not automatically convene a panel. Size the panel with the seat rules below.
+
+**Boss-only decision (user choice 2026-10-12):** when the routing assessment names exactly one open question and no sensitive boundary (no auth/tenant, DB/migration/concurrency, money, file/URL trust, dependency or data-loss risk), the same selected-engine boss answers it alone from the evidence pack — `PANEL: boss-only`, no specialist seats, the same "What the user reads" block and decision record. Seats are convened only for named open questions that a seat's lens answers better than the boss can; a sensitive boundary always seats its auditor.
 
 **No directive (when convening) → YOU pick the effort from risk, and state the pick + reason in one line** (`effort: high — live-table migration, hard to reverse`). The rubric:
 - `medium` (baseline) — an ordinary reversible fix or new feature, including a settled approach. Check the proposed approach and its failure cases in the standard single round.
@@ -36,27 +38,13 @@ After the boss selects a panel, choose the medium deliberation size for non-sens
 
 Add a seat above the cap only for a named coverage gap, stated in one line.
 
-**Installed effort preference (2026-09-21):** this deliberation skill uses xhigh effort through its frontmatter; set each advisor model using the expert choices below, with xhigh effort. Ordinary teaching/explanation uses medium outside this skill. There is no global forced-max environment variable. The dial controls specialist count and risk coverage, not extra review rounds or the session default; xhigh model effort alone never requests extra seats or rounds.
+**Installed effort preference (2026-09-21):** this deliberation skill uses xhigh effort through its frontmatter; set each advisor model using the expert choices below, with xhigh effort. Claude teaching/explanation uses medium outside this skill; Codex remains xhigh. There is no global forced-max environment variable. The dial controls specialist count and risk coverage, not extra review rounds or the session default; xhigh model effort alone never requests extra seats or rounds.
 
-### Expert model choices (user-approved 2026-09-30)
+### Expert model choices
 
-Each seat uses the model strongest for its lens, at every deliberation size: deep-risk seats (attack, one-way doors, data and security) use Opus 5.5; practical seats (simplest path, numbers, user value) use Sonnet 5.5. Added domain specialists (Designer, SRE, Data modeler…) use Opus 5.5. The boss uses Fable 5.1 at every size. An explicit user model override may change specialists for that invocation; changing the boss requires an explicit boss-model instruction. Panel size never silently changes these assignments.
+Use [engines.md](../sanad/reference/engines.md) as the single role/model map. Deep-risk seats: Architect, Skeptic, Database, Security, Authenticity and added domain specialists. Practical seats: Pragmatist, Performance and Product. Every panel role uses xhigh. Panel size never changes model assignments. A seated auditor never replaces the design voice the question needs.
 
-- **Pragmatist: Sonnet 5.5** — `subagent_type: "braintrust-expert-sonnet"` (`model: sonnet`, `effort: xhigh`).
-- **Performance expert: Sonnet 5.5** — `subagent_type: "braintrust-expert-sonnet"`.
-- **Product advocate: Sonnet 5.5** — `subagent_type: "braintrust-expert-sonnet"`.
-- **Architect: Opus 5.5** — `subagent_type: "braintrust-expert"` (`model: opus`, `effort: xhigh`).
-- **Skeptic: Opus 5.5** — `subagent_type: "braintrust-expert"`.
-- **Database optimizer: Opus 5.5** — `subagent_type: "braintrust-expert"`.
-- **Security auditor: Opus 5.5** — `subagent_type: "braintrust-expert"`.
-- **Authenticity reviewer: Opus 5.5** — `subagent_type: "braintrust-expert"`.
-- **Boss: Fable 5.1** — `model: fable`, `effort: xhigh`; always a separate reviewer after the specialists.
-
-A seated auditor (Database optimizer, Security auditor) never replaces the design voice the question needs (Step 2, seat rules).
-
-Use `model: opus` or `model: sonnet` for specialists (per seat above) and `model: fable` for the boss; on the installed Claude version these resolve to Opus 5.5, Sonnet 5.5 and Fable 5.1. Verify actual model and effort in the run metadata. If an alias resolves to a different version, use the requested explicit ID (`claude-opus-5-5`, `claude-sonnet-5-5` or `claude-fable-5-1`) rather than silently substituting another model.
-
-The **boss review and synthesis (Step 6) runs on the separate Fable 5.1 routing boss**, after the specialist reports; reuse that agent and its assessment. Standalone braintrust without a routing boss creates one separate Fable boss. The boss is additional to the table's specialist count and does not replace an advocate or auditor. `advisors=N` changes specialist count only. `model=X` overrides specialist models only; the boss remains Fable 5.1 unless the user explicitly changes it. If the question is missing or too vague to advise on, ask one clarifying question before convening.
+An explicit `model=` override affects specialists only and must remain within the selected engine; the boss changes only on an explicit boss-model instruction. Verify the requested model and effort in runtime metadata; never silently substitute or lower effort. The separate boss reviews every report after the specialists, reusing its routing assessment. Standalone braintrust creates one separate boss. `advisors=N` changes only the specialist count. If the question is missing or too vague, ask one clarifying question before convening.
 
 ## Step 2 — Pick the advisors (genuinely distinct lenses)
 
@@ -70,7 +58,7 @@ Every seat is a **production-level expert** — a staff+ engineer who has owned 
 6. **[Database optimizer](experts/database.md)** — Queries, indexes, transactions and migrations. Load this role's guide when seating the expert.
 7. **[Security auditor](experts/security.md)** — Trust boundaries, authorization and abuse cases. Load this role's guide when seating the expert.
 8. **[Authenticity reviewer](experts/authenticity.md)** — Product-specific visual, code and copy quality. Load this role's guide when seating the expert.
-9. **Boss / final reviewer** — Fable 5.1 reviews every seated specialist's report against the original request and evidence, checks weak claims and disagreements, and makes the final recommendation. It works after the specialists; it is not another blind first-round opinion. Reuse its initial Sanad routing assessment when present. Its required review and decision format is in Step 6.
+9. **Boss / final reviewer** — the selected engine's boss reviews every seated specialist's report against the original request and evidence, checks weak claims and disagreements, and makes the final recommendation. It works after the specialists; it is not another blind first-round opinion. Reuse its initial Sanad routing assessment when present. Its required review and decision format is in Step 6.
 
 **Seat rules:**
 - The **Database optimizer** sits when the task touches the database (schema/migration, EF/LINQ or raw SQL, indexes, transactions, pagination, data volume — including reused queries at a new scale). The **Security auditor** sits when it touches auth, tenant data access, money, file/URL handling or user input. Inside `/sanad`, the Step 1 impact triage decides both; an unseated domain still gets its standing checks at the gate.
@@ -108,13 +96,13 @@ If the question is abstract (no repo involved), the pack is just constraints + c
 
 ## Step 4 — Convene (parallel, single round)
 
-Spawn the K advisors **concurrently** — one subagent (`Agent`/`Task`) call per advisor, all in **one message**, so they run in parallel. Round 1 is blind: no advisor sees another's position. Give each advisor:
+Spawn the K advisors **concurrently** — one native subagent call per advisor (per engines.md), all in **one message**, so they run in parallel. Round 1 is blind: no advisor sees another's position. Give each advisor:
 
 - the full question + the **evidence pack** verbatim,
 - their current linked expert skill guidance file, alongside their distinct scope; do not load every other expert's guide,
 - their lens by name, framed as a **production-level expert** — "you are a staff+ engineer who has run this domain in production at scale" — and a charge to **argue it hard and independently, do not hedge toward consensus**; recommendations must be production-grade — assume live users and irreplaceable data are on the line, so every recommendation must survive deploy day (near-zero downtime, a crash mid-rollout), the 3am incident (how it's detected, mitigated, and rolled back), and 10× growth — never textbook generalities,
 - an explicit boundary: **advise only — read anything, change nothing** (no file edits, no state-changing commands, no commits),
-- a required return template — these six fields for every seat (seated auditors add their sweep field, below). Every field is short: one line per point, no paragraphs — the boss reads the facts, not prose:
+- a required return template — these six fields for every seat (seated auditors add their sweep field, below). Every field is short: one line per point, no paragraphs — the boss reads the facts, not prose. **Whole report ≤ 300 words** (the sweep field excepted); a longer report is off-template:
   - `POSITION:` 1–2 lines.
   - `RECOMMENDATIONS:` 2–3 concrete ones, each carrying an `evidence:` line naming the pack fact or file it rests on — or an explicit `assumption:` tag when it rests on none. Never an untagged claim.
   - `RISK:` the biggest failure mode they see.
@@ -123,7 +111,7 @@ Spawn the K advisors **concurrently** — one subagent (`Agent`/`Task`) call per
   - `CONFIDENCE:` high / medium / low, with the one fact that would change their mind.
   - **Seated auditors add their sweep field** — the Database optimizer appends `DB SWEEP:`, the Security auditor appends `SEC SWEEP:` (per Step 2), one line per dimension marked `✓ cleared` / `→ finding` / `? unchecked`. This field is required for those two seats and must not be dropped for brevity.
 
-Launch each advisor with its seat's agent type — `subagent_type: "braintrust-expert"` for deep-risk seats (`~/.claude/agents/braintrust-expert.md` pins Opus 5.5) or `subagent_type: "braintrust-expert-sonnet"` for Pragmatist, Performance and Product (`~/.claude/agents/braintrust-expert-sonnet.md` pins Sonnet 5.5); both pin xhigh and read-only tools, because the Agent tool cannot set effort per call — and name the seat and its role guide in the prompt. An explicit user model override passes `model:` on that call. After the specialist reports, invoke the separate Fable 5.1 boss (`subagent_type: "routing-boss"`) for Step 6 at every panel size.
+Launch each advisor with its engine-mapped deep-risk or practical agent type, xhigh and read-only. Name the seat and its role guide in the prompt. Use the host's real runtime controls for a supported explicit user model override. After collecting the specialist reports, resume the separate selected-engine boss for Step 6 at every panel size.
 
 Every specialist's linked guide defines its **signature deliverable** (the Skeptic's ranked failure list, the Architect's one-way door, Performance's numbers, the DB optimizer's exact indexes, the Security auditor's written attack…). A return missing its signature deliverable — or delivering it as vague generalities — is off-template.
 
@@ -137,7 +125,7 @@ Collect each specialist's completed report and preserve its evidence. Pass the f
 
 ## Step 6 — Boss reviews each expert and decides
 
-Resume the existing separate Sanad routing **Boss** (`subagent_type: "routing-boss"`: Fable 5.1 at xhigh, verified in run metadata). If standalone braintrust has no routing boss, spawn ONE separate boss, even when the main session already uses Fable. If the original agent cannot resume, report that limitation and transfer its saved assessment/evidence to one replacement; do not redo routing or leave duplicate bosses active. Give it the original request verbatim, the evidence pack, the seated-role list, every specialist's full report, the guidance each expert received and any existing targeted follow-up answers. The boss is read-only: it may inspect cited source to validate claims, but cannot edit, implement or publish.
+Resume the existing separate Sanad routing **Boss** (the engine-mapped boss at xhigh, verified in run metadata). If standalone braintrust has no routing boss, spawn ONE separate boss, even when the main session already uses the boss model. If the original agent cannot resume, report that limitation and transfer its saved assessment/evidence to one replacement; do not redo routing or leave duplicate bosses active. Give it the original request verbatim, the evidence pack, the seated-role list, every specialist's full report, the guidance each expert received and any existing targeted follow-up answers. The boss is read-only: it may inspect cited source to validate claims, but cannot edit, implement or publish.
 
 The boss must review each seated expert, including every seated auditor:
 - Return one `EXPERT REVIEW: <role> — accepted | correction needed | unresolved — <evidence and reason>` line per role. Check factual support, scope, missing failure cases, contradictions and the role's required deliverable. Name missing reports explicitly; agreement is not evidence.
@@ -186,7 +174,7 @@ If a `specs/<feature>.md` exists for the work under discussion, append the line 
 
 ## Rules
 
-- **Claude-only.** Never call external LLM APIs, never create a `.env` or ask for OpenAI/Gemini keys. If the user wants those, that's a different skill.
+- **One selected engine.** All roles stay on the task's chosen Claude or Codex engine. Do not silently mix providers or fall back after a quota error. Use existing signed-in native tools; never create a `.env` or ask for new API keys.
 - **Advisors advise; they never act.** No advisor edits files, runs state-changing commands, or commits. Any action the braintrust recommends happens after the synthesis, by you, under the normal rules.
 - **Diversity is the value.** Don't let advisors converge prematurely or all restate the same take; round 1 stays blind.
 - **Attribute honestly.** If advisors agreed, say so plainly; if they split, present the split and still pick a side.

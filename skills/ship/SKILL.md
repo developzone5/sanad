@@ -37,13 +37,13 @@ This file is the single source for the shipping flow (moved from CLAUDE.md 2026-
 
 Pushing and opening a PR are **explicit-approval steps, never automatic.** Before a push, stop and tell the human **what you fixed and why** — that is the whole point of the brief. Lead with it, make it clear, then add only what's needed to approve:
 
-- **What & why** — the heart of the brief: each change and the reason behind it, one clear line each. Not a diff dump, not an essay — the fix and the decision. Name the tradeoff you rejected if it wasn't obvious.
-- **Proof** — what you ran → what you saw (build, tests, the real run).
+- **What I changed and why** — the heart of the brief: each change and the reason behind it, one clear line each. Not a diff dump, not an essay — the fix and the decision. Name the tradeoff you rejected if it wasn't obvious.
+- **How I checked it** — what you ran → what you saw (build, tests, the real run).
 - **Risk** — migrations, config/env, deleted code, anything needing a manual step. `none` if nothing.
-- **Left** — what you didn't touch, guessed, or left for the human.
-- **Target** — `Pushing <branch> → PR base <staging>. Approve?`
+- **Not done** — what you didn't touch, guessed, or left for the human.
+- **Where it goes** — `Pushing <branch> → PR base <staging>. Approve?`
 
-Talk like a peer explaining a change, not a form and not a wall of text. Then **wait for the yes.** Told to "just push" with the task → still give the what-and-why first, then push. A "yes" to the task is not a "yes" to the push. (`/ship` runs this brief + the draft-PR flow, and still stops for the explicit yes.)
+Talk like a peer explaining a change, not a form and not a wall of text. Use the plain words of CLAUDE.md "How you talk": no Sanad labels, each line readable without asking. Then **wait for the yes.** Told to "just push" with the task → still give the what-and-why first, then push. A "yes" to the task is not a "yes" to the push. (`/ship` runs this brief + the draft-PR flow, and still stops for the explicit yes.)
 
 ### Push only to the integration branch
 
