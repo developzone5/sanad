@@ -7,6 +7,19 @@
 
 Run this whole checklist. If a change touches auth, data access, money, file/URL handling, or user input, call out the risk + mitigation in your report. (API names below are .NET — map them to your framework's equivalent.)
 
+**Quick table — what the gate report must show per touched risk** (the sections below hold the detail; this table is the report's shape, not a waiver):
+
+| Touched | Required proof in the report |
+|---|---|
+| New or changed endpoint / page | anonymous → 401, wrong role → 403, not-owner → 404/403 test names; tenant filter named |
+| Query, migration, raw SQL | parameterized; tenant filter; index in the same migration; generated SQL quoted |
+| File upload / download / path | extension + magic-byte check; generated storage name; served as attachment + nosniff; path stays under root |
+| Login, session, password, SSO | vetted KDF / OIDC library; lockout; no enumeration; session regenerated; tokens hashed and single-use |
+| Outbound HTTP, redirect, webhook | host allowlist + IP validation; local-only redirect; HMAC over raw body in constant time |
+| Money or state transition | server recompute; idempotency key in a shared store; re-authorization per step |
+| Config, env, packages | no secret in tracked files; dependency scan High/Critical = block; headers unchanged or justified |
+| User input rendered or logged | encoder matches the sink; structured log template; no raw HTML from input |
+
 **Reading order — start where the change bites, then sweep the rest.** This routes attention; it does NOT waive sections.
 - New/changed endpoint or page → Access control · Validation & API surface · Prove it.
 - Login, session, password, MFA, SSO → AuthN & session · Crypto · Logging & audit.

@@ -180,7 +180,7 @@
       }
     ]
   },
-  "outputStyle": "Concise",
+  "outputStyle": "Plain and short",
   "effortLevel": "medium",
   "modelSettings": {
     "claude-fable-5-1": {

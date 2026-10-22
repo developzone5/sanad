@@ -101,11 +101,39 @@ function segmentIsVerify(seg) {
 
 function hasVerify(cmd) { return splitSegments(cmd).some(segmentIsVerify); }
 
+// Display-only consumers after a pipe (grep, head, tail, tee, Select-String …)
+// change what is shown, not what was verified: they are not part of a check's
+// identity, so a rerun with a different tail clears the same failure (2026-10-12;
+// before, `… | head -5` and `… | head -20` were two different failed checks and
+// cost whole extra suite runs). Setup/cleanup segments (git stash …) stay in the
+// identity: a failed compound command is still retried as a whole.
+const DISPLAY_RE = /^(?:grep|egrep|fgrep|rg|head|tail|tee|cat|sort|uniq|wc|cut|tr|less|more|column|findstr|awk|sed\s+-n|Select-String|Select-Object|Out-String|Out-File|Out-Null|Out-Host|Tee-Object|Format-Table|Format-List|ForEach-Object|Where-Object|Measure-Object|sls|select|%|\?)(?:\s|$)/i;
+function isDisplaySegment(seg) {
+  const s = String(seg).trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/, '');
+  return DISPLAY_RE.test(s);
+}
+function identitySegments(segs) {
+  const kept = segs.filter((s) => !isDisplaySegment(s));
+  return kept.length ? kept : segs;
+}
+// Stream redirections (`2>&1`, `> out.txt`, `2>/dev/null`) do not change the check either.
+function stripRedirects(words) {
+  const out = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (/^\d*>&(?:\d+|-)$/.test(w)) continue;                 // 2>&1, >&2
+    if (/^(?:&>|\d*>>?|<)$/.test(w)) { i++; continue; }       // > file, 2> file, >> file, < file
+    if (/^(?:&>|\d*>>?)\S+$/.test(w) && !/^\d+$/.test(w)) continue; // 2>/dev/null, >out.txt
+    out.push(w);
+  }
+  return out;
+}
+
 // Preserve environment overrides in retry identity; they may choose a different
 // provider/configuration even when the executable and test arguments are equal.
 function verificationIdentity(seg) {
   const environment = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/.exec(String(seg).trim())[0];
-  return environment + verificationCommand(seg);
+  return environment + stripRedirects(verificationWords(seg)).join(' ');
 }
 
 // A real-provider run: the affected flow exercised against MySQL or the live API
@@ -321,7 +349,7 @@ function readTranscript(p) {
 // build` verifies AFTER its edit; `dotnet build; sed -i …` does not.
 // ---------------------------------------------------------------------------
 
-const MAYBE_LINE = /"tool_use"|"tool_result"|GATE:|REVIEW:|CHECK RETIRED:|PROBE EXPECTED:|"commandMode":"task-notification"/;
+const MAYBE_LINE = /"tool_use"|"tool_result"|GATE:|REVIEW:|CHECK RETIRED:|PROBE EXPECTED:|"commandMode":"task-notification"|<task-notification>/;
 const GATE_RE = /^GATE:\s*(PASS|FAIL)\b/gm;
 const REVIEW_RE = /^REVIEW:\s*(PASS|FAIL)\b/gm;
 // An explicit, auditable retirement of a completed failed check that cannot
@@ -335,7 +363,7 @@ const RETIRE_RE = /^CHECK RETIRED:\s*(\{.*\})\s*$/gm;
 // (e.g. a PR under review). Declared after its red run, it quiets the STOP hook
 // only — the push guard still counts it as a failure, so nothing ships red.
 const PROBE_RE = /^PROBE EXPECTED:\s*(\{.*\})\s*$/gm;
-function commandIdentity(text) { return splitSegments(String(text || '')).map(verificationIdentity).join(' ; ').trim().replace(/\s+/g, ' '); }
+function commandIdentity(text) { return identitySegments(splitSegments(String(text || ''))).map(verificationIdentity).join(' ; ').trim().replace(/\s+/g, ' '); }
 
 function verificationResult(block, entry) {
   const t = entry.toolUseResult || {};
@@ -375,14 +403,31 @@ function checkReceipt(block, entry) {
 }
 
 // A host-written background completion: { id, status, exitCode, file } or null.
-function taskNotification(entry) {
-  const a = entry.attachment;
-  if (!a || a.commandMode !== 'task-notification' || typeof a.prompt !== 'string') return null;
-  const field = name => (new RegExp('<' + name + '>([^<]*)</' + name + '>').exec(a.prompt) || [])[1];
+const NOTE_RE = /<task-notification>([\s\S]*?)<\/task-notification>/g;
+function parseNotification(text) {
+  const field = name => (new RegExp('<' + name + '>([^<]*)</' + name + '>').exec(text) || [])[1];
   const id = field('task-id');
   if (!id) return null;
   const exit = /\(exit code (-?\d+)\)/.exec(field('summary') || '');
   return { id, status: field('status') || '', exitCode: exit ? Number(exit[1]) : undefined, file: field('output-file') };
+}
+
+// The host delivers a completion notice as its own attachment entry, or, when
+// it lands while the user is typing, as the same tags at the start of the
+// user's next message (plain text, possibly several notices). Both count.
+function taskNotifications(entry) {
+  const a = entry.attachment;
+  if (a && a.commandMode === 'task-notification' && typeof a.prompt === 'string') {
+    const note = parseNotification(a.prompt);
+    return note ? [note] : [];
+  }
+  if (entry.type !== 'user' || !entry.message) return [];
+  const c = entry.message.content;
+  const text = typeof c === 'string' ? c
+    : Array.isArray(c) && c.length > 0 && c.every(b => b && b.type === 'text' && typeof b.text === 'string') ? c.map(b => b.text).join('\n')
+    : '';
+  if (!text.includes('<task-notification>')) return [];
+  return [...text.matchAll(NOTE_RE)].map(m => parseNotification(m[1])).filter(Boolean);
 }
 
 function scanTranscript(transcriptPath) {
@@ -406,22 +451,25 @@ function scanTranscript(transcriptPath) {
     let entry = null;
     try { entry = JSON.parse(l); } catch (e) { continue; }
     if (!entry) continue;
-    const note = taskNotification(entry);
-    if (note) {
-      // This host reports a finished background command as a task-notification
-      // attachment instead of a TaskOutput result. The command's saved output
-      // file is its collected result; a completion without an exit code stays pending.
-      seq++;
-      if (background.has(note.id) && (note.status !== 'completed' || note.exitCode !== undefined)) {
-        let output = '';
-        try { output = note.file ? fs.readFileSync(note.file, 'utf8') : ''; } catch (e) { output = ''; }
-        settle({ ...background.get(note.id), editSeq: -1, taskId: note.id },
-          { type: 'tool_result', content: output, is_error: false },
-          { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } } });
+    const notes = taskNotifications(entry);
+    if (notes.length > 0) {
+      for (const note of notes) {
+        // This host reports a finished background command as a task-notification
+        // attachment instead of a TaskOutput result. The command's saved output
+        // file is its collected result; a completion without an exit code stays pending.
+        seq++;
+        if (background.has(note.id) && (note.status !== 'completed' || note.exitCode !== undefined)) {
+          let output = '';
+          try { output = note.file ? fs.readFileSync(note.file, 'utf8') : ''; } catch (e) { output = ''; }
+          settle({ ...background.get(note.id), editSeq: -1, taskId: note.id },
+            { type: 'tool_result', content: output, is_error: false },
+            { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } } });
+        }
+        // An independent reviewer agent finished: credit the run it completed.
+        const agent = reviewerAgents.get(note.id);
+        if (agent && note.status === 'completed' && agent.launch > res.lastReviewerRun) { res.lastReviewerRun = agent.launch; res.lastReviewerResult = seq; }
       }
-      // An independent reviewer agent finished: credit the run it completed.
-      const agent = reviewerAgents.get(note.id);
-      if (agent && note.status === 'completed' && agent.launch > res.lastReviewerRun) { res.lastReviewerRun = agent.launch; res.lastReviewerResult = seq; }
+      // A bundled notice shares the entry with the user's own words; nothing else there is scanned.
       continue;
     }
     const msg = entry.message;
@@ -469,7 +517,8 @@ function scanTranscript(transcriptPath) {
           const segs = splitSegments(String(blk.input.command || ''));
           // A failed compound command must be retried as a whole; a success in
           // another directory or only its last test cannot erase that failure.
-          rec.verifyKey = String(blk.input.cwd || blk.input.workdir || entry.cwd || '') + '\n' + segs.map(verificationIdentity).join(' ; ');
+          // Display tails and redirections are not part of the identity (see identitySegments).
+          rec.verifyKey = String(blk.input.cwd || blk.input.workdir || entry.cwd || '') + '\n' + identitySegments(segs).map(verificationIdentity).join(' ; ');
           rec.command = commandIdentity(blk.input.command);
           if (segs.length === 1 && isEvidenceCommand(segs[0])) { rec.evidence = true; rec.verifySeq = seq + 0.001; }
           const expanded = expandVariables(segs);

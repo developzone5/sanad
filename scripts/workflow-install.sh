@@ -2,7 +2,7 @@
 # workflow-install.sh — install a tested workflow candidate as one versioned release.
 #
 # Usage: bash ~/.claude/scripts/workflow-install.sh <candidate> <base> <release-name>
-#   <candidate>  scratch copy with claude/... (mirrors ~/.claude) and agents/skills/... (mirrors ~/.agents/skills)
+#   <candidate>  scratch copy with claude/... (mirrors ~/.claude), agents/skills/... (mirrors ~/.agents/skills), and codex/... (config.toml, AGENTS.md and agents/ in ~/.codex)
 #   <base>       the untouched copy the candidate was made from (the drift reference)
 #
 # 1. Changed = files that differ between base and candidate (added, edited or removed).
@@ -20,19 +20,19 @@ if [ -z "${WORKFLOW_INSTALL_COPY:-}" ]; then
 fi
 
 CAND="${1:?candidate dir}"; BASE="${2:?base dir}"; NAME="${3:?release name}"
-C="$HOME/.claude"; A="$HOME/.agents/skills"
+C="$HOME/.claude"; A="$HOME/.agents/skills"; X="$HOME/.codex"
 B="$C/backups/$NAME"
 [ -e "$B" ] && { echo "ABORTED: $B already exists"; exit 1; }
 
-live() { case "$1" in claude/*) echo "$C/${1#claude/}";; agents/skills/*) echo "$A/${1#agents/skills/}";; *) echo "";; esac; }
+live() { case "$1" in claude/*) echo "$C/${1#claude/}";; agents/skills/*) echo "$A/${1#agents/skills/}";; codex/config.toml|codex/AGENTS.md|codex/agents/*.toml) echo "$X/${1#codex/}";; *) echo "";; esac; }
 
 changed=(); removed=()
 while IFS= read -r f; do
   if [ ! -f "$BASE/$f" ] || ! cmp -s "$BASE/$f" "$CAND/$f"; then changed+=("$f"); fi
-done < <(cd "$CAND" && find claude agents -type f 2>/dev/null | sort)
+done < <(cd "$CAND" && find claude agents codex -type f 2>/dev/null | sort)
 while IFS= read -r f; do
   [ -f "$CAND/$f" ] || removed+=("$f")
-done < <(cd "$BASE" && find claude agents -type f 2>/dev/null | sort)
+done < <(cd "$BASE" && find claude agents codex -type f 2>/dev/null | sort)
 [ ${#changed[@]} -eq 0 ] && [ ${#removed[@]} -eq 0 ] && { echo "Nothing to install."; exit 0; }
 
 drift=0
@@ -64,6 +64,6 @@ echo "hooks: $hooks"; echo "gate: $gate"
   [ ${#removed[@]} -gt 0 ] && printf ' · removed: %s' "${removed[*]}"
   printf ' · hooks: %s· gate: %s\n' "$hooks" "$gate"; } >> "$C/backups/RELEASES.md"
 if echo "$hooks $gate" | grep -qE 'fail [1-9]'; then
-  echo "TESTS FAILED after install. Restore with: cp -r \"$B/claude/.\" \"$C/\"; [ -d \"$B/agents/skills\" ] && cp -r \"$B/agents/skills/.\" \"$A/\""
+  echo "TESTS FAILED after install. Restore with: cp -r \"$B/claude/.\" \"$C/\"; [ -d \"$B/agents/skills\" ] && cp -r \"$B/agents/skills/.\" \"$A/\"; [ -d \"$B/codex\" ] && cp -r \"$B/codex/.\" \"$X/\""
   exit 2
 fi

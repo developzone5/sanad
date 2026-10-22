@@ -292,6 +292,23 @@ test('a follow-up message to the same reviewer after a fix counts as a new run',
   assert.equal(invoke('policy-guard.js', [...first, ...checkedCode(), ...followUp.slice(0, 2), verdict('REVIEW: PASS'), verdict('GATE: PASS')]).decision, 'deny', 'the follow-up must finish');
 });
 
+// When the agent finishes while the user is typing, the host puts the same
+// notice at the start of the user's next message instead of a separate entry.
+test('a reviewer completion delivered inside the next user message counts', () => {
+  const bundled = (id, status = 'completed', words = 'push it') => msg('user', '<task-notification>\n<task-id>' + id + '</task-id>\n<status>' + status + '</status>\n<summary>Agent "Independent review" finished</summary>\n</task-notification>\n' + words);
+  const launch = reviewerRun('rv-bundle').slice(0, 2);
+  assert.equal(invoke('policy-guard.js', [...checkedCode(), ...launch, bundled('rv-bundle'), verdict('REVIEW: PASS'), verdict('GATE: PASS')]).decision, 'allow');
+  assert.equal(invoke('policy-guard.js', [...checkedCode(), ...launch, bundled('rv-bundle', 'running'), verdict('REVIEW: PASS'), verdict('GATE: PASS')]).decision, 'deny', 'a running notice is not a completion');
+  assert.equal(invoke('policy-guard.js', [...checkedCode(), ...launch, bundled('rv-other'), verdict('REVIEW: PASS'), verdict('GATE: PASS')]).decision, 'deny', 'another task is not this reviewer');
+  // A follow-up message to the same reviewer, answered by a bundled notice, is a new run after the fix.
+  const first = reviewerRun('rv-again');
+  const followUp = [call('again', 'SendMessage', { to: 'rv-again', message: 'Re-check the fix diff.' }), result('again', 'Message queued.')];
+  assert.equal(invoke('policy-guard.js', [...first, ...checkedCode(), ...followUp, bundled('rv-again'), verdict('REVIEW: PASS'), verdict('GATE: PASS')]).decision, 'allow');
+  // Two notices in one message are both read.
+  const two = msg('user', '<task-notification>\n<task-id>other-task</task-id>\n<status>completed</status>\n<summary>Background command finished (exit code 0)</summary>\n</task-notification>\n<task-notification>\n<task-id>rv-again</task-id>\n<status>completed</status>\n<summary>Agent finished</summary>\n</task-notification>\ngo');
+  assert.equal(invoke('policy-guard.js', [...first, ...checkedCode(), ...followUp, two, verdict('REVIEW: PASS'), verdict('GATE: PASS')]).decision, 'allow');
+});
+
 test('warnings-only ESLint exit zero is not a command failure', () => {
   assert.equal(invoke('stop-gate.js', [...edit(), ...command('lint', 'npx eslint src', '✖ 2 problems (0 errors, 2 warnings)\nESLINT_EXIT=0')]).decision, 'allow');
 });
@@ -522,4 +539,24 @@ test('a source-bound receipt cannot certify a different tree or repository', () 
     const entries = [...edit(), ...command('bound', evidenceCommand('bound'), 'CHECK_COMPLETED ' + JSON.stringify(checkRecord({ source }))), ...claimedPass()];
     assert.equal(invoke('policy-guard.js', entries).decision, 'deny', JSON.stringify(source));
   }
+});
+
+// Display tails (| grep, | head, | tee …) and stream redirections change what is
+// shown, not what was verified. The identity of a check ignores them, so a rerun
+// with a different tail clears the same failure; a different test never does.
+test('a different display tail or redirection does not keep an old failure alive', () => {
+  assert.equal(invoke('stop-gate.js', [...edit(),
+    ...command('red', 'dotnet test Backend.Tests.csproj | head -5', 'Failed! - Failed: 1, Passed: 0', true),
+    ...command('green', 'dotnet test Backend.Tests.csproj 2>&1 | grep -E "Passed|Failed" | head -20', 'Passed: 1')]).decision, 'allow');
+  assert.equal(invoke('stop-gate.js', [...edit(),
+    ...command('red', 'dotnet test Backend.Tests.csproj', 'Failed! - Failed: 1, Passed: 0', true),
+    ...command('green', 'dotnet test Backend.Tests.csproj 2>&1', 'Passed: 1')]).decision, 'allow');
+});
+test('display tails never make a different check look like the failed one', () => {
+  assert.equal(invoke('stop-gate.js', [...edit(),
+    ...command('red', 'dotnet test Backend.Tests.csproj | head -5', 'Failed! - Failed: 1, Passed: 0', true),
+    ...command('green', 'dotnet test Other.Tests.csproj | head -5', 'Passed: 1')]).decision, 'block');
+  assert.equal(invoke('stop-gate.js', [...edit(),
+    ...command('red', 'git stash push; dotnet test Backend.Tests.csproj | head -5; git stash pop', 'SETUP_EXIT=0\nFailed! - Failed: 1, Passed: 0\nCLEANUP_EXIT=0'),
+    ...command('green', 'dotnet test Backend.Tests.csproj | head -5', 'Passed: 1')]).decision, 'block');
 });

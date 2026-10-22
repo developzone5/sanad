@@ -24,6 +24,10 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\install.ps1 -SkipTests
 
+      - name: Bundled Codex roles and canonical entrypoints
+        shell: pwsh
+        run: node --test hooks/tests/skills.test.js hooks/tests/engines.test.mjs
+
       - name: Hook suite (from the installed copy)
         shell: pwsh
         working-directory: ${{ github.workspace }}

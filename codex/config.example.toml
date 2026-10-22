@@ -1,0 +1,5 @@
+# Merge these keys into your existing config; do not replace personal settings.
+model_reasoning_effort = "xhigh"
+
+[agents]
+default_subagent_reasoning_effort = "xhigh"
