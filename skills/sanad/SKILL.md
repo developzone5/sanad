@@ -38,6 +38,7 @@ Route each new request by its intent, not by the project or the previous turn. N
   - Facts checked before building: `▸ checked: <n> facts confirmed, <m> not sure yet`
   - Build: `▸ built: <n> files changed, <n> tests pass`
 - Review and gate keep their machine lines (`REVIEW:` / `GATE:`, read by the hooks), never a `▸` line. Put one plain sentence on the line before each, e.g. `🟢 A second AI checked the change and found no problems.`
+- **Running list for multi-item work (user rule 2026-10-26).** When the task has 3 or more items (review comments, bugs, acceptance steps), keep one numbered list in the user's words, each line marked 🟢 done · 🟡 working on it · 🔵 not started · 🔴 blocked. Show it when work starts, again after each item finishes or changes state, and whenever the user asks for status — the user never has to ask "where is the list". Same numbers throughout; new items join at the end.
 - Zero prose between stages. No "now I will…", no restating the task.
 - Braintrust result to the user: the 6-line "What the user reads" block only; the full record goes to the spec.
 - The final message is the ship brief ONLY, in `/ship`'s format (What I changed and why / How I checked it / Risk / Not done / Where it goes, one line each), then the ask. Under 12 lines.

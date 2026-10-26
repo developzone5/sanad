@@ -54,7 +54,7 @@ Host first: tests on an in-memory/SQLite provider, the app under a watcher. Rebu
 ## ⛔ Definition of Done — evidence before a change ships
 
 1. **Builds clean** — zero errors, zero warnings.
-2. **Tests green** — suite run; tests added for exactly what changed, happy path and edges. Bug fixes: red before green, quote the failing assertion. Cannot reproduce → say so and ask.
+2. **Tests green** — suite run; tests added for exactly what changed, happy path and edges. Bug fixes: red before green with `gate/scripts/red-proof.mjs`, quote the failing assertion. Cannot reproduce → say so and ask.
 3. **Actually run it** — exercise the endpoint/command/provider yourself; browser acceptance per the user's checklist result; name any check that cannot run here.
 4. **Red-team your change** — null/empty/huge/malformed input, unauthorized user, duplicate or concurrent request, missing row, failed dependency: each shown handled, or fixed.
 5. **Security gate** above.
