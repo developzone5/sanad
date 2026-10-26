@@ -57,8 +57,10 @@ if [ -z "${WORKFLOW_TYPESCRIPT_RUNNER:-}" ]; then
     [ -f "$c" ] && export WORKFLOW_TYPESCRIPT_RUNNER="$c" && break
   done
 fi
-hooks=$(cd "$C/hooks/tests" && node --test 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ')
-gate=$(cd "$C/skills/gate/tests" && node --test 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ')
+# --test-reporter=spec: Node 22 prints TAP ("# pass N") when stdout is not a terminal; without it
+# the "ℹ pass N" lines are missing and the install ends with exit 1 (seen on the Sanad CI).
+hooks=$(cd "$C/hooks/tests" && node --test --test-reporter=spec 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ')
+gate=$(cd "$C/skills/gate/tests" && node --test --test-reporter=spec 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ')
 echo "hooks: $hooks"; echo "gate: $gate"
 { printf -- '- %s · %s · changed: %s' "$(date -u +%Y-%m-%dT%H:%MZ)" "$NAME" "${changed[*]}"
   [ ${#removed[@]} -gt 0 ] && printf ' · removed: %s' "${removed[*]}"
