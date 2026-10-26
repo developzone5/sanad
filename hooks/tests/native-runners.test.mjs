@@ -25,6 +25,11 @@ test('native Node package entrypoints are recognized without accepting arbitrary
   assert.equal(scan.segmentIsVerify(quote([process.execPath, 'scripts/tsc.js', '--noEmit'])), false);
   assert.equal(scan.segmentIsVerify(quote([process.execPath, 'scripts/npm-cli.js', 'run', 'check'])), false);
   assert.equal(scan.segmentIsVerify(quote([process.execPath, '-e', 'process.exit(0)', 'run', 'check'])), false);
+  // A pinned Node running the package's own vitest entrypoint is a test run; a lookalike script is not.
+  assert.equal(scan.segmentIsVerify(quote(['C:/tools/node-v20/node.exe', 'node_modules/vitest/vitest.mjs', 'run'])), true);
+  assert.equal(scan.segmentIsVerify(quote([process.execPath, 'C:/work/app/node_modules/vitest/vitest.mjs', 'run', 'src/a.test.tsx'])), true);
+  assert.equal(scan.segmentIsVerify(quote([process.execPath, 'scripts/vitest.mjs', 'run'])), false);
+  assert.deepEqual(target.nativeVerificationTarget('node.exe', ['node_modules\\vitest\\vitest.mjs', 'run']), { executable: 'vitest', args: ['run'] });
 });
 
 // Needs a real TypeScript install; point WORKFLOW_TYPESCRIPT_RUNNER at <any>/node_modules/typescript/bin/tsc.
