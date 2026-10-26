@@ -16,6 +16,10 @@ function nativeVerificationTarget(executable, args = []) {
     const script = rest[0].replace(/\\/g, '/');
     if (/(?:^|\/)node_modules\/typescript\/(?:bin\/tsc|lib\/tsc\.js)$/i.test(script)) {
       name = 'tsc'; rest.shift();
+    } else if (/(?:^|\/)node_modules\/vitest\/vitest\.mjs$/i.test(script)) {
+      // A pinned Node (e.g. the build image's major) runs vitest directly: npm's .cmd shims
+      // would pick whatever `node` is first on PATH instead.
+      name = 'vitest'; rest.shift();
     } else {
       const npm = /(?:^|\/)node_modules\/npm\/bin\/(npm|npx)-cli\.js$/i.exec(script);
       if (npm) { name = npm[1].toLowerCase(); rest.shift(); }
