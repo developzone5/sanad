@@ -28,7 +28,8 @@ while :; do
     [ -z "${handle:-}" ] && continue
     if [ -n "${report:-}" ] && report_exists "$brief" "$report"; then printf '%s\t%s\t%s\t%s\t%s\n' "$handle" "$role" "$wt" "$brief" "$report" >> "$tmp"; continue; fi
     open=$((open + 1))
-    tail_text="$(timeout 30 orca terminal read --environment "$ENVN" --terminal "$handle" 2>/dev/null | tr -d '\r' | grep -v '^\s*$' | tail -4)"
+    # Drop the input box (rules, prompt, mode line) first: it fills the last lines and hides the error.
+    tail_text="$(timeout 30 orca terminal read --environment "$ENVN" --terminal "$handle" 2>/dev/null | tr -d '\r' | grep -v '^\s*$' | grep -vE '^\s*(─|❯|⏵)' | tail -4)"
     if echo "$tail_text" | grep -qiE 'API Error|ENOTFOUND|ECONNRESET|socket hang up|Connection (reset|lost)'; then
       if echo "$tail_text" | grep -qE '(done|for [0-9]+m [0-9]+s) ?[0-9: APM]*$|· done '; then
         echo "$(date +%H:%M) $handle stopped on a connection error; restarting"
