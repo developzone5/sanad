@@ -4,7 +4,7 @@
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Dest D:\other\.claude -KeepSettings
 #
 # 1. Backs up every file it will replace to <Dest>\backups\sanad-install-<timestamp>\.
-# 2. Copies CLAUDE.md, skills\, hooks\, agents\, output-styles\ and scripts\workflow-install.sh.
+# 2. Copies CLAUDE.md, skills\, hooks\, agents\, output-styles\, scripts\workflow-install.sh and scripts\remote\.
 # 3. Writes settings.json with the hook paths pointed at <Dest>\hooks\ (skip with -KeepSettings).
 # 4. Runs the hook and gate test suites from the installed location (skip with -SkipTests).
 # Windows PowerShell 5.1 compatible. Never touches credentials, sessions, memory or projects.
@@ -30,7 +30,8 @@ $items = @(
   @{ From = 'hooks';                       To = 'hooks' },
   @{ From = 'agents';                      To = 'agents' },
   @{ From = 'output-styles';               To = 'output-styles' },
-  @{ From = 'scripts\workflow-install.sh'; To = 'scripts\workflow-install.sh' }
+  @{ From = 'scripts\workflow-install.sh'; To = 'scripts\workflow-install.sh' },
+  @{ From = 'scripts\remote';              To = 'scripts\remote' }
 )
 
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
