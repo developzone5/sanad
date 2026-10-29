@@ -63,6 +63,19 @@ Pending manual acceptance does not block independent static review or other
 checks, but it prevents a full GATE: PASS. A failed case returns to fixing.
 Recheck only cases affected by later UI/environment changes.
 
+**Test cases format (user rule 2026-10-28).** Write the checklist as test cases
+only, never a restatement of the ticket. Per ticket: a heading with the ticket
+key and its PR(s); the page or route and the design frame to compare; then
+numbered cases, one line each: `<account/role>: <action> → <expected result>`,
+with on-screen labels in the UI's language. Every requirement line of the ticket
+gets at least one case. With no ticket, the user's own request lines and the
+task's `Done means` take its place, under a heading with a short task name.
+Add the edge cases that apply: the wrong role and another
+user's or tenant's item, an empty list, boundary values (min/max, exactly at a
+deadline), late and closed states, offline or a failed request, and both locales
+plus phone width when the UI changed. The same file is the text the user pastes
+into the tracker and the list they test from; record their result per case number.
+
 Do not create or run browser automation solely for this acceptance unless asked.
 For a browser-only navigation/layout/wiring fix, this manual before/after evidence
 can satisfy UI reproduction and acceptance without a new executable browser test.
