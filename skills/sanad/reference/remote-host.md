@@ -13,6 +13,7 @@ Each part follows loop.md's **Fast test loop** (Step 3) and is re-checked as soo
 `bash ~/.claude/scripts/remote/orca-launch.sh --role <role> <environment> <remote-worktree> <remote-brief> ["one-line note"]`
 
 - Every launch names its role, so the remote uses the same models as Sanad here (user rule 2026-10-29): `code` and `risk-review` (Pass A, fresh-eyes) → Opus 5.5; `review` (Pass B), `recheck` (changed lines after a fix) and `chore` (tests, logs, test data, design comparison) → Sonnet 5.5; `judge` → Fable 5.1. All at xhigh. The launcher checks the terminal banner and prints `MODEL MISMATCH` when the model is wrong.
+- A `code` helper builds one part only: code, tests, checks, commit, report. It runs no reviewers of its own (user rule 2026-10-29: a helper's own review loop plus the central review doubled every fix's time). The main session reviews each part as it reports and runs the one round-1 review, the other engine included (loop.md Step 3.5).
 - If SSH cannot connect, the launcher checks the brief through Orca instead.
 
 - Write the brief as a file first and copy it to the remote (`scp`); the prompt only points at it. Write every brief with the file tool, one file per brief, never with a shell heredoc, `printf` or `sed` loop: Windows paths mixed with shell variables get mangled (`\U`, `\r`, `\E`, a literal `$wt`). Before copying, check each brief's path lines by eye. The launcher refuses `$` and backticks: a shell variable in a prompt arrives literally and the agent stops to ask which file was meant.
