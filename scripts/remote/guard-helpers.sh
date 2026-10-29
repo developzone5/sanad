@@ -3,7 +3,9 @@
 #
 # Usage: bash ~/.claude/scripts/remote/guard-helpers.sh <environment> <list-file>
 #   <list-file>  one helper per line, tab-separated: <handle> <role> <remote-worktree> <remote-brief> [report-file-name]
-#                A line whose report file exists on the remote is finished and is skipped.
+#                A line whose report file exists on the remote is finished: its terminal is closed once the
+#                screen is idle (or after 3 more checks), because a finished session left open keeps its
+#                memory (66 left open held 13.5 GB on 2026-10-29). The list then marks it "closed".
 # Every GUARD_INTERVAL_SECONDS (default 120) it reads each helper's terminal. A helper that stopped on a
 # connection error (API error, ENOTFOUND, connection reset, socket hang up) is relaunched through
 # orca-launch.sh with a note to continue from its saved work; the list file then holds the new handle.
@@ -21,15 +23,28 @@ report_exists() { # remote brief path, report name
   # -n: never read the caller's stdin (the loop reads the list file there).
   ssh -n -o BatchMode=yes -o ConnectTimeout=15 "$H_SSH" "if exist \"$dir\\$2\" (exit 0) else (exit 1)" >/dev/null 2>&1
 }
+screen_tail() { # handle: last 4 screen lines without the input box (rules, prompt, mode line), which hides the rest
+  timeout 30 orca terminal read --environment "$ENVN" --terminal "$1" 2>/dev/null | tr -d '\r' | grep -v '^\s*$' | grep -vE '^\s*(─|❯|⏵)' | tail -4
+}
 while :; do
   open=0; tmp="$(mktemp)"
   # The list is read on fd 3, so no command inside the loop can swallow the remaining lines.
-  while IFS=$'\t' read -r handle role wt brief report <&3; do
+  while IFS=$'\t' read -r handle role wt brief report state <&3; do
     [ -z "${handle:-}" ] && continue
-    if [ -n "${report:-}" ] && report_exists "$brief" "$report"; then printf '%s\t%s\t%s\t%s\t%s\n' "$handle" "$role" "$wt" "$brief" "$report" >> "$tmp"; continue; fi
+    if [ -n "${report:-}" ] && report_exists "$brief" "$report"; then
+      if [ "${state:-}" != closed ]; then
+        waits="${state:-0}"
+        if ! screen_tail "$handle" | grep -qE '…\s*\([0-9]+[ms]|Running…|esc to interrupt' || [ "$waits" -ge 3 ]; then
+          timeout 20 orca terminal close --environment "$ENVN" --terminal "$handle" >/dev/null 2>&1
+          echo "$(date +%H:%M) $handle reported; terminal closed"; state=closed
+        else
+          state=$((waits + 1)); open=$((open + 1))
+        fi
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$handle" "$role" "$wt" "$brief" "$report" "$state" >> "$tmp"; continue
+    fi
     open=$((open + 1))
-    # Drop the input box (rules, prompt, mode line) first: it fills the last lines and hides the error.
-    tail_text="$(timeout 30 orca terminal read --environment "$ENVN" --terminal "$handle" 2>/dev/null | tr -d '\r' | grep -v '^\s*$' | grep -vE '^\s*(─|❯|⏵)' | tail -4)"
+    tail_text="$(screen_tail "$handle")"
     if echo "$tail_text" | grep -qiE 'API Error|ENOTFOUND|ECONNRESET|socket hang up|Connection (reset|lost)'; then
       if echo "$tail_text" | grep -qE '(done|for [0-9]+m [0-9]+s) ?[0-9: APM]*$|· done '; then
         echo "$(date +%H:%M) $handle stopped on a connection error; restarting"
@@ -38,7 +53,7 @@ while :; do
         new="$(echo "$out" | grep -o 'term_[a-z0-9-]*' | head -1)"; [ -n "$new" ] && handle="$new"
       fi
     fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$handle" "$role" "$wt" "$brief" "${report:-}" >> "$tmp"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$handle" "$role" "$wt" "$brief" "${report:-}" "${state:-}" >> "$tmp"
   done 3< "$LIST"
   mv "$tmp" "$LIST"
   [ "$open" = 0 ] && { echo "$(date +%H:%M) every helper has reported"; exit 0; }
