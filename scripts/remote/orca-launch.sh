@@ -49,7 +49,9 @@ if [ "$rc" = 255 ]; then
 fi
 [ "$rc" = 0 ] || { echo "REFUSED: brief not found on $SSH_HOST: $BRIEF (copy it there first)"; exit 2; }
 
-PROMPT="Engine: Claude (already chosen; do not ask). Read the brief at $BRIEF and follow it exactly.${NOTE:+ $NOTE} Nobody can answer a permission prompt here, so never run a command that asks for one: no package or tool installs, no rm -rf (use a new folder name instead), no git checkout -- / restore / reset / clean / stash on changed files (commit or copy instead). Do not push."
+PART=""
+[ "$ROLE" = code ] && PART=" You build one part of a larger task: write the code and its tests, run the checks, commit and report. Do not start reviewer agents and skip Sanad's review step; the main session reviews every part together, with the other engine."
+PROMPT="Engine: Claude (already chosen; do not ask). Read the brief at $BRIEF and follow it exactly.${NOTE:+ $NOTE}${PART} Nobody can answer a permission prompt here, so never run a command that asks for one: no package or tool installs, no rm -rf (use a new folder name instead), no git checkout -- / restore / reset / clean / stash on changed files (commit or copy instead). Do not push."
 OUT="$(timeout 120 orca agent launch --environment "$ENV" --agent claude --worktree "path:$WT" \
   --model "$MODEL_ID" --effort xhigh --prompt "$PROMPT" 2>&1)" || {
   echo "LAUNCH FAILED:"; echo "$OUT" | tail -5; exit 1
