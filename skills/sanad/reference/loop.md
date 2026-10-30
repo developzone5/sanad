@@ -36,12 +36,15 @@ Exit: `▸ checked: <n> facts confirmed, <m> not sure yet`. Proven and open fact
 
 The decision record is the plan for Step 3. It carries a **touch list** — every other caller, writer, role, screen, locale and background path the change reaches, each covered by a `Done means` line or named out of scope — and ends with the final `Done means` (the contract: Step 3.5 checks coverage per line, `/gate` ticks each line with evidence). Prefer the narrowest change that satisfies the ask; a cross-cutting change needs a stated reason and proof for every writer it affects. Write `Done means` into the spec's `## Done means` section when a spec exists.
 
-**PR plan before coding (user rule 2026-10-28).** For every task, ticket or sprint on the `review` or `braintrust` route, show the user how many PRs the work needs before Step 3, and wait for their OK; a `direct` edit just says `1 PR` on its size line. One line per PR: its order, the tickets it covers, what it holds, a rough size (files, changed lines of logic) and its base (the integration branch, or the previous PR's branch when stacked). Sizing rules:
+**PR plan before coding (user rule 2026-10-28).** For every task, ticket or sprint on the `review` or `braintrust` route, show the user how many PRs the work needs before Step 3, and wait for their OK; a `direct` edit just says `1 PR` on its size line. One line per PR: its order, the tickets it covers, what it holds, a rough size (files, changed lines of logic), its base (the integration branch) and `independent` or `depends on #n` with the reason. Sizing rules:
 - One reviewable behavior per PR. Aim for at most ~400 changed lines of logic and ~30 files; tests, translations and generated files do not count toward the lines.
 - Shared contracts and expand-only migrations go in the first PR that needs them. Split backend and frontend when both are large.
 - Each PR builds, passes its tests and is safe to merge alone, in order. No PR shows users a half-built feature: an unfinished screen stays unlinked until the PR that completes it.
-- Stacked PRs carry their order in the title (`[n/N]`), in the project's title pattern.
+- PRs are small and independent by default (user rule 2026-10-30): each starts from the integration branch and works without any other open PR, so reviews can run at the same time. A PR that really needs another one is marked in the plan and starts only after that PR is merged. No stacks of open PRs, and each PR is reviewed before a PR that depends on it starts.
+- A series of ordered PRs carries its order in the title (`[n/N]`), in the project's title pattern.
 - One PR is fine for small work; say why. A PR that grows past the limits during the build is re-planned with the user before it grows further.
+
+**Exact briefs (user rule 2026-10-30).** Before a helper gets a fix, the main session finds the cause and writes the exact files and the exact change, so the helper only applies it, tests it and reports. "Find out why" is for real unknowns only, and the brief says so. A small text or style fix the main session makes itself. Seen 2026-10-30: 11 minutes with an exact brief, about 36 with "compare and find".
 
 Routing replaces the every-bug panel rule (user choice 2026-09-21): small understood changes use `review`; cosmetic/mechanical edits use `direct`; complex, substantial, uncertain or sensitive work uses `braintrust`. Teaching, questions, checks, standalone reviews and docs never convene a panel.
 
