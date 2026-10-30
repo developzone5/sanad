@@ -29,7 +29,7 @@ Each part follows loop.md's **Fast test loop** (Step 3) and is re-checked as soo
 
 ## Builds and containers on the remote
 
-- A host build must never write into a tree that a container bind-mounts: send build and test output outside it (for .NET, `--artifacts-path <outside folder>`). Before starting the stack, check the project's build folders for host paths and remove them if found.
+- A host build must never write into a tree that a container bind-mounts: send build and test output outside it (for .NET, `--artifacts-path <outside folder>`). A worktree no container mounts keeps its output inside the repo: some tests find the repo root from the build output path and fail with an outside path. Before starting the stack, check the project's build folders for host paths and remove them if found.
 - Containers start with images already on the machine (`compose up -d --no-build --pull never`); an SSH session often cannot reach the desktop credential store to pull or build.
 - The app stack runs only when needed (user rule 2026-10-29): stop it (`compose stop`) while helpers build and test, and start it only for real-database tests or the user's browser check; it is the largest memory user (with it and 4 helpers the remote had 0.5 GB free, without it 5.5 GB). The desktop container app itself cannot be started from SSH: when it is closed, ask the user to open it, then start the containers yourself.
 - Helper limit on a strong remote: measure, do not guess. Check CPU and free memory after each wave of helpers; keep free memory above about 2 GB.
