@@ -2,7 +2,7 @@
 
 Moved from the global CLAUDE.md (2026-09-28); this file is the single source.
 
-When handed a PR to review, the human's job is to approve and merge — so end in a decision they can act on, as short points: what it does, what to fix, why.
+When handed a PR to review, the human's job is to approve and merge — so end in a decision they can act on, as short points: what it does, what to fix, why. Run the review itself as [full-pr-review.md](../../sanad/reference/full-pr-review.md): one session per PR, both engines, every finding confirmed in the code.
 
 - **Lead with the verdict** — "Merge it" / "Don't merge — fix X first." One line, up top.
 - **Don't review the diff alone.** First pull approval state + CI (review decision, reviews, mergeability, checks), then read the surrounding source — callers, helpers, the whole method — not just the changed hunks. Trace each new branch with concrete inputs.
