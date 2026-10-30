@@ -26,12 +26,18 @@ report_exists() { # remote brief path, report name
 screen_tail() { # handle: last 4 screen lines without the input box (rules, prompt, mode line), which hides the rest
   timeout 30 orca terminal read --environment "$ENVN" --terminal "$1" 2>/dev/null | tr -d '\r' | grep -v '^\s*$' | grep -vE '^\s*(─|❯|⏵)' | tail -4
 }
+report_done() { # handle, remote brief path, report name: the screen first, so a working helper costs no SSH login
+  local text; text="$(timeout 30 orca terminal read --environment "$ENVN" --terminal "$1" 2>/dev/null | tr -d '\r')"
+  echo "$text" | grep -qE '^[[:space:]]*(● ?)?REPORT WRITTEN\.?[[:space:]]*$' && return 0
+  echo "$text" | grep -v '^\s*$' | grep -vE '^\s*(─|❯|⏵)' | tail -4 | grep -qE '…\s*\([0-9]+[ms]|Running…|esc to interrupt' && return 1
+  report_exists "$2" "$3"
+}
 while :; do
   open=0; tmp="$(mktemp)"
   # The list is read on fd 3, so no command inside the loop can swallow the remaining lines.
   while IFS=$'\t' read -r handle role wt brief report state <&3; do
     [ -z "${handle:-}" ] && continue
-    if [ -n "${report:-}" ] && report_exists "$brief" "$report"; then
+    if [ -n "${report:-}" ] && { [ "${state:-}" = closed ] || report_done "$handle" "$brief" "$report"; }; then
       if [ "${state:-}" != closed ]; then
         waits="${state:-0}"
         if ! screen_tail "$handle" | grep -qE '…\s*\([0-9]+[ms]|Running…|esc to interrupt' || [ "$waits" -ge 3 ]; then
