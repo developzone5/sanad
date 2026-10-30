@@ -7,6 +7,7 @@
 # 2. Copies CLAUDE.md, skills\, hooks\, agents\, output-styles\, scripts\workflow-install.sh and scripts\remote\.
 # 3. Writes settings.json with the hook paths pointed at <Dest>\hooks\ (skip with -KeepSettings).
 # 4. Runs the hook and gate test suites from the installed location (skip with -SkipTests).
+# 5. Registers the two Docker tasks for this user (scripts\docker\register-tasks.ps1).
 # Windows PowerShell 5.1 compatible. Never touches credentials, sessions, memory or projects.
 
 [CmdletBinding()]
@@ -31,7 +32,8 @@ $items = @(
   @{ From = 'agents';                      To = 'agents' },
   @{ From = 'output-styles';               To = 'output-styles' },
   @{ From = 'scripts\workflow-install.sh'; To = 'scripts\workflow-install.sh' },
-  @{ From = 'scripts\remote';              To = 'scripts\remote' }
+  @{ From = 'scripts\remote';              To = 'scripts\remote' },
+  @{ From = 'scripts\docker';              To = 'scripts\docker' }
 )
 
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
@@ -96,6 +98,8 @@ if ($SkipTests) {
     if ($fail -ne '0') { Write-Host $out; throw "Test suite failed: $suite" }
   }
 }
+
+& (Join-Path $Dest 'scripts\docker\register-tasks.ps1')
 
 Write-Host ''
 Write-Host 'Sanad installed. Restart Claude Code, then check /hooks and /help.'
