@@ -9,6 +9,8 @@
 # Every GUARD_INTERVAL_SECONDS (default 120) it reads each helper's terminal. A helper that stopped on a
 # connection error (API error, ENOTFOUND, connection reset, socket hang up) is relaunched through
 # orca-launch.sh with a note to continue from its saved work; the list file then holds the new handle.
+# A helper on a permission prompt can never go on, because nobody can answer it: it is closed and
+# relaunched with a note to avoid that command.
 # Ends when every line's report exists, or after GUARD_MAX_SECONDS (default 14400).
 set -uo pipefail
 
@@ -17,6 +19,8 @@ L="$HOME/.claude/scripts/remote/orca-launch.sh"
 H_SSH="${ORCA_SSH_HOST:-$ENVN}"
 STEP="${GUARD_INTERVAL_SECONDS:-120}"; MAX="${GUARD_MAX_SECONDS:-14400}"; start=$SECONDS
 NOTE='You were restarted after a network drop. Your commits and the uncommitted changes in git status are your work in progress: continue from them, never discard them, and finish the brief.'
+
+PROMPT_NOTE='You were restarted because a command stopped on a permission prompt nobody can answer. Your commits and the changes in git status are your work in progress: continue from them. Use a simpler form of that command, one step at a time.'
 
 report_exists() { # remote brief path, report name
   local dir="${1%[\\/]*}"
@@ -50,6 +54,13 @@ while :; do
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$handle" "$role" "$wt" "$brief" "$report" "$state" >> "$tmp"; continue
     fi
     open=$((open + 1))
+    if timeout 30 orca terminal read --environment "$ENVN" --terminal "$handle" 2>/dev/null | tr -d '\r' | tail -12 | grep -q 'Do you want to proceed'; then
+      echo "$(date +%H:%M) $handle stuck on a permission prompt; restarting"
+      timeout 20 orca terminal close --environment "$ENVN" --terminal "$handle" >/dev/null 2>&1
+      out="$(bash "$L" --role "$role" "$ENVN" "$wt" "$brief" "$PROMPT_NOTE" 2>&1)"; echo "  $out"
+      new="$(echo "$out" | grep -o 'term_[a-z0-9-]*' | head -1)"; [ -n "$new" ] && handle="$new"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$handle" "$role" "$wt" "$brief" "${report:-}" "${state:-}" >> "$tmp"; continue
+    fi
     tail_text="$(screen_tail "$handle")"
     if echo "$tail_text" | grep -qiE 'API Error|ENOTFOUND|ECONNRESET|socket hang up|Connection (reset|lost)'; then
       if echo "$tail_text" | grep -qE '(done|for [0-9]+m [0-9]+s) ?[0-9: APM]*$|· done '; then

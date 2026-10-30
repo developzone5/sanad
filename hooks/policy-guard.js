@@ -159,6 +159,8 @@ function checkGit(g) {
       if (has(/^--force$/) || has(/^-[a-zA-Z]*[fdxX]/)) ask('`git clean` deletes untracked files');
       return;
     case 'branch':
+      // A listing form never deletes; its arguments can hold any text (a -S"..." search).
+      if (has(/^(--contains|--no-contains|--merged|--no-merged|--points-at|--list|--show-current)$/) && !has(/^(-d|-D|--delete)$/)) return;
       if (has(/^(-d|-D|--delete)$/) || shortHas('d') || shortHas('D'))
         ask('deleting a branch — CLAUDE.md: branch deletion needs explicit confirmation (-D also loses unmerged commits)');
       return;

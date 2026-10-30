@@ -84,7 +84,7 @@ test('F3: every publish spelling, dependency addition and branch deletion asks; 
     assert.equal((await decide('policy-guard.js', command, { cwd })).decision, 'ask', command);
   }
   for (const command of ['npm ci', 'npm install', 'npm run build', 'npm test', 'pip install -r requirements.txt', 'git branch -a',
-    'git branch --show-current', 'git branch -vv', 'dotnet add reference ../x/x.csproj', 'dotnet test']) {
+    'git branch --show-current', 'git branch -vv', 'git branch --contains abc123', 'git branch --contains $(git log --format=%h -S"showDrafts" main | tail -1)', 'dotnet add reference ../x/x.csproj', 'dotnet test']) {
     assert.equal((await decide('policy-guard.js', command, { cwd })).decision, 'allow', command);
   }
 });
