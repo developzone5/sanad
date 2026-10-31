@@ -75,7 +75,7 @@ Follow the selected task engine in [engines.md](engines.md). Every Codex role us
 | `routine-reviewer` | Sonnet 5.5 / xhigh, read-only | Pass B whole-diff review and every re-check after fixes |
 | `braintrust-expert` | Opus 5.5 / xhigh, read-only | deep-risk seats (Architect, Skeptic, Database, Security, Authenticity, added domain) |
 | `braintrust-expert-sonnet` | Sonnet 5.5 / xhigh, read-only | practical seats (Pragmatist, Performance, Product) |
-| `sonnet-worker` | Sonnet 5.5 / medium | `direct`-route mechanical edits; evidence chores (run named tests, condense output, read logs) |
+| `sonnet-worker` | Sonnet 5.5 / medium | `direct`-route mechanical edits; test-only items; evidence chores (run named tests, condense output, read logs) |
 
 The Agent tool sets a model but not effort; the pinned agent files carry the effort. Verify actual run metadata; a settings edit does not switch a running session. Spawn a helper only when delegation saves work, never one per command; use direct local reads for small lookups.
 

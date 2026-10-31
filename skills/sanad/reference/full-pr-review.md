@@ -37,7 +37,7 @@ Write the report at the path in the prompt: one entry per finding, most severe f
 ## After the reports
 
 1. Check each finding still exists on the top branch; later work may have removed the file.
-2. Confirm or dismiss each one by reading the code, and record why. A finding is a lead until then.
+2. Confirm or dismiss each one by reading the code, and record why. A finding is a lead until then. A P2 needs no separate checking session: write its test first, and if the test cannot fail, the finding is not real.
 3. Fix each real one with a test that fails first, using exact briefs (`loop.md`).
 4. Re-check each fix and the code around it, callers included: a fix can open a new hole, and changed lines alone do not show that. Run the full review again when the fixes changed a large part of a PR.
 5. Finish line: a PR passes at 0 confirmed bugs in normal use and 0 that lose data or give wrong access. Rare display items get fixed or are listed for the user to decide. Report the real count: confirmed, dismissed, gone, and how many happen in normal use.

@@ -3,7 +3,8 @@
 Run setup, the check, and cleanup as separate commands. For red-before-green,
 use `scripts/red-proof.mjs` (it swaps in the old fix files, runs the test once and
 restores them byte for byte; its own exit is 0 for RED, so no failed check is left
-behind), then run the test itself after the fix.
+behind), then run the test itself after the fix. Its `--break` form proves a test of
+code that already works, by changing one exact text for the run.
 Never repeat a stash/pop bundle to satisfy a hook. An opaque old bundle stays
 unverified until its actual failed steps are understood; a green unrelated test
 cannot clear it. ESLint warnings with native exit 0 are warnings, not command

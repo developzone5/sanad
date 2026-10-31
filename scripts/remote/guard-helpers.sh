@@ -10,7 +10,8 @@
 # connection error (API error, ENOTFOUND, connection reset, socket hang up) is relaunched through
 # orca-launch.sh with a note to continue from its saved work; the list file then holds the new handle.
 # A helper on a permission prompt can never go on, because nobody can answer it: it is closed and
-# relaunched with a note to avoid that command.
+# relaunched with a note to avoid that command. Its screen is first saved to <list-file>.stops.log,
+# so the command that stopped it can be fixed.
 # Ends when every line's report exists, or after GUARD_MAX_SECONDS (default 14400).
 set -uo pipefail
 
@@ -54,8 +55,10 @@ while :; do
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$handle" "$role" "$wt" "$brief" "$report" "$state" >> "$tmp"; continue
     fi
     open=$((open + 1))
-    if timeout 30 orca terminal read --environment "$ENVN" --terminal "$handle" 2>/dev/null | tr -d '\r' | tail -12 | grep -q 'Do you want to proceed'; then
+    screen="$(timeout 30 orca terminal read --environment "$ENVN" --terminal "$handle" 2>/dev/null | tr -d '\r' | tail -40)"
+    if echo "$screen" | tail -12 | grep -q 'Do you want to proceed'; then
       echo "$(date +%H:%M) $handle stuck on a permission prompt; restarting"
+      { echo "=== $(date '+%F %H:%M') $handle $brief"; echo "$screen"; } >> "$LIST.stops.log"
       timeout 20 orca terminal close --environment "$ENVN" --terminal "$handle" >/dev/null 2>&1
       out="$(bash "$L" --role "$role" "$ENVN" "$wt" "$brief" "$PROMPT_NOTE" 2>&1)"; echo "  $out"
       new="$(echo "$out" | grep -o 'term_[a-z0-9-]*' | head -1)"; [ -n "$new" ] && handle="$new"
