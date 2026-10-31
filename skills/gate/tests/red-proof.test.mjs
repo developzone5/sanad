@@ -56,3 +56,40 @@ test('usage errors and unknown refs exit 2 and change nothing', () => {
   assert.equal(run(['--repo', repo, '--old', 'no-such-ref', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']).status, 2);
   assert.match(fs.readFileSync(path.join(repo, 'app.cjs'), 'utf8'), /fixed/);
 });
+
+const breakArgs = (repo, find, put) => ['--repo', repo, '--break', 'app.cjs', '--find', find, '--put', put, '--', process.execPath, 'check.cjs'];
+
+test('--break: a test that needs the line is RED, and the file comes back byte for byte', () => {
+  const { repo } = fixture();
+  const before = fs.readFileSync(path.join(repo, 'app.cjs'));
+  const result = run(breakArgs(repo, 'exports = 2', 'exports = 3'));
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /RED ✓ — the test fails with app\.cjs broken/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before);
+});
+
+test('--break: a test that ignores the line is NOT RED (exit 1), file restored', () => {
+  const { repo } = fixture();
+  fs.writeFileSync(path.join(repo, 'check.cjs'), 'process.exit(0);\n');
+  const result = run(breakArgs(repo, 'exports = 2', 'exports = 3'));
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /NOT RED ✗/);
+  assert.match(fs.readFileSync(path.join(repo, 'app.cjs'), 'utf8'), /exports = 2/);
+});
+
+test('--break: text that matches zero or two times exits 2 and changes nothing', () => {
+  const { repo } = fixture();
+  fs.writeFileSync(path.join(repo, 'app.cjs'), 'module.exports = 2; // 2\n');
+  const before = fs.readFileSync(path.join(repo, 'app.cjs'));
+  assert.equal(run(breakArgs(repo, 'not in the file', 'x')).status, 2);
+  assert.equal(run(breakArgs(repo, '2', '3')).status, 2);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before);
+});
+
+test('--break: a test command that cannot start still restores the file', () => {
+  const { repo } = fixture();
+  const before = fs.readFileSync(path.join(repo, 'app.cjs'));
+  const result = run(['--repo', repo, '--break', 'app.cjs', '--find', 'exports = 2', '--put', 'exports = 3', '--', 'no-such-program-here']);
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before);
+});

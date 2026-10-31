@@ -12,10 +12,14 @@
 // Usage:
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --old <git-ref> --files <a,b,...>
 //        [--cwd <dir>] [--log <file>] -- <executable> [args...]
+//   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --break <file> --find <text> --put <text>
+//        [--cwd <dir>] [--log <file>] -- <executable> [args...]
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --restore <backup-dir>
 // --files are repo-relative paths of the FIX (not the test): each takes its <old> version for the
 // run (a file that did not exist at <old> is removed for the run). The test command runs without
 // a shell; pass the real executable (node <entrypoint>, dotnet, ...), not a .cmd shim.
+// --break proves a test of code that already works, where no old version fails: for one run it
+// replaces <text> in that one file, which must match exactly once, then puts the file back.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -56,14 +60,25 @@ if (opt('--restore')) {
 
 const repo = opt('--repo') && path.resolve(opt('--repo'));
 const oldRef = opt('--old');
-const files = (opt('--files') || '').split(',').map((f) => f.trim().replace(/\\/g, '/')).filter(Boolean);
-if (!repo || !oldRef || !files.length || !command.length) {
+const breakFile = opt('--break')?.replace(/\\/g, '/');
+const find = opt('--find');
+const put = opt('--put');
+const files = breakFile ? [breakFile] : (opt('--files') || '').split(',').map((f) => f.trim().replace(/\\/g, '/')).filter(Boolean);
+const ready = breakFile ? find && put !== undefined : oldRef && files.length;
+if (!repo || !ready || !command.length) {
   say('usage: red-proof.mjs --repo <path> --old <git-ref> --files <a,b> [--cwd <dir>] [--log <file>] -- <executable> [args...]');
+  say('   or: red-proof.mjs --repo <path> --break <file> --find <text> --put <text> [--cwd <dir>] [--log <file>] -- <executable> [args...]');
   process.exit(2);
 }
 const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'buffer', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-try { git('rev-parse', '--verify', oldRef + '^{commit}'); }
-catch { say(`RED-PROOF: unknown --old ref ${oldRef}`); process.exit(2); }
+if (breakFile) {
+  const target = path.join(repo, breakFile);
+  const hits = fs.existsSync(target) ? fs.readFileSync(target, 'utf8').split(find).length - 1 : 0;
+  if (hits !== 1) { say(`RED-PROOF: --find matches ${hits} time(s) in ${breakFile}; it must match exactly once. Nothing changed.`); process.exit(2); }
+} else {
+  try { git('rev-parse', '--verify', oldRef + '^{commit}'); }
+  catch { say(`RED-PROOF: unknown --old ref ${oldRef}`); process.exit(2); }
+}
 
 // Back up the current files (outside the repo) before anything changes.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'red-proof-'));
@@ -83,6 +98,7 @@ let swapError = null;
 try {
   for (const entry of manifest.files) {
     const target = path.join(repo, entry.file);
+    if (breakFile) { fs.writeFileSync(target, fs.readFileSync(target, 'utf8').replace(find, () => put)); continue; }
     let old = null;
     try { old = git('show', `${oldRef}:${entry.file}`); } catch { old = null; }
     if (old === null) { if (fs.existsSync(target)) fs.rmSync(target); }
@@ -107,8 +123,8 @@ if (result.error) { say(`RED-PROOF: the test command could not run — ${result.
 const code = result.status;
 say(tail);
 if (code !== 0) {
-  say(`RED-PROOF: RED ✓ — the test fails on ${oldRef} for ${files.join(', ')} (exit ${code}); files restored.`);
+  say(`RED-PROOF: RED ✓ — the test fails ${breakFile ? `with ${breakFile} broken` : `on ${oldRef} for ${files.join(', ')}`} (exit ${code}); files restored.`);
   process.exit(0);
 }
-say(`RED-PROOF: NOT RED ✗ — the test passes on ${oldRef}, so it does not prove the fix; files restored.`);
+say(`RED-PROOF: NOT RED ✗ — the test passes ${breakFile ? `with ${breakFile} broken, so it does not check that code` : `on ${oldRef}, so it does not prove the fix`}; files restored.`);
 process.exit(1);

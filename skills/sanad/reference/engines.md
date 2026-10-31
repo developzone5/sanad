@@ -20,7 +20,7 @@ These assignments control all Sanad roles. Claude retains its existing setup. **
 | Pass B, whole diff and re-check | `routine-reviewer`: Sonnet 5.5 / xhigh | `sanad-reviewer`: `gpt-6.1-sol` / xhigh |
 | Deep-risk expert (Architect, Skeptic, Database, Security, Authenticity, added domain) | `braintrust-expert`: Opus 5.5 / xhigh | `sanad-expert`: `gpt-6-astra` / xhigh |
 | Practical expert (Pragmatist, Performance, Product) | `braintrust-expert-sonnet`: Sonnet 5.5 / xhigh | `sanad-practical-expert`: `gpt-6.1-sol` / xhigh |
-| Mechanical worker / narrow fact or evidence chore | `sonnet-worker`: Sonnet 5.5 / medium | `sanad-worker`: `gpt-6-luna` / xhigh |
+| Mechanical worker / test-only items / narrow fact or evidence chore | `sonnet-worker`: Sonnet 5.5 / medium | `sanad-worker`: `gpt-6-luna` / xhigh |
 
 Bosses, experts and reviewers are read-only and do not spawn children. A worker receives exact files/commands and returns its diff/evidence to the main executor; it never owns behavior changes or publishing. All existing scope, independence, two-pass review, security, verification and publishing controls still apply.
 

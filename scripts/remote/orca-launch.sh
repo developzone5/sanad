@@ -8,7 +8,8 @@
 #                        review       whole-diff review                 Sonnet 5.5
 #                        recheck      re-check of changed lines         Sonnet 5.5
 #                        chore        tests, logs, data, design compare Sonnet 5.5
-#                        judge        final judgement over reports      Fable 5.1
+#                        tests        adds tests, changes no product code Sonnet 5.5
+#                        judge       final judgement over reports      Fable 5.1
 #   <environment>      saved Orca environment name (also the SSH alias unless ORCA_SSH_HOST is set)
 #   <remote-worktree>  workspace path on the remote, e.g. C:/Users/me/source/repos/App
 #   <remote-brief>     brief file path on the remote; it must already exist there
@@ -21,9 +22,9 @@ ROLE=code
 if [ "${1:-}" = "--role" ]; then ROLE="${2:?role}"; shift 2; fi
 case "$ROLE" in
   code | risk-review) MODEL_ID=claude-opus-5-5; MODEL_NAME='Opus 5.5' ;;
-  review | recheck | chore) MODEL_ID=claude-sonnet-5-5; MODEL_NAME='Sonnet 5.5' ;;
+  review | recheck | chore | tests) MODEL_ID=claude-sonnet-5-5; MODEL_NAME='Sonnet 5.5' ;;
   judge) MODEL_ID=claude-fable-5-1; MODEL_NAME='Fable 5.1' ;;
-  *) echo "REFUSED: unknown role '$ROLE' (code, risk-review, review, recheck, chore, judge)"; exit 2 ;;
+  *) echo "REFUSED: unknown role '$ROLE' (code, risk-review, review, recheck, chore, tests, judge)"; exit 2 ;;
 esac
 
 ENV="${1:?environment}"; WT="${2:?remote worktree}"; BRIEF="${3:?remote brief path}"; NOTE="${4:-}"
@@ -51,7 +52,8 @@ fi
 
 PART=""
 [ "$ROLE" = code ] && PART=" You build one part of a larger task: write the code and its tests, run the checks, commit and report. Do not start reviewer agents and skip Sanad's review step; the main session reviews every part together, with the other engine."
-PROMPT="Engine: Claude (already chosen; do not ask). Read the brief at $BRIEF and follow it exactly.${NOTE:+ $NOTE}${PART} Nobody can answer a permission prompt here, so never run a command that asks for one: no package or tool installs, no rm -rf (use a new folder name instead), no git checkout -- / restore / reset / clean / stash on changed files (commit or copy instead). Do not push."
+[ "$ROLE" = tests ] && PART=" You add tests for code that already works. Change no product code. A new test that fails may be a real bug: do not fix it and do not commit it; write it and its failure in your report."
+PROMPT="Engine: Claude (already chosen; do not ask). Read the brief at $BRIEF and follow it exactly.${NOTE:+ $NOTE}${PART} Nobody can answer a permission prompt here, so never run a command that asks for one: no package or tool installs, no rm -rf (use a new folder name instead), no git checkout -- / restore / reset / clean / stash on changed files (commit or copy instead), no low-level git commands or git environment settings (update-index, read-tree, commit-tree, GIT_INDEX_FILE). To prove a test against broken code, use red-proof.mjs --break. Do not push."
 OUT="$(timeout 120 orca agent launch --environment "$ENV" --agent claude --worktree "path:$WT" \
   --model "$MODEL_ID" --effort xhigh --prompt "$PROMPT" 2>&1)" || {
   echo "LAUNCH FAILED:"; echo "$OUT" | tail -5; exit 1
