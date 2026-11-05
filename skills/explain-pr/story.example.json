@@ -1,0 +1,507 @@
+{
+  "title": {
+    "ar": "قفل الحساب بعد خمس كلمات مرور خاطئة",
+    "en": "Lock accounts after five wrong passwords"
+  },
+  "summary": {
+    "ar": "يُقفل الحساب الآن بعد خمس محاولات خاطئة، والصفحة تقول متى يمكن المحاولة.",
+    "en": "Accounts now lock after five wrong passwords, and the page says when to retry."
+  },
+  "pr": {
+    "number": 123,
+    "branch": "fix/login-lockout",
+    "base": "staging",
+    "author": "someone"
+  },
+  "source": "gh pr diff 123",
+  "defaultLang": "ar",
+  "files": [
+    "Infrastructure/Services/AuthService.cs",
+    "Tests/AuthServiceTests.cs",
+    "web/src/pages/Login.tsx"
+  ],
+  "chapters": [
+    {
+      "kind": "fix",
+      "name": {
+        "ar": "القفل بعد خمس محاولات",
+        "en": "Lock after five tries"
+      },
+      "takeaway": {
+        "ar": "خمس محاولات خاطئة تقفل الحساب 15 دقيقة.",
+        "en": "Five wrong passwords lock the account for 15 minutes."
+      },
+      "short": {
+        "before": {
+          "ar": "عشر محاولات",
+          "en": "Ten tries allowed"
+        },
+        "after": {
+          "ar": "خمس محاولات",
+          "en": "Five tries allowed"
+        }
+      },
+      "problem": {
+        "ar": "كان يمكن تخمين كلمة المرور عشر مرات قبل قفل الحساب.",
+        "en": "Someone could guess a password ten times before the account locked."
+      },
+      "cause": {
+        "ar": "حد القفل في الخدمة كان «أكثر من عشر».",
+        "en": "The lock limit in the service was more than ten."
+      },
+      "idea": {
+        "ar": "صار الحد خمس محاولات، ثم يُقفل الحساب 15 دقيقة، وتعرض الصفحة وقت المحاولة التالية.",
+        "en": "The limit is now five tries, then the account locks for 15 minutes and the page shows when to retry."
+      },
+      "files": [
+        "Infrastructure/Services/AuthService.cs",
+        "Tests/AuthServiceTests.cs",
+        "web/src/pages/Login.tsx"
+      ],
+      "mock": {
+        "before": {
+          "title": {
+            "ar": "صفحة الدخول — المحاولة 5",
+            "en": "Sign-in page — try 5"
+          },
+          "rows": [
+            {
+              "text": {
+                "ar": "كلمة مرور خاطئة",
+                "en": "Wrong password"
+              },
+              "badge": {
+                "ar": "حاول مجددًا",
+                "en": "try again"
+              },
+              "tone": "bad"
+            }
+          ]
+        },
+        "after": {
+          "title": {
+            "ar": "صفحة الدخول — المحاولة 5",
+            "en": "Sign-in page — try 5"
+          },
+          "rows": [
+            {
+              "text": {
+                "ar": "الحساب مقفل",
+                "en": "Account locked"
+              },
+              "badge": {
+                "ar": "حتى 09:15",
+                "en": "until 09:15"
+              },
+              "tone": "good"
+            }
+          ]
+        }
+      },
+      "journey": {
+        "stations": [
+          {
+            "layer": "frontend",
+            "label": {
+              "ar": "صفحة الدخول",
+              "en": "Sign-in page"
+            }
+          },
+          {
+            "layer": "api",
+            "label": "POST /login"
+          },
+          {
+            "layer": "service",
+            "label": {
+              "ar": "عدّ المحاولات",
+              "en": "Count tries"
+            }
+          },
+          {
+            "layer": "database",
+            "label": {
+              "ar": "قاعدة البيانات",
+              "en": "Database"
+            }
+          }
+        ],
+        "changeAt": 2,
+        "item": {
+          "ar": "حساب سارة",
+          "en": "Sara's account"
+        },
+        "before": {
+          "badge": {
+            "ar": "مفتوح",
+            "en": "open"
+          },
+          "tone": "bad",
+          "why": {
+            "ar": "هل تجاوز عشر محاولات؟",
+            "en": "More than ten tries?"
+          }
+        },
+        "after": {
+          "badge": {
+            "ar": "مقفل",
+            "en": "locked"
+          },
+          "tone": "good",
+          "why": {
+            "ar": "هل وصل إلى خمس محاولات؟",
+            "en": "Reached five tries?"
+          }
+        }
+      },
+      "lab": {
+        "inputs": [
+          {
+            "id": "failed",
+            "label": {
+              "ar": "محاولات فاشلة",
+              "en": "Failed tries"
+            },
+            "type": "number",
+            "min": 0,
+            "max": 20,
+            "step": 1
+          }
+        ],
+        "old": {
+          "rules": [
+            {
+              "when": [
+                {
+                  "a": "failed",
+                  "op": "gt",
+                  "b": 10
+                }
+              ],
+              "then": {
+                "ar": "مقفل",
+                "en": "locked"
+              }
+            }
+          ],
+          "default": {
+            "ar": "مفتوح",
+            "en": "open"
+          }
+        },
+        "new": {
+          "rules": [
+            {
+              "when": [
+                {
+                  "a": "failed",
+                  "op": "ge",
+                  "b": 5
+                }
+              ],
+              "then": {
+                "ar": "مقفل",
+                "en": "locked"
+              }
+            }
+          ],
+          "default": {
+            "ar": "مفتوح",
+            "en": "open"
+          }
+        },
+        "presets": [
+          {
+            "values": {
+              "failed": 4
+            }
+          },
+          {
+            "values": {
+              "failed": 5
+            }
+          },
+          {
+            "values": {
+              "failed": 11
+            }
+          }
+        ]
+      },
+      "code": [
+        {
+          "file": "Infrastructure/Services/AuthService.cs",
+          "line": 112,
+          "lines": [
+            {
+              "c": " user.FailedLogins += 1;",
+              "note": {
+                "ar": "كل كلمة مرور خاطئة تضيف محاولة.",
+                "en": "Each wrong password adds one try."
+              }
+            },
+            {
+              "c": "-if (user.FailedLogins > 10)",
+              "note": {
+                "ar": "القديم: القفل بعد أكثر من عشر.",
+                "en": "Old: lock after more than ten."
+              }
+            },
+            {
+              "c": "+if (user.FailedLogins >= 5)",
+              "note": {
+                "ar": "الجديد: القفل عند الخامسة.",
+                "en": "New: lock at the fifth."
+              }
+            },
+            {
+              "c": "     user.LockedUntil = clock.UtcNow.AddMinutes(15);",
+              "note": {
+                "ar": "يُقفل الحساب 15 دقيقة.",
+                "en": "The account locks for 15 minutes."
+              }
+            }
+          ]
+        }
+      ],
+      "walk": [
+        {
+          "layer": "frontend",
+          "label": {
+            "ar": "صفحة الدخول",
+            "en": "Sign-in page"
+          },
+          "changed": true,
+          "file": "web/src/pages/Login.tsx",
+          "line": 48,
+          "does": {
+            "ar": "ترسل الصفحة البريد وكلمة المرور، ثم تعرض وقت المحاولة التالية.",
+            "en": "The page sends the email and password, then shows when to retry."
+          },
+          "passes": {
+            "ar": "البريد وكلمة المرور",
+            "en": "the email and password"
+          },
+          "lines": [
+            {
+              "c": " const res = await authApi.login(email, password);",
+              "note": {
+                "ar": "يرسل البريد وكلمة المرور إلى الخادم.",
+                "en": "Sends the email and password to the server."
+              }
+            },
+            {
+              "c": "+if (res.lockedUntil) setRetryAt(res.lockedUntil);",
+              "note": {
+                "ar": "جديد: يعرض متى يمكن المحاولة مرة أخرى.",
+                "en": "New: shows when the user can try again."
+              }
+            }
+          ]
+        },
+        {
+          "layer": "api",
+          "label": "POST /login",
+          "file": "Api/Controllers/AuthController.cs",
+          "line": 31,
+          "does": {
+            "ar": "يستقبل الطلب ويمرره إلى الخدمة كما هو.",
+            "en": "Receives the request and hands it to the service as it is."
+          },
+          "passes": "LoginDto",
+          "lines": [
+            " [HttpPost(\"login\")]",
+            {
+              "c": " public async Task<IActionResult> Login(LoginDto dto)",
+              "note": {
+                "ar": "هنا يصل الطلب من الصفحة.",
+                "en": "The request from the page arrives here."
+              }
+            },
+            {
+              "c": "     => Ok(await auth.LoginAsync(dto));",
+              "note": {
+                "ar": "يسلّم العمل إلى خدمة الدخول.",
+                "en": "Hands the work to the sign-in service."
+              }
+            }
+          ]
+        },
+        {
+          "layer": "service",
+          "label": {
+            "ar": "عدّ المحاولات",
+            "en": "Count tries"
+          },
+          "changed": true,
+          "file": "Infrastructure/Services/AuthService.cs",
+          "line": 112,
+          "does": {
+            "ar": "تعدّ كلمات المرور الخاطئة، وتقفل الحساب عند الخامسة.",
+            "en": "Counts wrong passwords and locks the account at the fifth."
+          },
+          "passes": {
+            "ar": "عدد المحاولات ووقت القفل",
+            "en": "the try count and the lock time"
+          },
+          "lines": [
+            {
+              "c": " user.FailedLogins += 1;",
+              "note": {
+                "ar": "كل كلمة مرور خاطئة تضيف محاولة.",
+                "en": "Each wrong password adds one try."
+              }
+            },
+            {
+              "c": "-if (user.FailedLogins > 10)",
+              "note": {
+                "ar": "القديم: القفل بعد أكثر من عشر.",
+                "en": "Old: lock after more than ten."
+              }
+            },
+            {
+              "c": "+if (user.FailedLogins >= 5)",
+              "note": {
+                "ar": "الجديد: القفل عند الخامسة.",
+                "en": "New: lock at the fifth."
+              }
+            },
+            {
+              "c": "     user.LockedUntil = clock.UtcNow.AddMinutes(15);",
+              "note": {
+                "ar": "يُقفل الحساب 15 دقيقة.",
+                "en": "The account locks for 15 minutes."
+              }
+            }
+          ]
+        },
+        {
+          "layer": "database",
+          "label": {
+            "ar": "حفظ الصف",
+            "en": "Save the row"
+          },
+          "file": "Infrastructure/Services/AuthService.cs",
+          "line": 120,
+          "does": {
+            "ar": "يحفظ عدد المحاولات ووقت القفل في صف المستخدم.",
+            "en": "Saves the try count and the lock time on the user's row."
+          },
+          "lines": [
+            {
+              "c": " await db.SaveChangesAsync();",
+              "note": {
+                "ar": "سطر واحد يحفظ الحقلين معًا.",
+                "en": "One statement saves both fields together."
+              }
+            }
+          ]
+        },
+        {
+          "layer": "test",
+          "label": {
+            "ar": "اختبار المحاولة الخامسة",
+            "en": "Fifth try test"
+          },
+          "file": "Tests/AuthServiceTests.cs",
+          "line": 210,
+          "does": {
+            "ar": "يثبت أن المحاولة الخامسة تقفل الحساب.",
+            "en": "Proves that the fifth try locks the account."
+          },
+          "lines": [
+            {
+              "c": " await FailLogin(user, times: 5);",
+              "note": {
+                "ar": "خمس كلمات مرور خاطئة.",
+                "en": "Five wrong passwords."
+              }
+            },
+            {
+              "c": " user.LockedUntil.Should().NotBeNull();",
+              "note": {
+                "ar": "الحساب مقفل الآن.",
+                "en": "The account is now locked."
+              }
+            }
+          ]
+        }
+      ],
+      "test": {
+        "name": {
+          "ar": "المحاولة الخامسة تقفل الحساب",
+          "en": "Fifth failure locks the account"
+        },
+        "result": "pass",
+        "given": {
+          "ar": "مستخدم لديه أربع محاولات فاشلة",
+          "en": "A user with four failed logins"
+        },
+        "when": {
+          "ar": "تصل كلمة مرور خاطئة خامسة",
+          "en": "A fifth wrong password arrives"
+        },
+        "then": {
+          "ar": "يُقفل الحساب 15 دقيقة",
+          "en": "The account is locked for 15 minutes"
+        },
+        "file": "AuthServiceTests.cs:210 · CI"
+      },
+      "quiz": {
+        "q": {
+          "ar": "لدى سارة أربع محاولات فاشلة. هل يُقفل حسابها الآن؟",
+          "en": "Sara has four failed tries. Is her account locked now?"
+        },
+        "options": [
+          {
+            "text": {
+              "ar": "لا، ما زال مفتوحًا",
+              "en": "No, still open"
+            },
+            "correct": true
+          },
+          {
+            "text": {
+              "ar": "نعم، مقفل",
+              "en": "Yes, locked"
+            },
+            "correct": false
+          }
+        ],
+        "explain": {
+          "ar": "القفل يبدأ عند المحاولة الخامسة.",
+          "en": "The lock starts at the fifth try."
+        }
+      }
+    }
+  ],
+  "proof": [
+    {
+      "name": {
+        "ar": "اختبارات الخادم (CI)",
+        "en": "Backend tests (CI)"
+      },
+      "file": "Build & test",
+      "result": "pass"
+    },
+    {
+      "name": {
+        "ar": "فحص صفحة الدخول في المتصفح",
+        "en": "Browser check of the sign-in page"
+      },
+      "result": "not run"
+    }
+  ],
+  "risks": [
+    {
+      "ar": "حسابات المكتب المشتركة قد تقفل بعضها.",
+      "en": "Shared office logins may lock each other out."
+    }
+  ],
+  "notDone": [
+    {
+      "ar": "لا بريد عند قفل الحساب.",
+      "en": "No email when an account locks."
+    }
+  ]
+}
