@@ -1,0 +1,976 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>PR Lessons</title>
+<style>
+/* Light by default; dark follows the system unless data-theme="light", or when data-theme="dark". */
+:root {
+  --bg: #f5f6f9; --panel: #ffffff; --panel-2: #f1f3f7; --ink: #111521; --soft: #3b4253; --muted: #667085; --line: #e1e4ec;
+  --accent: #2d5bff; --accent-soft: #eaf0ff; --accent-ink: #ffffff;
+  --bad: #c62828; --bad-soft: #fdecec; --good: #13804a; --good-soft: #e7f6ee; --warn: #a15c00; --warn-soft: #fff3df;
+  --fix: #a15c00; --feature: #13804a; --cleanup: #5b6475;
+  --code-bg: #fbfbfd; --add-bg: #e9f8ef; --del-bg: #fdeeee; --ln: #9aa3b2; --note-bg: #f6f8ff;
+  --t-kw: #7c3aed; --t-str: #0f766e; --t-num: #b45309; --t-com: #8a93a3; --t-typ: #1d4ed8;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1016; --panel: #151922; --panel-2: #1b2130; --ink: #f2f4f8; --soft: #d0d6e2; --muted: #a9b2c3; --line: #2a3141;
+    --accent: #7aa7ff; --accent-soft: #1c2a47; --accent-ink: #0d1016;
+    --bad: #ff7b7b; --bad-soft: #3a1d22; --good: #4fe39a; --good-soft: #15342a; --warn: #ffbf5c; --warn-soft: #3a2c14;
+    --fix: #ffbf5c; --feature: #4fe39a; --cleanup: #a9b2c3;
+    --code-bg: #10141c; --add-bg: rgba(46, 160, 67, .14); --del-bg: rgba(248, 81, 73, .14); --ln: #5b6578; --note-bg: #182033;
+    --t-kw: #c792ea; --t-str: #a5d6a7; --t-num: #ffab70; --t-com: #6b7686; --t-typ: #82cfff;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1016; --panel: #151922; --panel-2: #1b2130; --ink: #f2f4f8; --soft: #d0d6e2; --muted: #a9b2c3; --line: #2a3141;
+  --accent: #7aa7ff; --accent-soft: #1c2a47; --accent-ink: #0d1016;
+  --bad: #ff7b7b; --bad-soft: #3a1d22; --good: #4fe39a; --good-soft: #15342a; --warn: #ffbf5c; --warn-soft: #3a2c14;
+  --fix: #ffbf5c; --feature: #4fe39a; --cleanup: #a9b2c3;
+  --code-bg: #10141c; --add-bg: rgba(46, 160, 67, .14); --del-bg: rgba(248, 81, 73, .14); --ln: #5b6578; --note-bg: #182033;
+  --t-kw: #c792ea; --t-str: #a5d6a7; --t-num: #ffab70; --t-com: #6b7686; --t-typ: #82cfff;
+}
+* { box-sizing: border-box; }
+/* Keep scrolled-to items clear of the sticky top bar and the fixed Back / Next bar. */
+html { scroll-padding-top: 130px; scroll-padding-bottom: 96px; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.75 "Segoe UI", system-ui, -apple-system, Tahoma, "Noto Sans Arabic", Arial, sans-serif; }
+button { font: inherit; color: inherit; }
+code, pre, .code { font-family: "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas, monospace; }
+/* Show code exactly as typed: no ligatures turning => into ⇒ or != into ≠. */
+code, pre, .code, .cl { font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
+/* Letter spacing breaks the joined letters of Arabic words. */
+html[lang="ar"] * { letter-spacing: 0 !important; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Top bar: the PR, the lessons, the language */
+.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+.top-in { max-width: 1040px; margin: 0 auto; padding: 12px 20px 0; }
+.row1 { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.prn { flex: none; font-weight: 700; font-size: 13px; padding: 2px 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); direction: ltr; }
+.ttl { flex: 1; min-width: 0; margin: 0; font-size: 17px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lang { flex: none; border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 4px 14px; font-size: 14px; cursor: pointer; }
+.lang:hover { border-color: var(--accent); }
+.lessons { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 10px 0 0; }
+.lessons::-webkit-scrollbar { display: none; }
+.pill { flex: none; display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px 9px; border: 0; background: none; cursor: pointer; color: var(--muted); border-bottom: 3px solid transparent; font-size: 15px; white-space: nowrap; }
+.pill:hover { color: var(--ink); }
+.pill[aria-current="true"] { color: var(--ink); font-weight: 650; border-bottom-color: var(--accent); }
+.pill .n { width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 12px; font-weight: 700; background: var(--panel-2); color: var(--muted); }
+.pill[aria-current="true"] .n { background: var(--accent); color: var(--accent-ink); }
+
+/* Page */
+main { max-width: 1040px; margin: 0 auto; padding: 26px 20px 120px; }
+.page { animation: enter .3s ease; }
+@keyframes enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.kind { display: inline-block; font-size: 13px; font-weight: 700; padding: 2px 10px; border-radius: 999px; color: var(--kc); background: color-mix(in srgb, var(--kc) 14%, transparent); }
+.k-fix { --kc: var(--fix); } .k-feature { --kc: var(--feature); } .k-cleanup { --kc: var(--cleanup); }
+h2.big { font-size: clamp(26px, 3.6vw, 36px); line-height: 1.3; margin: 10px 0 8px; }
+.lead { font-size: 19px; color: var(--soft); margin: 0 0 22px; }
+
+/* The journey: one example travels through the layers in 3D; one station is where the change acts */
+.journey { position: relative; margin: 14px 0 6px; border-radius: 20px; border: 1px solid var(--line); overflow: hidden;
+  background: radial-gradient(120% 90% at 50% 0%, var(--accent-soft), transparent 70%), var(--panel); }
+.journey .stage3d { position: relative; height: 300px; }
+.journey canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.journey .hud { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 16px 0; position: relative; z-index: 2; }
+.journey .hud p { margin: 0; flex: 1; min-width: 200px; font-size: 16px; color: var(--soft); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+.seg button { border: 0; background: none; padding: 5px 16px; font-size: 15px; cursor: pointer; color: var(--muted); }
+.seg button.b[aria-pressed="true"] { background: var(--bad); color: #fff; font-weight: 650; }
+.seg button.a[aria-pressed="true"] { background: var(--good); color: #fff; font-weight: 650; }
+.lbl3d { position: absolute; left: 0; top: 0; transform: translate(-50%, 0); pointer-events: none; text-align: center; font-size: 14px; font-weight: 650; color: var(--soft); white-space: nowrap; }
+.lbl3d small { display: block; font-size: 11px; font-weight: 600; color: var(--muted); }
+.lbl3d.hot { color: var(--ink); }
+.card3d { position: absolute; left: 0; top: 0; transform: translate(-50%, -100%); pointer-events: none; display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 10px 24px -14px rgba(0, 0, 0, .55); font-size: 14px; font-weight: 650; white-space: nowrap; }
+.card3d .chip { transition: background .3s, color .3s; }
+.flat { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; padding: 26px 16px; }
+.flat .st { padding: 8px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2); font-weight: 600; }
+.flat .st.hot { border-color: var(--accent); background: var(--accent-soft); }
+
+.lbl3d svg { display: block; width: 20px; height: 20px; margin: 0 auto 2px; fill: none; stroke: var(--ic, currentColor); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.card3d .ct { display: flex; flex-direction: column; line-height: 1.25; }
+.card3d .ct small { font-size: 11px; font-weight: 600; color: var(--muted); unicode-bidi: plaintext; }
+.bubble3d { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%) scale(.9); opacity: 0; pointer-events: none; max-width: 240px; padding: 6px 12px; border-radius: 12px; font-size: 14px; font-weight: 650; text-align: center; white-space: normal; transition: opacity .3s, transform .3s; background: var(--panel); border: 1px solid var(--line); }
+.bubble3d.on { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.bubble3d.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+.bubble3d.good { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+.casepick { position: relative; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px 0; font-size: 14px; color: var(--muted); }
+.casechip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 3px 12px; font-size: 14px; cursor: pointer; direction: ltr; unicode-bidi: plaintext; }
+.casechip:hover { border-color: var(--accent); }
+.casechip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 650; }
+.flat .st svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -4px; margin-inline-end: 6px; }
+
+/* The lab: pick values, compare the old and new result */
+.lab { position: relative; z-index: 2; border-top: 1px solid var(--line); padding: 14px 16px 12px; background: color-mix(in srgb, var(--panel) 80%, transparent); }
+.lab-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 10px; }
+.lab-h b { font-size: 17px; }
+.lab-h span { color: var(--muted); font-size: 15px; }
+.lab-in { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.fld { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); min-width: 140px; }
+.fld input.time:invalid { border-color: var(--bad); }
+.fld select, .fld input.time, .fld input[type="number"] { font: inherit; font-size: 16px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; min-height: 40px; }
+.fld input.time, .fld input[type="number"] { direction: ltr; text-align: center; font-family: "Cascadia Code", ui-monospace, Consolas, monospace; }
+.fld input:disabled { opacity: .45; }
+.fld .none { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.lab-pre { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; font-size: 14px; color: var(--muted); }
+.lab-out { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; margin-top: 12px; }
+.lab-out .o { flex: 1 1 160px; border-radius: 14px; padding: 10px 14px; border: 1px solid var(--line); background: var(--panel); }
+.lab-out .o small { display: block; font-size: 13px; color: var(--muted); }
+.lab-out .o b { font-size: 22px; }
+.lab-out .o.old.bad { border-color: color-mix(in srgb, var(--bad) 50%, var(--line)); background: var(--bad-soft); } .lab-out .o.old.bad b { color: var(--bad); }
+.lab-out .o.new { border-color: color-mix(in srgb, var(--good) 50%, var(--line)); background: var(--good-soft); } .lab-out .o.new b { color: var(--good); }
+.lab-out .diff { align-self: center; font-size: 13px; font-weight: 700; color: var(--accent-ink); background: var(--accent); padding: 3px 12px; border-radius: 999px; }
+.lab-note { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
+
+/* The story in three lines, and the screens side by side */
+.story { padding: 16px 20px; }
+.sline { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 12px; align-items: start; padding: 10px 0; }
+.sline + .sline { border-top: 1px dashed var(--line); }
+.sline .ic { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; color: #fff; }
+.sline.bad .ic { background: var(--bad); } .sline.warn .ic { background: var(--warn); } .sline.good .ic { background: var(--good); }
+.sline small { display: block; font-size: 13px; font-weight: 700; color: var(--muted); }
+.sline p { margin: 0; font-size: 18px; line-height: 1.65; }
+.mockpair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 12px; }
+.mockpair figure { margin: 0; }
+.mockpair figcaption { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+.mockpair figcaption.bad { color: var(--bad); } .mockpair figcaption.good { color: var(--good); }
+.stitle { margin: 4px 0 0; font-size: 16px; color: var(--soft); }
+details.more { margin-top: 14px; }
+details.more summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 15px; }
+.proofline summary { cursor: pointer; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 16px; font-weight: 600; }
+.proofline .gwt { margin-top: 12px; }
+
+/* The one sentence to remember */
+.takeaway { display: flex; gap: 12px; align-items: flex-start; margin: 6px 0 4px; padding: 14px 18px; border-radius: 16px; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); font-size: 19px; font-weight: 600; line-height: 1.6; }
+.takeaway b { flex: none; font-size: 13px; font-weight: 700; color: var(--accent-ink); background: var(--accent); padding: 2px 10px; border-radius: 999px; margin-top: 4px; }
+
+/* Check yourself */
+.quiz .q { margin: 0 0 12px; font-size: 19px; font-weight: 600; }
+.qopts { display: flex; flex-wrap: wrap; gap: 10px; }
+.qopt { border: 1px solid var(--line); background: var(--panel-2); border-radius: 12px; padding: 9px 16px; font-size: 17px; cursor: pointer; }
+.qopt:hover:not(:disabled) { border-color: var(--accent); }
+.qopt.right { background: var(--good-soft); border-color: var(--good); color: var(--good); font-weight: 650; }
+.qopt.wrong { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+.qopt:disabled { cursor: default; }
+.qans { margin: 12px 0 0; font-size: 17px; }
+.qans b { margin-inline-end: 6px; }
+.qans.right b { color: var(--good); } .qans.wrong b { color: var(--bad); }
+
+/* Sections of a lesson */
+.sec { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 20px 22px; margin: 16px 0; }
+.sec h3 { margin: 0 0 10px; font-size: 16px; display: flex; align-items: center; gap: 10px; color: var(--soft); }
+.sec h3 .no { width: 28px; height: 28px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 14px; font-weight: 700; color: var(--accent-ink); background: var(--accent); flex: none; }
+.sec.bad h3 .no { background: var(--bad); } .sec.good h3 .no { background: var(--good); } .sec.warn h3 .no { background: var(--warn); }
+.say { margin: 0; font-size: 20px; line-height: 1.7; }
+.twocol { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: center; }
+
+/* A small picture of the screen the user saw */
+.mock { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--panel-2); }
+.mock .bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.mock .bar i { width: 9px; height: 9px; border-radius: 50%; background: var(--line); display: inline-block; }
+.mock .bar span { margin-inline-start: 6px; }
+.mock ul { list-style: none; margin: 0; padding: 6px 0; }
+.mock li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 14px; font-size: 16px; }
+.mock li + li { border-top: 1px dashed var(--line); }
+.chip { flex: none; font-size: 14px; font-weight: 650; padding: 2px 12px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); color: var(--soft); }
+.chip.bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+.chip.good { color: var(--good); background: var(--good-soft); border-color: transparent; }
+.chip.warn { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
+.mock.bad { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+.mock.good { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+
+/* Code with its meaning beside each line */
+.snip { margin: 12px 0 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--code-bg); }
+.snip-h { display: flex; justify-content: space-between; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted); direction: ltr; }
+.snip-h code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lines { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+.lines > .cl, .lines > .nt { padding: 3px 0; min-height: 30px; }
+/* The `font` shorthand resets ligatures, so they are turned off again after it: code shows exactly as typed. */
+.cl { display: grid; grid-template-columns: 44px 16px minmax(0, 1fr); direction: ltr; text-align: left; font: 14px/1.7 "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas, monospace; font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
+.cl .n { color: var(--ln); text-align: right; padding-right: 10px; user-select: none; }
+.cl .m { color: var(--ln); user-select: none; }
+.cl .t { white-space: pre-wrap; overflow-wrap: anywhere; padding-inline-end: 12px; }
+.cl.add { background: var(--add-bg); } .cl.add .m { color: var(--good); }
+.cl.del { background: var(--del-bg); } .cl.del .m { color: var(--bad); } .cl.del .t { opacity: .85; }
+.cl.has { box-shadow: inset 3px 0 0 var(--accent); }
+.nt { font-size: 15px; line-height: 1.55; color: var(--soft); padding-inline: 14px !important; border-inline-start: 1px solid var(--line); display: flex; align-items: center; }
+.nt.has { background: var(--note-bg); color: var(--ink); }
+.nt.has::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-inline-end: 8px; flex: none; }
+.tk-kw { color: var(--t-kw); } .tk-str { color: var(--t-str); } .tk-num { color: var(--t-num); } .tk-com { color: var(--t-com); font-style: italic; } .tk-typ { color: var(--t-typ); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-inline-end: 6px; vertical-align: -1px; background: var(--c); }
+
+/* The code walk: the request's path through the code, one card per layer */
+.walk .whint { margin: 0 0 12px; font-size: 15px; color: var(--muted); }
+.wnav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 14px; }
+.wsep { color: var(--muted); font-size: 14px; }
+.wbtn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--panel-2); border-radius: 999px; padding: 4px 12px 4px 6px; font-size: 14px; cursor: pointer; }
+html[dir="rtl"] .wbtn { padding: 4px 6px 4px 12px; }
+.wbtn:hover { border-color: var(--accent); }
+.wbtn[aria-current="true"] { border-color: var(--accent); background: var(--accent-soft); font-weight: 650; }
+.wbtn.hot { box-shadow: inset 0 0 0 1px var(--accent); }
+.wbtn .wn { width: 20px; height: 20px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 12px; font-weight: 700; background: var(--panel); color: var(--soft); }
+.wbtn svg, .wstep-h svg { width: 16px; height: 16px; flex: none; fill: none; stroke: var(--ic, currentColor); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.wstep { border: 1px solid var(--line); border-inline-start: 4px solid var(--ic, var(--line)); border-radius: 16px; padding: 14px 16px; background: var(--panel); outline: none; }
+.wstep + .wstep { margin-top: 12px; }
+.wstep.hot { box-shadow: 0 0 0 3px var(--accent-soft); }
+.wstep:focus-visible { box-shadow: 0 0 0 3px var(--accent); }
+.wstep-h { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.wstep-h .no { width: 26px; height: 26px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 13px; font-weight: 700; color: var(--accent-ink); background: var(--accent); flex: none; }
+.wstep-h b { font-size: 17px; }
+.wstep-h .layer { font-size: 12px; font-weight: 600; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }
+.wstep-h .tag.hot { color: var(--accent-ink); background: var(--accent); }
+.wstep-h .tag.same { color: var(--muted); background: var(--panel-2); font-weight: 600; }
+.wstep .does { margin: 8px 0 0; font-size: 17px; line-height: 1.6; }
+.wfoot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px; margin-top: 10px; }
+.wpass { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0; font-size: 14px; color: var(--muted); }
+.wpass .arrow { font-size: 17px; color: var(--accent); }
+.wpass .v { color: var(--soft); font-weight: 600; unicode-bidi: plaintext; }
+.wnext { border: 0; background: none; padding: 4px 0; color: var(--accent); font-weight: 650; font-size: 15px; cursor: pointer; }
+.wnext:hover { text-decoration: underline; }
+/* A station that opens its code: the 3D labels take clicks only then. */
+.lbl3d.go { pointer-events: auto; cursor: pointer; padding: 2px 6px; border-radius: 8px; }
+.lbl3d.go:hover, .lbl3d.go:focus-visible { color: var(--accent); background: color-mix(in srgb, var(--panel) 80%, transparent); }
+.flat .st.go { cursor: pointer; }
+.flat .st.go:hover { border-color: var(--accent); }
+
+/* Cases: the same inputs, old result and new result */
+.cases { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 16px; }
+.cases th { text-align: start; font-size: 13px; color: var(--muted); font-weight: 600; padding: 6px 12px; border-bottom: 1px solid var(--line); }
+.cases td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.cases tr:last-child td { border-bottom: 0; }
+.cases tr.diff td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.cases td.v { font-weight: 600; unicode-bidi: plaintext; }
+.res { display: inline-flex; align-items: center; gap: 6px; font-weight: 650; }
+.res::before { font-size: 13px; width: 20px; height: 20px; border-radius: 50%; display: inline-grid; place-items: center; }
+.res.ok { color: var(--good); } .res.ok::before { content: "✓"; background: var(--good-soft); }
+.res.no { color: var(--bad); } .res.no::before { content: "✕"; background: var(--bad-soft); }
+.casewrap { overflow-x: auto; }
+
+/* Proof */
+.gwt { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; font-size: 17px; margin-top: 4px; }
+.gwt b { color: var(--accent); font-size: 15px; }
+.tn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 17px; font-weight: 650; margin: 0 0 10px; }
+.tag { font-size: 13px; font-weight: 700; padding: 1px 10px; border-radius: 999px; }
+.tag.pass { color: var(--good); background: var(--good-soft); } .tag.fail { color: var(--bad); background: var(--bad-soft); } .tag.wait { color: var(--muted); background: var(--panel-2); }
+.tfile { margin-top: 10px; font-size: 13px; color: var(--muted); direction: ltr; text-align: start; unicode-bidi: plaintext; }
+
+/* Overview and summary */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.card { text-align: start; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; cursor: pointer; display: flex; flex-direction: column; gap: 8px; }
+.card:hover { border-color: var(--accent); }
+.card b { font-size: 19px; }
+.card .fromto { font-size: 15px; color: var(--soft); }
+.card .fromto s { color: var(--bad); text-decoration: none; } .card .fromto em { color: var(--good); font-style: normal; font-weight: 600; }
+.stats { display: flex; gap: 20px; flex-wrap: wrap; font-size: 15px; color: var(--muted); margin: 0 0 18px; }
+.stats b { color: var(--ink); }
+.three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.box ul { margin: 0; padding-inline-start: 20px; } .box li { margin: 6px 0; font-size: 16px; }
+.box li small { display: block; color: var(--muted); font-size: 13px; unicode-bidi: plaintext; overflow-wrap: anywhere; }
+details.files summary { cursor: pointer; font-weight: 650; }
+details.files li { font-size: 14px; }
+details.files li code { font-size: 13px; color: var(--muted); direction: ltr; unicode-bidi: isolate; overflow-wrap: anywhere; }
+
+/* Bottom bar */
+.nav { position: fixed; bottom: 0; inset-inline: 0; z-index: 5; background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(8px); border-top: 1px solid var(--line); }
+.nav-in { max-width: 1040px; margin: 0 auto; padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+.nav .where { flex: 1; text-align: center; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.btn { border: 1px solid var(--line); background: var(--panel-2); border-radius: 12px; padding: 9px 18px; cursor: pointer; font-size: 16px; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 650; }
+.btn:disabled { opacity: .4; cursor: default; }
+
+@media (max-width: 820px) {
+  .top-in, main, .nav-in { padding-inline: 14px; }
+  .twocol, .three { grid-template-columns: minmax(0, 1fr); }
+  .lines { grid-template-columns: minmax(0, 1fr); }
+  .nt { border-inline-start: 0; padding: 6px 14px 10px !important; min-height: 0 !important; }
+  .nt:not(.has) { display: none; }
+  .say { font-size: 18px; }
+  .sec { padding: 16px; }
+  .nav .where { display: none; }
+  .journey .stage3d { height: 240px; }
+  .mockpair { grid-template-columns: minmax(0, 1fr); }
+  .fld { min-width: 0; flex: 1 1 120px; }
+  .lbl3d { font-size: 12px; }
+  .wstep { padding: 12px; }
+  .wsep { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .page { animation: none; } }
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in">
+  <div class="row1"><span class="prn" id="prn"></span><h1 class="ttl" id="ttl"></h1><button class="lang" id="lang" type="button"></button></div>
+  <nav class="lessons" id="lessons" aria-label="Lessons"></nav>
+</div></header>
+<main id="main" aria-live="polite"></main>
+<nav class="nav"><div class="nav-in"><button class="btn" id="back" type="button"></button><span class="where" id="where"></span><button class="btn primary" id="next" type="button"></button></div></nav>
+<script id="story" type="application/json">"__STORY_JSON__"</script>
+<script>/*__THREE_JS__*/</script>
+<script>
+(function () {
+  'use strict';
+  var story = JSON.parse(document.getElementById('story').textContent);
+  // Interface words in both languages. Story text is a plain string (same in both) or { ar, en }.
+  var WORDS = {
+    ar: { fix: 'إصلاح', feature: 'ميزة', cleanup: 'تنظيف', overview: 'نظرة عامة', start: 'ابدأ الدرس الأول ←', back: '→ السابق', next: 'التالي ←', finish: 'الملخص ←', lesson: 'الدرس', of: 'من', changes: 'تغييرات', files: 'ملفات', explained: 'كلها مشروحة', missing: 'غير مشروحة', checks: 'الفحوصات',
+      problem: 'ما المشكلة؟', cause: 'لماذا حدثت؟', fix_: 'ما الحل؟', code: 'أين التغيير في الكود؟', cases: 'جرّب بنفسك: نفس الحالة قبل وبعد', proof: 'كيف نعرف أنه يعمل؟', before: 'قبل', after: 'بعد',
+      watch: 'شاهد المثال يمر عبر طبقات التطبيق، ويتوقف عند مكان التغيير.', whereChange: 'هنا التغيير', playing: 'يعمل الآن',
+      example: 'المثال', tryCase: 'جرّب حالة:', remember: 'تذكّر', quiz: 'اختبر فهمك', right: 'صحيح!', wrong: 'ليس تمامًا.',
+      labTitle: 'جرّب بنفسك', labHint: 'غيّر القيم وشاهد نتيجة الكود القديم والجديد.', labNote: 'نسخة مبسطة من القاعدة الموجودة في الكود.', noValue: 'بلا',
+      changed: 'تغيّرت النتيجة', moreCode: 'عرض بقية تغييرات الكود', provedBy: 'مثبت باختبار:', oldCode: 'الكود القديم', newCode: 'الكود الجديد',
+      added: 'سطر جديد', removed: 'سطر قديم حُذف', explainedLine: 'شرح السطر', given: 'لدينا', when: 'عندما', then: 'المتوقع', pass: 'نجح', fail: 'فشل', notRun: 'لم يُشغَّل', noTest: 'لا يوجد اختبار لهذا التغيير.',
+      summary: 'الملخص', risks: 'المخاطر', notDone: 'لم يُنجز بعد', none: 'لا شيء', allFiles: 'كل الملفات المتغيرة', other: 'English', lessons: 'الدروس',
+      walkTitle: 'اتبع الكود: من الصفحة إلى قاعدة البيانات', walkHint: 'اقرأ الخطوات بالترتيب. كل خطوة تعرض الملف والأسطر التي يمر بها الطلب.', step: 'الخطوة',
+      passes: 'ينتقل إلى الخطوة التالية:', nextStep: 'الخطوة التالية', unchanged: 'بدون تغيير، يمر الطلب من هنا', changedStep: 'هنا التغيير', provesIt: 'يثبت أنه يعمل', goCode: 'اضغط على محطة لترى الكود الخاص بها.',
+      L_frontend: 'الصفحة', L_api: 'API', L_service: 'الخدمة', L_database: 'قاعدة البيانات', L_test: 'الاختبار', L_other: 'أخرى' },
+    en: { fix: 'Fix', feature: 'Feature', cleanup: 'Cleanup', overview: 'Overview', start: 'Start the first lesson →', back: '← Back', next: 'Next →', finish: 'Summary →', lesson: 'Lesson', of: '/', changes: 'changes', files: 'files', explained: 'all explained', missing: 'not explained', checks: 'checks',
+      problem: 'What was the problem?', cause: 'Why did it happen?', fix_: 'What is the fix?', code: 'Where is the change in the code?', cases: 'Try it: the same case, before and after', proof: 'How do we know it works?', before: 'Before', after: 'After',
+      watch: 'Watch the example travel through the app and stop where the change is.', whereChange: 'the change is here', playing: 'playing',
+      example: 'Example', tryCase: 'Try a case:', remember: 'Remember', quiz: 'Check yourself', right: 'Right!', wrong: 'Not quite.',
+      labTitle: 'Try it yourself', labHint: 'Change the values and compare the old and new code.', labNote: 'A simplified copy of the rule in the code.', noValue: 'none',
+      changed: 'result changed', moreCode: 'Show the rest of the code changes', provedBy: 'Proved by a test:', oldCode: 'Old code', newCode: 'New code',
+      added: 'new line', removed: 'old line, removed', explainedLine: 'line explained', given: 'Given', when: 'When', then: 'Then', pass: 'pass', fail: 'fail', notRun: 'not run', noTest: 'No test covers this change.',
+      summary: 'Summary', risks: 'Risks', notDone: 'Not done', none: 'Nothing listed', allFiles: 'Every changed file', other: 'العربية', lessons: 'Lessons',
+      walkTitle: 'Follow the code, from the page to the database', walkHint: 'Read the steps in order. Each one shows the file and the lines the request passes through.', step: 'Step',
+      passes: 'Passed to the next step:', nextStep: 'Next step', unchanged: 'unchanged, the request passes here', changedStep: 'the change is here', provesIt: 'proves it works', goCode: 'Press a station to see its code.',
+      L_frontend: 'Page', L_api: 'API', L_service: 'Service', L_database: 'Database', L_test: 'Test', L_other: 'Other' }
+  };
+  var STORE = 'explain-pr-lang';
+  var lang = story.defaultLang === 'en' ? 'en' : 'ar';
+  try { var saved = localStorage.getItem(STORE); if (saved === 'ar' || saved === 'en') lang = saved; } catch (e) { /* storage may be blocked */ }
+  var T = WORDS[lang];
+  function tx(v) { if (v == null) return ''; if (typeof v !== 'object') return String(v); return v[lang] != null ? v[lang] : v.en != null ? v.en : v.ar != null ? v.ar : ''; }
+  function $(id) { return document.getElementById(id); }
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = String(text); return e; }
+  function arr(v) { return Array.isArray(v) ? v : []; }
+  function kindOf(c) { return c.kind === 'feature' || c.kind === 'fix' ? c.kind : 'cleanup'; }
+  // "1 / 5" turns into "5 / 1" inside Arabic text, so Arabic says "1 من 5".
+  function frac(a, b) { return lang === 'ar' ? a + ' من ' + b : a + ' / ' + b; }
+
+  var pr = story.pr || {}, lessons = arr(story.chapters), files = arr(story.files), proof = arr(story.proof);
+  var covered = {}; lessons.forEach(function (c) { arr(c.files).forEach(function (f) { covered[f] = true; }); });
+  var uncovered = files.filter(function (f) { return !covered[f]; });
+  var passN = proof.filter(function (p) { return p.result === 'pass'; }).length;
+  // Pages: overview, one per lesson, summary.
+  var pages = ['overview'].concat(lessons.map(function (_, i) { return i; })).concat(['end']);
+  var at = 0;
+
+  // ---------- code ----------
+  var KW = /^(?:public|private|protected|internal|static|readonly|async|await|return|if|else|var|let|const|new|class|interface|type|export|import|from|function|void|string|bool|int|long|double|decimal|null|undefined|true|false|this|using|namespace|switch|case|default|for|foreach|in|of|while|try|catch|finally|throw|typeof|as|is|get|set|override|virtual|record|enum|struct|out|ref|params|where|select|break|continue|do|yield|delete|instanceof|extends|implements|declare|keyof|unknown|never|any|number|boolean|object)$/;
+  var TOKEN = /(\/\/.*$|\/\*.*?\*\/|<!--.*?-->)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d[\d_]*(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  function highlight(target, text) {
+    var last = 0, m; TOKEN.lastIndex = 0;
+    while ((m = TOKEN.exec(text))) {
+      if (m.index > last) target.appendChild(document.createTextNode(text.slice(last, m.index)));
+      var cls = m[1] ? 'com' : m[2] ? 'str' : m[3] ? 'num' : KW.test(m[4]) ? 'kw' : /^[A-Z]/.test(m[4]) ? 'typ' : null;
+      target.appendChild(cls ? el('span', 'tk-' + cls, m[0]) : document.createTextNode(m[0]));
+      last = TOKEN.lastIndex;
+    }
+    if (last < text.length) target.appendChild(document.createTextNode(text.slice(last)));
+  }
+  function snippet(s) {
+    var box = el('div', 'snip'), h = el('div', 'snip-h');
+    h.appendChild(el('code', null, s.file + ':' + s.line));
+    var adds = 0, dels = 0, n = Number(s.line) || 1, grid = el('div', 'lines');
+    arr(s.lines).forEach(function (item) {
+      var raw = typeof item === 'string' ? item : item.c, note = typeof item === 'string' ? null : item.note;
+      var mk = raw.charAt(0), t = raw.slice(1);
+      if (mk !== '+' && mk !== '-' && mk !== ' ') { mk = ' '; t = raw; }
+      if (mk === '+') adds++; if (mk === '-') dels++;
+      var cl = el('div', 'cl' + (mk === '+' ? ' add' : mk === '-' ? ' del' : '') + (note ? ' has' : ''));
+      cl.appendChild(el('span', 'n', mk === '-' ? '' : n)); cl.appendChild(el('span', 'm', mk === ' ' ? '' : mk));
+      var tt = el('span', 't'); highlight(tt, t || ' '); cl.appendChild(tt);
+      var nt = el('div', 'nt' + (note ? ' has' : ''), note ? tx(note) : '');
+      grid.appendChild(cl); grid.appendChild(nt);
+      if (mk !== '-') n++;
+    });
+    // An unchanged step of the code walk has no + / − lines: no counter for it.
+    if (adds || dels) h.appendChild(el('span', null, '+' + adds + ' −' + dels));
+    box.appendChild(h); box.appendChild(grid);
+    return box;
+  }
+  function mock(m, side, tone) {
+    var screen = m && m[side] || {}, rows = arr(screen.rows);
+    if (!rows.length) return null;
+    var box = el('div', 'mock ' + tone), bar = el('div', 'bar');
+    bar.appendChild(el('i')); bar.appendChild(el('i')); bar.appendChild(el('i')); bar.appendChild(el('span', null, tx(screen.title)));
+    box.appendChild(bar);
+    var ul = el('ul');
+    rows.forEach(function (r) { var li = el('li'); li.appendChild(el('span', null, tx(r.text))); if (r.badge) li.appendChild(el('span', 'chip ' + (r.tone || ''), tx(r.badge))); ul.appendChild(li); });
+    box.appendChild(ul); return box;
+  }
+  function section(no, title, tone) {
+    var s = el('section', 'sec ' + (tone || '')), h = el('h3');
+    h.appendChild(el('span', 'no', no)); h.appendChild(document.createTextNode(title)); s.appendChild(h); return s;
+  }
+
+  // ---------- the journey (three.js) ----------
+  // One example (a card with a status chip) travels station to station, the way a request travels through the
+  // app. It stops at the station the PR changed; a bubble there shows the check that station makes. Before: the
+  // card keeps the wrong chip. After: it flips and its chip turns right. A case from the lesson's table can be
+  // picked to send different values through. Before and after play in turn until a button is pressed.
+  var stopJourney = null;
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  var ICON = {
+    frontend: 'M3 5h18v11H3z M8 20h8 M12 16v4',
+    api: 'M4 9h13l-3-3 M20 15H7l3 3',
+    service: 'M12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7z M12 2v3 M12 19v3 M2 12h3 M19 12h3 M4.9 4.9l2.1 2.1 M17 17l2.1 2.1 M4.9 19.1L7 17 M17 7l2.1-2.1',
+    database: 'M5 6c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3z M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6 M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3',
+    test: 'M5 12.5l4.5 4.5L19 7.5',
+    other: 'M12 5a7 7 0 1 0 0 14a7 7 0 1 0 0-14z'
+  };
+  // Each layer's colour, shared by the 3D stations and the code walk.
+  var LAYER = { frontend: '--accent', api: '--t-typ', service: '--warn', database: '--good', test: '--t-kw', other: '--muted' };
+  function icon(layer) {
+    var NS = 'http://www.w3.org/2000/svg', s = document.createElementNS(NS, 'svg'), p = document.createElementNS(NS, 'path');
+    s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('aria-hidden', 'true'); p.setAttribute('d', ICON[layer] || ICON.other); s.appendChild(p); return s;
+  }
+  // A station that has code in the lesson's walk opens it: the reader sees the request pass, then reads that code.
+  function goable(node, i, onStation) {
+    if (!onStation || !onStation.can(i)) return;
+    node.classList.add('go'); node.setAttribute('role', 'button'); node.tabIndex = 0;
+    node.addEventListener('click', function () { onStation(i); });
+    node.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onStation(i); } });
+  }
+  function journey(j, cases, onStation) {
+    var wrap = el('section', 'journey'), hud = el('div', 'hud');
+    hud.appendChild(el('p', null, onStation ? T.watch + ' ' + T.goCode : T.watch));
+    var seg = el('div', 'seg'), bB = el('button', 'b', T.before), bA = el('button', 'a', T.after);
+    bB.type = bA.type = 'button'; seg.appendChild(bB); seg.appendChild(bA); hud.appendChild(seg);
+    wrap.appendChild(hud);
+    // The examples to send through: the lesson's own, then each case of its table.
+    var inputs = arr(cases && cases.inputs);
+    var picks = [{ chip: T.example, name: tx(j.item), sub: '', before: j.before || {}, after: j.after || {} }];
+    arr(cases && cases.rows).forEach(function (r) {
+      var vals = arr(r.values).map(tx);
+      picks.push({
+        chip: vals.join(' · '), name: tx(j.item),
+        sub: vals.map(function (v, k) { return tx(inputs[k]) + ' ' + v; }).join(' · '),
+        before: { badge: r.old && r.old.text, tone: r.old && r.old.ok ? 'good' : 'bad' },
+        after: { badge: r.now && r.now.text, tone: r.now && r.now.ok ? 'good' : 'bad' }
+      });
+    });
+    var pick = picks[0], chipEls = [];
+    if (picks.length > 1) {
+      var row = el('div', 'casepick'); row.appendChild(el('span', null, T.tryCase));
+      picks.forEach(function (p, i) {
+        var b = el('button', 'casechip', p.chip); b.type = 'button';
+        b.addEventListener('click', function () { pick = p; chipEls.forEach(function (c, k) { c.setAttribute('aria-pressed', String(k === i)); }); paintCard(); restart(); });
+        row.appendChild(b); chipEls.push(b);
+      });
+      chipEls[0].setAttribute('aria-pressed', 'true');
+      wrap.appendChild(row);
+    }
+    var stage = el('div', 'stage3d'); wrap.appendChild(stage);
+    var stations = arr(j.stations), n = stations.length, at = Math.max(0, Math.min(n - 1, j.changeAt | 0));
+    var mode = 'before', pinned = false;
+    function setMode(m, pin) { mode = m; if (pin) pinned = true; bB.setAttribute('aria-pressed', String(m === 'before')); bA.setAttribute('aria-pressed', String(m === 'after')); restart(); }
+    bB.addEventListener('click', function () { setMode('before', true); });
+    bA.addEventListener('click', function () { setMode('after', true); });
+    var restart = function () {};
+    // The card: the example's name, its values, and the chip it carries right now.
+    var cardEl = el('div', 'card3d'), cardName = el('b'), cardSub = el('small'), chip = el('span', 'chip');
+    var cardText = el('span', 'ct'); cardText.appendChild(cardName); cardText.appendChild(cardSub);
+    cardEl.appendChild(cardText); cardEl.appendChild(chip);
+    function paintCard() { cardName.textContent = pick.name; cardSub.textContent = pick.sub; cardSub.hidden = !pick.sub; }
+    function showChip(o) { var cls = 'chip ' + (o.tone || ''); if (chip.className !== cls) chip.className = cls; var t = tx(o.badge); if (chip.textContent !== t) chip.textContent = t; }
+    paintCard();
+    var bubble = el('div', 'bubble3d');
+    function flat() {
+      var f = el('div', 'flat');
+      stations.forEach(function (s, i) {
+        if (i) f.appendChild(el('span', null, lang === 'ar' ? '←' : '→'));
+        var st = el('span', 'st' + (i === at ? ' hot' : '')); st.appendChild(icon(s.layer)); st.appendChild(document.createTextNode(tx(s.label))); goable(st, i, onStation); f.appendChild(st);
+      });
+      cardEl.style.position = 'static'; cardEl.style.transform = 'none'; f.appendChild(cardEl);
+      bubble.style.position = 'static'; bubble.style.transform = 'none'; f.appendChild(bubble);
+      restart = function () { showChip(pick[mode]); var w = j[mode] && j[mode].why; bubble.textContent = tx(w); bubble.hidden = !w; bubble.className = 'bubble3d on ' + (mode === 'after' ? 'good' : 'bad'); };
+      stage.style.height = 'auto'; stage.appendChild(f);
+    }
+    var THREE = window.THREE, renderer = null;
+    try { if (THREE) renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); } catch (e) { renderer = null; }
+    setTimeout(function () { setMode('before'); }, 0);
+    // The lab sends its own values through: the card shows them and carries the old and new results.
+    function setPick(p) { pick = p; paintCard(); restart(); }
+    if (!renderer) { flat(); return { el: wrap, start: function () {}, stop: function () {}, setPick: setPick }; }
+
+    renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+    renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    stage.appendChild(renderer.domElement);
+    var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(32, 2, 0.1, 100);
+    scene.add(new THREE.HemisphereLight(0xffffff, new THREE.Color(css('--panel-2')), 1.7));
+    var sun = new THREE.DirectionalLight(0xffffff, 2.2); sun.position.set(3, 7, 6); sun.castShadow = true; sun.shadow.mapSize.set(1024, 1024);
+    var sc = sun.shadow.camera; sc.left = -9; sc.right = 9; sc.top = 5; sc.bottom = -5; scene.add(sun);
+    var ground = new THREE.Mesh(new THREE.PlaneGeometry(60, 30), new THREE.ShadowMaterial({ opacity: 0.16 }));
+    ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+    function rounded(w, h, d, r) {
+      var s = new THREE.Shape(), x = -w / 2, y = -h / 2;
+      s.moveTo(x + r, y); s.lineTo(x + w - r, y); s.quadraticCurveTo(x + w, y, x + w, y + r); s.lineTo(x + w, y + h - r);
+      s.quadraticCurveTo(x + w, y + h, x + w - r, y + h); s.lineTo(x + r, y + h); s.quadraticCurveTo(x, y + h, x, y + h - r);
+      s.lineTo(x, y + r); s.quadraticCurveTo(x, y, x + r, y);
+      var g = new THREE.ExtrudeGeometry(s, { depth: d, bevelEnabled: true, bevelThickness: 0.03, bevelSize: 0.03, bevelSegments: 3, curveSegments: 10 });
+      g.translate(0, 0, -d / 2); return g;
+    }
+    var GAP = 2.7, dir = lang === 'ar' ? -1 : 1, xs = stations.map(function (_, i) { return dir * (i - (n - 1) / 2) * GAP; });
+    // Stations a little lighter than the page in dark mode, a little darker in light mode, so they always stand out.
+    var panelCol = new THREE.Color(css('--panel-2')).lerp(new THREE.Color(css('--muted')), 0.18), ring = null, labels = [];
+    stations.forEach(function (s, i) {
+      var g = new THREE.Group(); g.position.x = xs[i]; scene.add(g);
+      var col = new THREE.Color(css(LAYER[s.layer] || '--muted'));
+      var slab = new THREE.Mesh(rounded(1.7, 1.15, 0.16, 0.14), new THREE.MeshStandardMaterial({ color: panelCol, roughness: 0.55, metalness: 0.05 }));
+      slab.position.y = 0.8; slab.castShadow = true; g.add(slab);
+      var stripe = new THREE.Mesh(rounded(1.7, 0.16, 0.18, 0.07), new THREE.MeshStandardMaterial({ color: col, roughness: 0.4, emissive: col, emissiveIntensity: 0.25 }));
+      stripe.position.y = 1.32; stripe.castShadow = true; g.add(stripe);
+      var base = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 1.0, 0.08, 48), new THREE.MeshStandardMaterial({ color: panelCol, roughness: 0.8 }));
+      base.position.y = 0.04; base.receiveShadow = true; g.add(base);
+      if (i === at) {
+        ring = new THREE.Mesh(new THREE.TorusGeometry(1.05, 0.035, 12, 80), new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 1 }));
+        ring.rotation.x = Math.PI / 2; ring.position.y = 0.09; g.add(ring);
+      }
+      var lb = el('div', 'lbl3d' + (i === at ? ' hot' : '')); lb.style.setProperty('--ic', css(LAYER[s.layer] || '--muted'));
+      lb.appendChild(icon(s.layer)); lb.appendChild(document.createTextNode(tx(s.label)));
+      if (i === at) lb.appendChild(el('small', null, T.whereChange));
+      goable(lb, i, onStation);
+      stage.appendChild(lb); labels.push(lb);
+    });
+    var pts = [];
+    xs.forEach(function (x, i) { pts.push(new THREE.Vector3(x, 1.75, 0.35)); if (i < n - 1) pts.push(new THREE.Vector3((x + xs[i + 1]) / 2, 2.35, 0.45)); });
+    if (n === 1) pts.push(new THREE.Vector3(xs[0] + 0.01, 1.75, 0.35));
+    var curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+    // The point on the path right above the changed station: where the card stops.
+    var atU = 0, best = 1e9;
+    for (var k = 0; k <= 400; k++) { var pt = curve.getPointAt(k / 400), dx = Math.abs(pt.x - xs[at]); if (dx < best) { best = dx; atU = k / 400; } }
+    var tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 200, 0.012, 6, false), new THREE.MeshBasicMaterial({ color: new THREE.Color(css('--muted')), transparent: true, opacity: 0.45 }));
+    scene.add(tube);
+    var card = new THREE.Mesh(rounded(0.62, 0.4, 0.05, 0.08), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35, emissive: 0xffffff, emissiveIntensity: 0.15 }));
+    card.castShadow = true; scene.add(card);
+    stage.appendChild(cardEl); stage.appendChild(bubble);
+    var TRAVEL = 4200, PAUSE = 1300, HOLD = 1600, t0 = performance.now(), raf = 0, v = new THREE.Vector3(), flipAt = 0;
+    function smooth(x) { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); }
+    // Where the card is after t ms: travel to the changed station, wait there, travel on.
+    function progress(t) {
+      var ta = TRAVEL * atU, tb = TRAVEL - ta;
+      if (t < ta) return smooth(t / ta) * atU;
+      if (t < ta + PAUSE) return atU;
+      return tb > 0 ? atU + smooth((t - ta - PAUSE) / tb) * (1 - atU) : 1;
+    }
+    restart = function () { t0 = performance.now(); flipAt = 0; bubble.className = 'bubble3d'; };
+    var good = new THREE.Color(css('--good')), bad = new THREE.Color(css('--bad'));
+    function frame(now) {
+      raf = requestAnimationFrame(frame);
+      var w = stage.clientWidth, h = stage.clientHeight;
+      if (!w || !h) return;
+      if (renderer.domElement.width !== Math.round(w * renderer.getPixelRatio())) renderer.setSize(w, h, false);
+      var aspect = w / h, vf = THREE.MathUtils.degToRad(camera.fov), hf = 2 * Math.atan(Math.tan(vf / 2) * aspect);
+      var W = (n - 1) * GAP + 2.6, d = Math.max((W / 2) / Math.tan(hf / 2), 2.4 / Math.tan(vf / 2)) + 0.6;
+      camera.aspect = aspect; camera.position.set(0, 1.2 + d * 0.36, d); camera.lookAt(0, 1.0, 0); camera.updateProjectionMatrix();
+      var t = now - t0, e = progress(t), arrived = t >= TRAVEL * atU;
+      card.position.copy(curve.getPointAt(e));
+      card.position.y += Math.sin(now / 300) * 0.03;
+      if (mode === 'after' && arrived && !flipAt) flipAt = now;
+      var fa = flipAt ? Math.min(1, (now - flipAt) / 600) : 0;
+      card.rotation.y = (1 - Math.pow(1 - fa, 3)) * Math.PI * 2;
+      if (ring) {
+        var col = mode === 'after' ? good : bad;
+        ring.material.color.copy(col); ring.material.emissive.copy(col);
+        ring.material.emissiveIntensity = (arrived ? 1.4 : 0.8) + Math.sin(now / 260) * 0.5;
+      }
+      showChip(mode === 'after' && arrived ? pick.after : pick.before);
+      // The check the changed station makes, from the moment the card reaches it.
+      var why = j[mode] && j[mode].why, bcls = 'bubble3d' + (why && arrived ? ' on ' + (mode === 'after' ? 'good' : 'bad') : '');
+      if (bubble.className !== bcls) { bubble.className = bcls; bubble.textContent = tx(why); }
+      renderer.render(scene, camera);
+      // HTML labels follow their 3D positions: crisp text in either language.
+      labels.forEach(function (lb, i) { v.set(xs[i], -0.05, 1.0).project(camera); lb.style.left = (v.x + 1) / 2 * w + 'px'; lb.style.top = (1 - v.y) / 2 * h + 'px'; });
+      v.copy(card.position); v.y += 0.32; v.project(camera);
+      cardEl.style.left = (v.x + 1) / 2 * w + 'px'; cardEl.style.top = (1 - v.y) / 2 * h + 'px';
+      // The bubble sits on the face of the changed station, like a sign, clear of the labels below it.
+      v.set(xs[at], 0.82, 0.3).project(camera);
+      bubble.style.left = (v.x + 1) / 2 * w + 'px'; bubble.style.top = (1 - v.y) / 2 * h + 'px';
+      if (t > TRAVEL + PAUSE + HOLD) { if (!pinned) setMode(mode === 'before' ? 'after' : 'before'); else restart(); }
+    }
+    return {
+      el: wrap,
+      setPick: setPick,
+      start: function () { raf = requestAnimationFrame(frame); },
+      stop: function () {
+        cancelAnimationFrame(raf);
+        scene.traverse(function (o) { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+        renderer.dispose(); if (renderer.forceContextLoss) renderer.forceContextLoss();
+      }
+    };
+  }
+
+  // ---------- pages ----------
+  function lessonCards(box, full) {
+    var g = el('div', 'cards');
+    lessons.forEach(function (c, i) {
+      var b = el('button', 'card'); b.type = 'button';
+      var top = el('span'); top.appendChild(el('span', 'kind k-' + kindOf(c), (i + 1) + ' · ' + T[kindOf(c)])); b.appendChild(top);
+      b.appendChild(el('b', null, tx(c.name)));
+      var ft = el('span', 'fromto');
+      var sh = c.short || {};
+      if (full) { ft.appendChild(el('s', null, tx(sh.before))); ft.appendChild(document.createTextNode(lang === 'ar' ? ' ← ' : ' → ')); }
+      ft.appendChild(el('em', null, tx(sh.after)));
+      b.appendChild(ft);
+      b.addEventListener('click', function () { show(i + 1); });
+      g.appendChild(b);
+    });
+    box.appendChild(g);
+  }
+  function overview(box) {
+    box.appendChild(el('span', 'kind k-cleanup', T.overview));
+    box.appendChild(el('h2', 'big', tx(story.title)));
+    if (story.summary) box.appendChild(el('p', 'lead', tx(story.summary)));
+    var st = el('div', 'stats');
+    function stat(b, t) { var s = el('span'); s.appendChild(el('b', null, b)); s.appendChild(document.createTextNode(' ' + t)); st.appendChild(s); }
+    stat(lessons.length, T.changes); stat(files.length, T.files + ' · ' + (uncovered.length ? uncovered.length + ' ' + T.missing : T.explained));
+    if (proof.length) stat(passN + '/' + proof.length, T.checks);
+    box.appendChild(st);
+    lessonCards(box, true);
+  }
+  // ---------- the lab: a small copy of the changed rule, run on values the reader picks ----------
+  // Each side (old, new) is a list of rules, first match wins: { when: [{ a, op, b }], then }, else `default`.
+  // `a` names an input; `b` is another input's id or a literal; `then` is text or { input: id } (that input's value).
+  function minutes(s) { var m = /^(\d{1,2}):(\d{2})$/.exec(String(s == null ? '' : s)); return m ? +m[1] * 60 + +m[2] : NaN; }
+  function labTest(cond, vals, byId) {
+    var inp = byId[cond.a] || {}, a = vals[cond.a], blank = function (x) { return x === '' || x == null; };
+    if (cond.op === 'empty') return blank(a);
+    if (cond.op === 'set') return !blank(a);
+    var b = typeof cond.b === 'string' && byId[cond.b] ? vals[cond.b] : cond.b;
+    if (blank(a) || blank(b)) return false;
+    if (inp.type === 'choice') return cond.op === 'eq' ? String(a) === String(b) : cond.op === 'ne' ? String(a) !== String(b) : false;
+    var x = inp.type === 'time' ? minutes(a) : parseFloat(a), y = inp.type === 'time' ? minutes(b) : parseFloat(b);
+    if (isNaN(x) || isNaN(y)) return false;
+    return { eq: x === y, ne: x !== y, lt: x < y, le: x <= y, gt: x > y, ge: x >= y }[cond.op] === true;
+  }
+  function labRun(side, vals, byId) {
+    var rules = arr(side && side.rules);
+    for (var i = 0; i < rules.length; i++) if (arr(rules[i].when).every(function (cd) { return labTest(cd, vals, byId); })) return rules[i].then;
+    return side && side['default'];
+  }
+  function labShow(out, vals, byId) {
+    if (out && typeof out === 'object' && out.input) {
+      var inp = byId[out.input] || {}, v = vals[out.input];
+      var opt = arr(inp.options).filter(function (o) { return String(o.value) === String(v); })[0];
+      return opt ? tx(opt.label) : String(v == null ? '' : v);
+    }
+    return tx(out);
+  }
+  function labView(lab, onChange) {
+    var byId = {}, vals = {}, inputs = arr(lab.inputs);
+    inputs.forEach(function (inp) { byId[inp.id] = inp; vals[inp.id] = inp.value == null ? '' : String(inp.value); });
+    var box = el('div', 'lab'), head = el('div', 'lab-h');
+    head.appendChild(el('b', null, T.labTitle)); head.appendChild(el('span', null, T.labHint)); box.appendChild(head);
+    var row = el('div', 'lab-in'), controls = {};
+    inputs.forEach(function (inp) {
+      var lb = el('label', 'fld'); lb.appendChild(el('span', null, tx(inp.label)));
+      var ctl;
+      if (inp.type === 'choice') {
+        ctl = el('select');
+        arr(inp.options).forEach(function (o) { var op = el('option', null, tx(o.label)); op.value = String(o.value); ctl.appendChild(op); });
+      } else {
+        ctl = el('input'); ctl.dir = 'ltr';
+        // A time is typed as 10:05, the same digits the rest of the page uses (a time picker would follow the
+        // system locale and could show other digits or AM/PM).
+        if (inp.type === 'time') { ctl.type = 'text'; ctl.inputMode = 'numeric'; ctl.maxLength = 5; ctl.placeholder = '10:00'; ctl.pattern = '[0-9]{1,2}:[0-9]{2}'; ctl.className = 'time'; }
+        else { ctl.type = 'number'; if (inp.min != null) ctl.min = inp.min; if (inp.max != null) ctl.max = inp.max; if (inp.step != null) ctl.step = inp.step; }
+      }
+      ctl.addEventListener('input', function () { vals[inp.id] = ctl.value; update(); });
+      ctl.addEventListener('change', function () { vals[inp.id] = ctl.value; update(); });
+      lb.appendChild(ctl);
+      if (inp.type === 'time' && inp.allowEmpty) {
+        // "No date" is a real case for an optional time: the rule must handle it.
+        var none = el('label', 'none'), cb = el('input'); cb.type = 'checkbox';
+        none.appendChild(cb); none.appendChild(document.createTextNode(T.noValue)); lb.appendChild(none);
+        cb.addEventListener('change', function () { ctl.disabled = cb.checked; vals[inp.id] = cb.checked ? '' : (ctl.value || inp.value || ''); update(); });
+        controls[inp.id] = { ctl: ctl, none: cb };
+      } else controls[inp.id] = { ctl: ctl };
+      row.appendChild(lb);
+    });
+    box.appendChild(row);
+    var presets = arr(lab.presets), preEls = [];
+    if (presets.length) {
+      var pre = el('div', 'lab-pre'); pre.appendChild(el('span', null, T.tryCase));
+      presets.forEach(function (p, i) {
+        var label = p.label ? tx(p.label) : inputs.map(function (inp) { var v = p.values[inp.id]; return v === '' ? T.noValue : labShow({ input: inp.id }, p.values, byId); }).join(' · ');
+        var b = el('button', 'casechip', label); b.type = 'button';
+        b.addEventListener('click', function () { set(p.values); preEls.forEach(function (x, k) { x.setAttribute('aria-pressed', String(k === i)); }); });
+        pre.appendChild(b); preEls.push(b);
+      });
+      box.appendChild(pre);
+    }
+    var out = el('div', 'lab-out'), oOld = el('div', 'o'), oNew = el('div', 'o');
+    [[oOld, T.oldCode], [oNew, T.newCode]].forEach(function (p) { p[0].appendChild(el('small', null, p[1])); p[0].appendChild(el('b')); out.appendChild(p[0]); });
+    var diff = el('span', 'diff', T.changed); out.appendChild(diff);
+    box.appendChild(out);
+    box.appendChild(el('p', 'lab-note', T.labNote));
+    function set(values) {
+      Object.keys(values || {}).forEach(function (id) {
+        if (!controls[id]) return;
+        var v = values[id] == null ? '' : String(values[id]), c = controls[id];
+        vals[id] = v;
+        if (c.none) { c.none.checked = v === ''; c.ctl.disabled = v === ''; if (v !== '') c.ctl.value = v; }
+        else c.ctl.value = v;
+      });
+      update();
+    }
+    function update() {
+      var a = labShow(labRun(lab.old, vals, byId), vals, byId), b = labShow(labRun(lab['new'], vals, byId), vals, byId), changed = a !== b;
+      oOld.lastChild.textContent = a; oNew.lastChild.textContent = b;
+      oOld.className = 'o old ' + (changed ? 'bad' : 'same'); oNew.className = 'o new good';
+      diff.hidden = !changed;
+      onChange({
+        sub: inputs.map(function (inp) { var v = vals[inp.id]; return tx(inp.label) + ' ' + (v === '' ? T.noValue : labShow({ input: inp.id }, vals, byId)); }).join(' · '),
+        before: { badge: a, tone: changed ? 'bad' : 'good' }, after: { badge: b, tone: 'good' }
+      });
+    }
+    // Start from the first preset when there is one, else from each input's own value.
+    setTimeout(function () { if (presets.length) preEls[0].click(); else set(vals); }, 0);
+    return box;
+  }
+
+  // ---------- the code walk: the request's path through the code, one step per layer, in the order it runs ----------
+  // A row of step buttons (page → API → service → database → test) over one card per step: what this layer does
+  // with the example, its real file and lines with a plain note beside the key ones, and what it hands to the next
+  // step. The step the PR changes is marked; the others show the code the request passes through unchanged.
+  function walkView(steps, li) {
+    var s = el('section', 'sec walk'), h = el('h3'); h.appendChild(document.createTextNode(T.walkTitle)); s.appendChild(h);
+    s.appendChild(el('p', 'whint', T.walkHint));
+    var nav = el('div', 'wnav'), navBtns = [], cards = [];
+    var still = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function go(k, focus) {
+      if (!cards[k]) return;
+      navBtns.forEach(function (b, m) { b.setAttribute('aria-current', String(m === k)); });
+      cards[k].scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
+      if (focus) cards[k].focus({ preventScroll: true });
+    }
+    steps.forEach(function (w, k) {
+      if (k) nav.appendChild(el('span', 'wsep', lang === 'ar' ? '←' : '→'));
+      var b = el('button', 'wbtn' + (w.changed ? ' hot' : '')); b.type = 'button';
+      b.style.setProperty('--ic', css(LAYER[w.layer] || '--muted'));
+      b.appendChild(el('span', 'wn', k + 1)); b.appendChild(icon(w.layer)); b.appendChild(el('span', null, tx(w.label)));
+      b.addEventListener('click', function () { go(k, true); });
+      nav.appendChild(b); navBtns.push(b);
+    });
+    navBtns[0].setAttribute('aria-current', 'true');
+    s.appendChild(nav);
+    steps.forEach(function (w, k) {
+      var card = el('article', 'wstep' + (w.changed ? ' hot' : '')); card.id = 'walk-' + li + '-' + k; card.tabIndex = -1;
+      card.style.setProperty('--ic', css(LAYER[w.layer] || '--muted'));
+      var hd = el('div', 'wstep-h');
+      hd.appendChild(el('span', 'no', k + 1)); hd.appendChild(icon(w.layer)); hd.appendChild(el('b', null, tx(w.label)));
+      hd.appendChild(el('span', 'layer', T['L_' + w.layer] || T.L_other));
+      // A test is not on the request's path: it proves the change, new or not.
+      var isTest = w.layer === 'test';
+      hd.appendChild(el('span', 'tag ' + (isTest ? 'pass' : w.changed ? 'hot' : 'same'), isTest ? T.provesIt : w.changed ? T.changedStep : T.unchanged));
+      card.appendChild(hd);
+      card.appendChild(el('p', 'does', tx(w.does)));
+      card.appendChild(snippet(w));
+      if (k < steps.length - 1) {
+        var foot = el('div', 'wfoot');
+        if (w.passes) { var ps = el('p', 'wpass'); ps.appendChild(el('span', 'arrow', '↓')); ps.appendChild(el('span', null, T.passes)); ps.appendChild(el('span', 'v', tx(w.passes))); foot.appendChild(ps); }
+        var nb = el('button', 'wnext', T.nextStep + ': ' + tx(steps[k + 1].label) + (lang === 'ar' ? ' ←' : ' →')); nb.type = 'button';
+        nb.addEventListener('click', function () { go(k + 1, true); });
+        foot.appendChild(nb); card.appendChild(foot);
+      }
+      s.appendChild(card); cards.push(card);
+    });
+    return {
+      el: s, go: go,
+      stepOf: function (layer) { for (var k = 0; k < steps.length; k++) if (steps[k].layer === layer) return k; return -1; }
+    };
+  }
+
+  function lesson(box, c, i) {
+    box.appendChild(el('span', 'kind k-' + kindOf(c), T.lesson + ' ' + frac(i + 1, lessons.length) + ' · ' + T[kindOf(c)]));
+    box.appendChild(el('h2', 'big', tx(c.name)));
+    if (c.takeaway) { var tk = el('p', 'takeaway'); tk.appendChild(el('b', null, T.remember)); tk.appendChild(el('span', null, tx(c.takeaway))); box.appendChild(tk); }
+
+    // The core: the example travelling through the app, and the lab that feeds it values. With a code walk, a
+    // station opens the walk step of its layer.
+    var wv = arr(c.walk).length ? walkView(c.walk, i) : null, onStation = null;
+    if (wv && c.journey) {
+      var stns = arr(c.journey.stations);
+      onStation = function (k) { var m = wv.stepOf(stns[k] && stns[k].layer); if (m >= 0) wv.go(m, true); };
+      onStation.can = function (k) { return wv.stepOf(stns[k] && stns[k].layer) >= 0; };
+    }
+    var jv = c.journey ? journey(c.journey, c.lab ? null : c.cases, onStation) : null;
+    if (jv) { box.appendChild(jv.el); box._journey = jv; }
+    if (c.lab) {
+      var lv = labView(c.lab, function (state) { if (jv) jv.setPick({ name: tx(c.journey && c.journey.item), sub: state.sub, before: state.before, after: state.after }); });
+      if (jv) jv.el.appendChild(lv); else { var core = el('section', 'journey'); core.appendChild(lv); box.appendChild(core); }
+    } else if (c.cases && !jv) box.appendChild(casesTable(c.cases));
+
+    // The story in three short lines, with the screen before and after.
+    var st = el('section', 'sec story');
+    [['bad', '✕', T.problem, c.problem], ['warn', '?', T.cause, c.cause], ['good', '✓', T.fix_, c.idea]].forEach(function (r) {
+      var line = el('div', 'sline ' + r[0]); line.appendChild(el('span', 'ic', r[1]));
+      var body = el('div'); body.appendChild(el('small', null, r[2])); body.appendChild(el('p', null, tx(r[3]))); line.appendChild(body);
+      st.appendChild(line);
+    });
+    var mb = mockOf(c, 'before'), ma = mockOf(c, 'after');
+    if (mb || ma) {
+      var pair = el('div', 'mockpair');
+      if (mb) { var fb = el('figure'); fb.appendChild(el('figcaption', 'bad', T.before)); fb.appendChild(mb); pair.appendChild(fb); }
+      if (ma) { var fa = el('figure'); fa.appendChild(el('figcaption', 'good', T.after)); fa.appendChild(ma); pair.appendChild(fa); }
+      st.appendChild(pair);
+    }
+    box.appendChild(st);
+
+    // The code: with a walk, step by step from the page to the database, any other snippet folded under it;
+    // without one, the key snippet with the rest folded away.
+    var snips = arr(c.code);
+    function addSnip(target, s) { if (s.title) target.appendChild(el('p', 'stitle', tx(s.title))); target.appendChild(snippet(s)); }
+    function folded(target, list) {
+      var more = el('details', 'more'); more.appendChild(el('summary', null, T.moreCode + ' (' + list.length + ')'));
+      list.forEach(function (s) { addSnip(more, s); });
+      target.appendChild(more);
+    }
+    if (wv) {
+      box.appendChild(wv.el);
+      if (snips.length) { var xs = el('section', 'sec'); folded(xs, snips); box.appendChild(xs); }
+    } else {
+      var sc = el('section', 'sec'), h = el('h3'); h.appendChild(document.createTextNode(T.code)); sc.appendChild(h);
+      if (snips[0]) addSnip(sc, snips[0]);
+      if (snips.length > 1) folded(sc, snips.slice(1));
+      box.appendChild(sc);
+    }
+
+    // Proof in one line (details on demand), then one question.
+    var t = c.test, pf = el('section', 'sec proofline');
+    if (!t) pf.appendChild(el('p', null, T.noTest));
+    else {
+      var d = el('details'), sm = el('summary');
+      sm.appendChild(el('span', 'tag ' + (t.result === 'pass' ? 'pass' : t.result === 'fail' ? 'fail' : 'wait'), t.result === 'pass' ? T.pass : t.result === 'fail' ? T.fail : T.notRun));
+      sm.appendChild(document.createTextNode(T.provedBy + ' ' + tx(t.name)));
+      d.appendChild(sm);
+      var g = el('div', 'gwt');
+      [['given', t.given], ['when', t.when], ['then', t.then]].forEach(function (p) { if (!p[1]) return; g.appendChild(el('b', null, T[p[0]])); g.appendChild(el('span', null, tx(p[1]))); });
+      d.appendChild(g);
+      if (t.file) d.appendChild(el('div', 'tfile', tx(t.file)));
+      pf.appendChild(d);
+    }
+    box.appendChild(pf);
+
+    // One question to check the lesson landed: pick an answer, see right or wrong and why.
+    if (c.quiz) {
+      var qz = el('section', 'sec quiz'), qh = el('h3'); qh.appendChild(document.createTextNode(T.quiz)); qz.appendChild(qh);
+      qz.appendChild(el('p', 'q', tx(c.quiz.q)));
+      var opts = el('div', 'qopts'), ans = el('p', 'qans'); ans.hidden = true;
+      arr(c.quiz.options).forEach(function (o) {
+        var b = el('button', 'qopt', tx(o.text)); b.type = 'button';
+        b.addEventListener('click', function () {
+          opts.querySelectorAll('.qopt').forEach(function (x, k) { x.disabled = true; if (c.quiz.options[k].correct) x.classList.add('right'); });
+          if (!o.correct) b.classList.add('wrong');
+          ans.className = 'qans ' + (o.correct ? 'right' : 'wrong'); ans.replaceChildren(el('b', null, o.correct ? T.right : T.wrong), document.createTextNode(tx(c.quiz.explain)));
+          ans.hidden = false;
+        });
+        opts.appendChild(b);
+      });
+      qz.appendChild(opts); qz.appendChild(ans); box.appendChild(qz);
+    }
+  }
+  // Without a lab or a journey, the cases still show as a small table: same inputs, old and new result.
+  function casesTable(cases) {
+    var s = el('section', 'sec'), wrap = el('div', 'casewrap'), table = el('table', 'cases'), thead = el('thead'), hr = el('tr');
+    var h = el('h3'); h.appendChild(document.createTextNode(T.cases)); s.appendChild(h);
+    arr(cases.inputs).forEach(function (x) { hr.appendChild(el('th', null, tx(x))); });
+    hr.appendChild(el('th', null, T.before)); hr.appendChild(el('th', null, T.after));
+    thead.appendChild(hr); table.appendChild(thead);
+    var tb = el('tbody');
+    arr(cases.rows).forEach(function (r) {
+      var tr = el('tr', tx(r.old && r.old.text) !== tx(r.now && r.now.text) || (r.old && r.old.ok) !== (r.now && r.now.ok) ? 'diff' : '');
+      arr(r.values).forEach(function (v) { tr.appendChild(el('td', 'v', tx(v))); });
+      [r.old, r.now].forEach(function (o) { var td = el('td'); td.appendChild(el('span', 'res ' + (o && o.ok ? 'ok' : 'no'), tx(o && o.text))); tr.appendChild(td); });
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb); wrap.appendChild(table); s.appendChild(wrap);
+    return s;
+  }
+  function mockOf(c, side) { return c.mock ? mock(c.mock, side, side === 'before' ? 'bad' : 'good') : null; }
+  function end(box) {
+    box.appendChild(el('span', 'kind k-cleanup', T.summary));
+    box.appendChild(el('h2', 'big', tx(story.title)));
+    lessonCards(box, false);
+    var three = el('div', 'three');
+    function list(title, items, row) { var s = el('section', 'sec box'); s.appendChild(el('h3', null, title)); var ul = el('ul'); if (!items.length) ul.appendChild(el('li', null, T.none)); items.forEach(function (x) { ul.appendChild(row(x)); }); s.appendChild(ul); return s; }
+    three.appendChild(list(T.checks, proof, function (p) { var l = el('li', null, (p.result === 'pass' ? '✓ ' : p.result === 'fail' ? '✕ ' : '• ') + tx(p.name)); l.appendChild(el('small', null, [tx(p.file), p.result === 'pass' ? T.pass : p.result === 'fail' ? T.fail : T.notRun].filter(Boolean).join(' · '))); return l; }));
+    three.appendChild(list(T.risks, arr(story.risks), function (x) { return el('li', null, tx(x)); }));
+    three.appendChild(list(T.notDone, arr(story.notDone), function (x) { return el('li', null, tx(x)); }));
+    box.appendChild(three);
+    var d = el('details', 'sec files'); d.appendChild(el('summary', null, T.allFiles + ' (' + files.length + ')'));
+    var ul = el('ul');
+    files.forEach(function (f) {
+      var owners = lessons.map(function (c, i) { return arr(c.files).indexOf(f) >= 0 ? i + 1 : null; }).filter(Boolean);
+      var l = el('li'); l.appendChild(el('code', null, f)); l.appendChild(document.createTextNode(owners.length ? ' — ' + T.lesson + ' ' + owners.join(lang === 'ar' ? '، ' : ', ') : ' — ' + T.missing)); ul.appendChild(l);
+    });
+    d.appendChild(ul); box.appendChild(d);
+  }
+
+  // ---------- navigation ----------
+  var pillEls = [];
+  function buildTop() {
+    $('prn').textContent = pr.number ? 'PR #' + pr.number : (pr.branch || 'PR');
+    $('ttl').textContent = tx(story.title);
+    $('lang').textContent = T.other; $('lang').lang = lang === 'ar' ? 'en' : 'ar';
+    var nav = $('lessons'); nav.replaceChildren(); nav.setAttribute('aria-label', T.lessons);
+    pillEls = pages.map(function (p, i) {
+      var b = el('button', 'pill'); b.type = 'button';
+      if (p === 'overview') b.appendChild(el('span', null, T.overview));
+      else if (p === 'end') b.appendChild(el('span', null, T.summary));
+      else { b.appendChild(el('span', 'n', p + 1)); b.appendChild(el('span', null, tx(lessons[p].name))); }
+      b.addEventListener('click', function () { show(i); });
+      nav.appendChild(b); return b;
+    });
+    $('back').textContent = T.back;
+  }
+  function show(i) {
+    if (i < 0 || i >= pages.length) return;
+    at = i; var p = pages[i], box = el('div', 'page');
+    if (stopJourney) { stopJourney(); stopJourney = null; }
+    if (p === 'overview') overview(box); else if (p === 'end') end(box); else lesson(box, lessons[p], p);
+    $('main').replaceChildren(box);
+    if (box._journey) { box._journey.start(); stopJourney = box._journey.stop; }
+    window.scrollTo(0, 0);
+    pillEls.forEach(function (b, j) { b.setAttribute('aria-current', j === i ? 'true' : 'false'); });
+    var cur = pillEls[i], nav = $('lessons'), cb = cur.getBoundingClientRect(), nb = nav.getBoundingClientRect();
+    if (cb.left < nb.left || cb.right > nb.right) nav.scrollLeft += lang === 'ar' ? cb.right - nb.right + 16 : cb.left - nb.left - 16;
+    $('back').disabled = i === 0;
+    $('next').disabled = i === pages.length - 1;
+    $('next').textContent = i === 0 ? T.start : i === pages.length - 2 ? T.finish : T.next;
+    $('where').textContent = p === 'overview' ? T.overview : p === 'end' ? T.summary : T.lesson + ' ' + frac(p + 1, lessons.length) + ' · ' + tx(lessons[p].name);
+    try { history.replaceState(null, '', '#' + i); } catch (e) { /* a sandboxed frame may refuse */ }
+  }
+  function applyLang() {
+    T = WORDS[lang];
+    document.documentElement.lang = lang; document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+    document.title = tx(story.title) || 'PR Lessons';
+    buildTop(); show(at);
+  }
+  $('lang').addEventListener('click', function () {
+    lang = lang === 'ar' ? 'en' : 'ar';
+    try { localStorage.setItem(STORE, lang); } catch (e) { /* storage may be blocked */ }
+    applyLang();
+  });
+  $('back').addEventListener('click', function () { show(at - 1); });
+  $('next').addEventListener('click', function () { show(at + 1); });
+  addEventListener('keydown', function (e) {
+    if (e.target && /^(INPUT|TEXTAREA|SUMMARY)$/.test(e.target.tagName)) return;
+    var fwd = lang === 'ar' ? 'ArrowLeft' : 'ArrowRight', bwd = lang === 'ar' ? 'ArrowRight' : 'ArrowLeft';
+    if (e.key === fwd) { e.preventDefault(); show(at + 1); } else if (e.key === bwd) { e.preventDefault(); show(at - 1); }
+  });
+  // A link to "#3" opens page 3, also when only the address changes.
+  addEventListener('hashchange', function () { var h = parseInt((location.hash || '').slice(1), 10); if (h >= 0 && h < pages.length && h !== at) show(h); });
+  var start = parseInt((location.hash || '').slice(1), 10);
+  at = start >= 0 && start < pages.length ? start : 0;
+  applyLang();
+})();
+</script>
+</body>
+</html>
