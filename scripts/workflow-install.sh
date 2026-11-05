@@ -59,8 +59,10 @@ if [ -z "${WORKFLOW_TYPESCRIPT_RUNNER:-}" ]; then
 fi
 # --test-reporter=spec: Node 22 prints TAP ("# pass N") when stdout is not a terminal; without it
 # the "ℹ pass N" lines are missing and the install ends with exit 1 (seen on the Sanad CI).
-hooks=$(cd "$C/hooks/tests" && node --test --test-reporter=spec 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ')
-gate=$(cd "$C/skills/gate/tests" && node --test --test-reporter=spec 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ')
+# `|| true`: a failing suite exits non-zero, and under pipefail that ended the script silently,
+# before the release line and the restore hint below (seen 2026-11-05).
+hooks=$(cd "$C/hooks/tests" && node --test --test-reporter=spec 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ') || true
+gate=$(cd "$C/skills/gate/tests" && node --test --test-reporter=spec 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ') || true
 echo "hooks: $hooks"; echo "gate: $gate"
 { printf -- '- %s · %s · changed: %s' "$(date -u +%Y-%m-%dT%H:%MZ)" "$NAME" "${changed[*]}"
   [ ${#removed[@]} -gt 0 ] && printf ' · removed: %s' "${removed[*]}"
