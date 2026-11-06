@@ -185,6 +185,45 @@ test('same-tree memo: a git-only change that leaves HEAD identical to the verifi
 });
 // 2026-11-05: three shapes that held the stop with no real reason.
 const bash = (id, cmd, content = 'Completed.', isError = false, extra) => [call(id, 'Bash', { command: cmd }), result(id, content, isError, extra)];
+// 2026-11-06: a background launch whose result named its task only in its text was never matched to
+// its finish and held every stop as "still running" for hours; the blocking check was also unnamed.
+test('a background launch named only in its text is settled by its finish notice', () => {
+  const launch = command('bgt', 'dotnet test Big.sln', 'Command running in background with ID: bgt9', false, {});
+  const failed = invoke('stop-gate.js', [...edit(), ...launch, notification('bgt9', 'failed', 1)], { outputFiles: { 'C:/tasks/bgt9.output': 'Failed!  - Failed: 1, Passed: 9' } });
+  assert.equal(failed.decision, 'block');
+  assert.doesNotMatch(failed.output.reason, /still running/, 'its finish was matched');
+  assert.match(failed.output.reason, /The failed check: `dotnet test Big\.sln`/);
+});
+// 2026-11-06: waiting for a helper right after a branch switch blocked every stop.
+test('a helper launched after the last change lets the stop wait; its finish brings the gate back', () => {
+  const helper = [call('h1', 'Agent', { description: 'Test designer', prompt: 'Seat: Test designer.' }), result('h1', 'Async agent launched successfully. agentId: aHelper1 (internal ID)')];
+  const done = { type: 'attachment', attachment: { type: 'queued_command', commandMode: 'task-notification', prompt: '<task-notification>\n<task-id>aHelper1</task-id>\n<status>completed</status>\n<summary>Agent "Test designer" finished</summary>\n</task-notification>' } };
+  const waiting = invoke('stop-gate.js', [...edit(), ...helper]);
+  assert.equal(waiting.decision, 'allow');
+  assert.match(waiting.output.systemMessage, /helper for this work is still running/);
+  assert.equal(invoke('stop-gate.js', [...edit(), ...helper, done]).decision, 'block', 'once it reports, the check is owed again');
+  assert.equal(invoke('stop-gate.js', [...helper, ...edit()]).decision, 'allow', 'a helper launched just before the change (a Test designer) still counts');
+  const passed = command('pass', 'dotnet test', 'Passed!  - Failed: 0, Passed: 3');
+  assert.equal(invoke('stop-gate.js', [...helper, ...passed, ...edit()]).decision, 'block', 'a helper older than a later passing check belongs to older work');
+  const sync = [call('h2', 'Agent', { prompt: 'x' }), result('h2', 'Report text', false, { status: 'completed', agentId: 'aSync' })];
+  assert.equal(invoke('stop-gate.js', [...edit(), ...sync]).decision, 'block', 'a helper that already answered is not running');
+});
+test('a launch never matched to its finish does not hold the stop as still running', () => {
+  const orphan = command('bgx', 'dotnet test', 'Command running in background.', false, {}); // no task id anywhere
+  const r = invoke('stop-gate.js', [...edit(), ...orphan]);
+  assert.equal(r.decision, 'block', 'still no passing run after the edit');
+  assert.doesNotMatch(r.output.reason, /still running/);
+  assert.match(invoke('stop-gate.js', [...edit(), ...background()]).output.reason, /still running or its completion has not been collected.*: `dotnet test`/, 'a known running one is named');
+});
+test('the stop names the failed check and hands a clear-line that retires it', () => {
+  const red = command('suite', 'dotnet test Big.sln', 'Failed!  - Failed: 1, Passed: 9', true);
+  const blocked = invoke('stop-gate.js', [...edit(), ...red]);
+  assert.match(blocked.output.reason, /The failed check: `dotnet test Big\.sln`/);
+  const line = /CHECK RETIRED: (\{.*\})$/m.exec(blocked.output.reason)[1];
+  const filled = line.replace('<the rerun command>', 'dotnet test Big.sln --filter Slow').replace('<why>', 'a load timeout');
+  const rerun = command('rerun', 'dotnet test Big.sln --filter Slow', 'Passed!  - Failed: 0, Passed: 1');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...red, verdict('CHECK RETIRED: ' + filled), ...rerun]).decision, 'allow');
+});
 test('a foreground verify whose result was lost does not hold the stop as still running', () => {
   const lost = call('lost', 'PowerShell', { command: 'dotnet test' }); // the host never wrote its result
   const blocked = invoke('stop-gate.js', [...edit(), lost]);

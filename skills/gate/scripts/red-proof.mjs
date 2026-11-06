@@ -7,7 +7,8 @@
 // Why a script: a red run typed as a plain test command is kept as a failed check by the push
 // guard forever, and a hand-written "swap; test; restore" compound can never be re-run green.
 // This helper is not a test command itself, so only its own result counts: exit 0 = RED as
-// expected, 1 = NOT RED, 2 = usage or restore problem.
+// expected (each failing test named, with its reason), 1 = NOT RED, 2 = usage or restore
+// problem, 3 = SETUP (a test failed for a setup reason, not because of the old code).
 //
 // Usage:
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --old <git-ref> --files <a,b,...>
@@ -25,6 +26,37 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
+
+// Why each test failed (2026-11-06). An assertion about behavior proves the old code is wrong. A
+// missing element, a type, reference or build error, or a timeout means the test itself (or the
+// machine) is wrong, so the run proves nothing yet: exit 3, SETUP.
+const SETUP_ERR = /TestingLibraryElementError|Unable to find (?:an? )?(?:accessible )?element|Found multiple elements|\bTypeError\b|\bReferenceError\b|\bSyntaxError\b|Cannot read propert|is not a function|is not defined|Test timed out|Hook timed out|Cannot find module|Failed to resolve import|NullReferenceException|\berror (?:CS|TS)\d{3,5}\b/;
+const ASSERT_ERR = /AssertionError|\bexpected\b.*\bto\b|Assert\.\w+\(\) Failure|Xunit\.Sdk\.\w+Exception|AssertFailedException|Shouldly|^Expected:/i;
+const SETUP_OUTPUT = /\berror (?:CS|TS)\d{3,5}\b|Build FAILED|Failed to resolve import|Cannot find module|SyntaxError/;
+function failureReasons(text) {
+  const lines = String(text).replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/);
+  const found = new Map();
+  for (let i = 0; i < lines.length; i++) {
+    const vitest = /^\s*FAIL\s+(.+?)\s*$/.exec(lines[i]);
+    const dotnet = /^\s*Failed\s+(\S.*?)\s*\[[^\]]*\]\s*$/.exec(lines[i]);
+    const name = vitest ? vitest[1] : dotnet ? dotnet[1] : null;
+    if (!name || /\(\d+ tests?\b/.test(name) || found.has(name)) continue; // a file's summary line, or seen
+    let kind = 'other', why = '';
+    // Tests that fail the same way are listed together, one FAIL line each, above one shared error
+    // (vitest groups them): skip the FAIL lines right below this one and read that error.
+    let grouped = true;
+    for (let j = i + 1; j < Math.min(lines.length, i + 60); j++) {
+      const l = lines[j].trim();
+      if (!l || /^(?:[⎯─-]{3,}|Error Message:|Stack Trace:)/.test(l)) continue;
+      if (/^\s*(?:FAIL|Failed)\s/.test(lines[j])) { if (grouped) continue; break; }
+      grouped = false;
+      if (SETUP_ERR.test(l)) { kind = 'setup'; why = l; break; }
+      if (ASSERT_ERR.test(l)) { kind = 'assert'; why = l; break; }
+    }
+    found.set(name, { name, kind, why: why.slice(0, 140) });
+  }
+  return [...found.values()];
+}
 
 const argv = process.argv.slice(2);
 const dash = argv.indexOf('--');
@@ -123,7 +155,15 @@ if (result.error) { say(`RED-PROOF: the test command could not run — ${result.
 const code = result.status;
 say(tail);
 if (code !== 0) {
-  say(`RED-PROOF: RED ✓ — the test fails ${breakFile ? `with ${breakFile} broken` : `on ${oldRef} for ${files.join(', ')}`} (exit ${code}); files restored.`);
+  const why = failureReasons(output);
+  for (const w of why.slice(0, 12)) say(`  ${w.kind === 'assert' ? '✓ assert' : w.kind === 'setup' ? '✗ setup ' : '? other '}  ${w.name}${w.why ? ' — ' + w.why : ''}`);
+  const setup = why.filter((w) => w.kind === 'setup');
+  if (setup.length || (!why.length && SETUP_OUTPUT.test(output))) {
+    say(`RED-PROOF: SETUP ✗ — ${setup.length || 'the run'} failed for a setup reason (element not found, type or build error, timeout), not because of the old code. Fix the test or the machine, then run again; files restored.`);
+    process.exit(3);
+  }
+  const asserts = why.filter((w) => w.kind === 'assert').length;
+  say(`RED-PROOF: RED ✓ — the test fails ${breakFile ? `with ${breakFile} broken` : `on ${oldRef} for ${files.join(', ')}`} (exit ${code}${why.length ? `; ${asserts} of ${why.length} failing test(s) by an assertion` : '; failure reasons not read from this runner'}); files restored.`);
   process.exit(0);
 }
 say(`RED-PROOF: NOT RED ✗ — the test passes ${breakFile ? `with ${breakFile} broken, so it does not check that code` : `on ${oldRef}, so it does not prove the fix`}; files restored.`);

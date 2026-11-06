@@ -104,6 +104,16 @@ if (!failedAfterEdit && !pendingAfterEdit && r.lastVerify > lastEdit) {
 if (!failedAfterEdit && !pendingAfterEdit && r.lastProbeFailure > lastEdit) {
   out({ systemMessage: 'Declared review probe(s) failed as expected. That is evidence about the code under review, not verification of your own change; the push guard still refuses while they fail.' });
 }
+// A helper agent of the current work is still working (launched after the last passing check, even
+// before the change, as a Test designer is): the task goes on when it reports, so the stop waits for
+// it instead of asking for a check that cannot run yet (2026-11-06). Its finish brings the next stop
+// back to this gate. A helper launched before a later passing check belongs to older work.
+if (!failedAfterEdit && !pendingAfterEdit && (r.lastRunningHelper ?? -1) > r.lastVerify) {
+  out({ systemMessage: 'A helper for this work is still running; the build/test check follows when its result is in.' });
+}
+
+// The check that blocks, named, so it is found at once (2026-11-06: hunting an unnamed one cost ~20 min).
+function shown(command) { const c = String(command || '').replace(/\s+/g, ' ').trim(); return c ? (c.length > 160 ? c.slice(0, 157) + '…' : c) : 'unknown'; }
 const file = r.lastEditPath === '<git>' ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
 
 if (input.stop_hook_active) {
@@ -120,8 +130,11 @@ out({
   reason: failedAfterEdit
     ? 'The last build/test run after your code edit FAILED' + file + ' — a failing run is not verification. ' +
       'Fix the cause, re-run the build and the relevant tests, quote their real output, then stop again. ' +
-      'If it genuinely cannot pass here, say exactly what is failing and why instead of claiming success.'
-    : pendingAfterEdit ? 'A build/test is still running or its completion has not been collected' + file + '. Read its completed TaskOutput, fix any failure, then run /gate. Starting a background command is not a passing result.'
+      'If it genuinely cannot pass here, say exactly what is failing and why instead of claiming success. ' +
+      'The failed check: `' + shown(r.lastFailedVerifyStopCommand) + '`. ' +
+      'If every failure is a timeout under machine load (not the code), rerun only the failed tests; to clear this run, send this line alone in a text-only message, with your rerun command filled in, then run that command exactly, which must pass: ' +
+      'CHECK RETIRED: ' + JSON.stringify({ failed: r.lastFailedVerifyStopCommand || '<the failed command>', replacement: '<the rerun command>', reason: '<why>' })
+    : pendingAfterEdit ? 'A build/test is still running or its completion has not been collected' + file + ': `' + shown(r.lastPendingVerifyStopCommand) + '`. Read its completed TaskOutput, fix any failure, then run /gate. Starting a background command is not a passing result.'
     : 'Code files were edited this session' + file + ' but no build/test has run since the last edit. ' +
       'Apply the Definition-of-Done at the cheapest correct rung (CLAUDE.md "Verify fast"): run the build and the relevant tests now, quote their real output, then stop again. ' +
       'If verification is genuinely impossible here (no toolchain, needs the user), say exactly what is unverified and why instead of claiming success.',
