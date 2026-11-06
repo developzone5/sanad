@@ -100,6 +100,16 @@ test('Next.js: a server action is medium; middleware with access is big', () => 
   assert.equal(mw.size, 'big');
 });
 
+test('a URL or cache change stays small but adds the Client state checks', () => {
+  const page = 'export function List() {\n  function pick(next) {\n    setParams(params => { params.set("tab", next); });\n  }\n  return pick;\n}\n';
+  const r = size(change({ 'src/List.tsx': page }, { 'src/List.tsx': page.replace('params.set("tab", next);', 'params.set("tab", next); params.delete("count");') }));
+  assert.equal(r.size, 'small');
+  assert.ok(r.signals.clientState);
+  assert.match(r.roles.join(' '), /Client state checks/);
+  const server = 'public class C {\n  public void Go() { }\n}\n';
+  assert.ok(!size(change({ 'Api/C.cs': server }, { 'Api/C.cs': server.replace('Go() { }', 'Go() { var queryKey = 1; }') })).signals.clientState, 'server code is not client state');
+});
+
 test('UI role gating is medium: the server must check too', () => {
   const nav = 'export const menu = [{ path: "/a", roles: ["Teacher"] }];\n';
   const r = size(change({ 'src/router.tsx': '<RoleGuard allowedRoles={["Admin"]} />\n' }, { 'src/router.tsx': '<RoleGuard allowedRoles={["Admin", "Manager"]} />\n', 'src/nav.ts': nav }));

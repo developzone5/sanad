@@ -27,7 +27,7 @@
 
 > *Sanad* (سند) is the verified chain that authenticates a narration. Nothing is accepted until every link is checked. Sanad applies the same idea to code: every change walks one gated loop, and every claim is backed by real command output.
 
-Sanad provides a shared workflow for Claude Code and Codex: an always-on rulebook, one task loop (`/sanad`), and specialist agents. Five deterministic guards enforce parts of the workflow in Claude Code. Codex uses the same canonical instructions and applies review, evidence and approval requirements explicitly; Claude hooks do not run automatically in Codex. The workflow is opinionated and backend-first.
+Sanad provides a shared workflow for Claude Code and Codex: an always-on rulebook, one task loop (`/sanad`), and specialist agents. Six deterministic guards enforce parts of the workflow in Claude Code. Codex uses the same canonical instructions and applies review, evidence and approval requirements explicitly; Claude hooks do not run automatically in Codex. The workflow is opinionated and backend-first.
 
 ## Table of contents
 
@@ -141,8 +141,10 @@ Roles have explicit model and effort assignments. The table below describes Clau
 | Agent | Model / effort | Role |
 |---|---|---|
 | `routing-boss` | Fable 5.1 / xhigh | Routes uncertain or sensitive work. Reviews braintrust reports and makes the final design call. Read-only, never writes code. |
-| `braintrust-expert` | Opus 5.5 / xhigh | Deep-risk seats: Architect, Skeptic, Database optimizer, Security auditor, Authenticity. Read-only. |
-| `braintrust-expert-sonnet` | Sonnet 5.5 / xhigh | Practical seats: Pragmatist, Performance, Product advocate. Read-only. |
+| `braintrust-expert` | Opus 5.5 / xhigh | Deep-risk seats: Architect, Skeptic, Database optimizer, Security auditor, Authenticity, Client state. Read-only; read-only probes such as `EXPLAIN` are expected. |
+| `braintrust-expert-sonnet` | Sonnet 5.5 / xhigh | Practical seats: Pragmatist, Performance, Product advocate, Test designer. Read-only. |
+
+Every seat also loads the lines tagged for it in the stack's playbooks (`skills/braintrust/playbooks/`: .NET, React, Next.js, MySQL, SQL Server, PostgreSQL). The stack comes from `stack.mjs`, and no playbook line names a version without marking it.
 | `independent-reviewer` | Opus 5.5 / xhigh | Pass A: sensitive files and callers (auth, tenant, DB, money, files). Read-only. |
 | `routine-reviewer` | Sonnet 5.5 / xhigh | Pass B: whole-diff coverage and scoped re-checks. Reports `ESCALATE` for an uncovered sensitive boundary. Read-only. |
 | `sonnet-worker` | Sonnet 5.5 / medium | Mechanical edits (typo, rename, one obvious line) and evidence chores (run the named tests, read logs). |
