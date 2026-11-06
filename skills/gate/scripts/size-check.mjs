@@ -43,6 +43,8 @@ export const SIGNALS = {
   concurrencyUi: { size: 'medium', seat: 'Skeptic', label: 'timers or cross-tab state in the client' },
   infra: { size: 'medium', seat: 'deploy check', label: 'infrastructure or startup config' },
   split: { size: 'medium', seat: 'PR plan: split it', label: 'more than 400 logic lines or 30 files' },
+  // Does not raise the size; adds the Client state lens (the seat on a panel, its checks in every review brief).
+  clientState: { size: 'small', seat: 'Client state checks (the Client state seat on a panel)', label: 'client state (URL, cache, storage)' },
 };
 
 const DB_FILE = /\b(?:DbContext|DbSet<|IQueryable<|_context\b|_db\b|dbContext\b|prisma\.|knex\b|drizzle\b|getRepository\(|createQueryBuilder\()/;
@@ -56,6 +58,7 @@ const RE = {
   money: /\b(?:price|amount|payment|invoice|refund|wallet|currency|billing|payout|subtotal|discount|tax(?:es)?)\w*\b/i,
   concurrency: /\block\s*\(|SemaphoreSlim|Interlocked\.|BackgroundService|IHostedService|Channel<|Parallel\.|BeginTransaction\w*|TransactionScope|IsolationLevel|RowVersion|ConcurrencyCheck|\[Timestamp\]|DbUpdateConcurrencyException|FOR\s+UPDATE|idempoten\w*|\bMutex\b|SKIP\s+LOCKED/i,
   concurrencyUi: /\bsetInterval\(|BroadcastChannel|navigator\.locks|\bstorage\b.*addEventListener|visibilitychange/i,
+  clientState: /\b(?:useSearchParams|setSearchParams|URLSearchParams|searchParams|useParams|localStorage|sessionStorage|queryKey|invalidateQueries|setQueryData|getQueryData|removeQueries|history\.(?:push|replace)State)\b|\bparams\.(?:get|set|delete|append)\(|\bnavigate\(/,
   contractPath: /(?:^|\/)(?:DTOs?|Contracts?|Dtos)\/|Dto\.cs$|Request\.cs$|Response\.cs$/i,
   contractLine: /\[Http(?:Get|Post|Put|Delete|Patch)\b|\[Route\(|\bMap(?:Get|Post|Put|Delete|Patch|Group)\(|ProducesResponseType/,
   contractClient: /(?:^|\/)src\/(?:types|api)\/.+\.[jt]sx?$/i,
@@ -130,6 +133,7 @@ export function signals(files, { plan = false, repo } = {}) {
     if (hit(RE.files)) add(server ? 'files' : 'filesUi', base);
     if (hit(RE.concurrency) && server) add('concurrency', base);
     if (hit(RE.concurrencyUi)) add('concurrencyUi', base);
+    if (!server && hit(RE.clientState)) add('clientState', base);
     if (lines.some(l => RE.money.test(l.replace(/(["'`]).*?\1/g, '')))) add('money', base);
   }
   return found;
@@ -209,7 +213,7 @@ export function roles(size, found) {
   const seats = [...new Set([...found.keys()].map(k => SIGNALS[k].seat))];
   const reviewers = 'reviewers: whole-diff (Sonnet), fresh eyes (Opus), other engine (Codex)';
   if (size === 'tiny') return ['self-review and the mechanical checks; no reviewer'];
-  if (size === 'small') return [reviewers];
+  if (size === 'small') return [reviewers, ...seats.map(s => '+ ' + s)];
   if (size === 'medium') return ['boss answers the open question first (boss-only)', reviewers, ...seats.map(s => '+ ' + s)];
   return ['boss + expert panel before code (Pragmatist + a seat per open question)', ...seats.map(s => '+ ' + s), 'risk reviewer (Opus) on the risk files', reviewers];
 }

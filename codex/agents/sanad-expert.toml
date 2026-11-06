@@ -1,5 +1,5 @@
 name = "sanad-expert"
-description = "One deep-risk braintrust seat: Architect, Skeptic, Database, Security, Authenticity or added domain."
+description = "One deep-risk braintrust seat: Architect, Skeptic, Database, Security, Authenticity, Client state or added domain."
 model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
