@@ -464,6 +464,10 @@ function scanTranscript(transcriptPath) {
   const providerStates = new Map();
   const reviewerCalls = new Map();  // Agent tool_use id -> launch seq (reviewer prompt)
   const reviewerAgents = new Map(); // agent id -> { launch } (latest run, incl. SendMessage follow-ups)
+  // Every helper agent still working: launched in the background and not yet reported done. While one
+  // launched after the last change works, the stop waits for it instead of asking for a check (2026-11-06).
+  const helperCalls = new Map();    // tool_use id -> seq
+  const helpersRunning = new Map(); // agent id -> launch seq
   const retirements = []; // CHECK RETIRED lines: { seq, failed, replacement }
   const probes = [];      // PROBE EXPECTED lines: { seq, command }
   const passes = [];      // passing verifications: { seq, command }
@@ -488,6 +492,7 @@ function scanTranscript(transcriptPath) {
             { type: 'tool_result', content: output, is_error: false },
             { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } } });
         }
+        if (helpersRunning.has(note.id) && /^(?:completed|failed|killed|cancelled|canceled|stopped)$/.test(note.status)) helpersRunning.delete(note.id);
         // An independent reviewer agent finished: credit the run it completed.
         const agent = reviewerAgents.get(note.id);
         if (agent && note.status === 'completed' && agent.launch > res.lastReviewerRun) { res.lastReviewerRun = agent.launch; res.lastReviewerResult = seq; }
@@ -577,8 +582,17 @@ function scanTranscript(transcriptPath) {
         } else if (blk.name === 'TaskOutput' && background.has(blk.input.task_id)) {
           Object.assign(rec, background.get(blk.input.task_id), { editSeq: -1, taskId: blk.input.task_id });
         }
+        if (blk.name === 'Agent') helperCalls.set(blk.id, seq);
         if (rec.editSeq !== -1 || rec.verifySeq !== -1 || rec.providerSeq !== -1 || rec.rangeDiffSeq !== -1) pending.set(blk.id, rec);
         continue;
+      }
+
+      if (blk.type === 'tool_result' && blk.tool_use_id && helperCalls.has(blk.tool_use_id)) {
+        const launch = helperCalls.get(blk.tool_use_id);
+        helperCalls.delete(blk.tool_use_id);
+        const t = entry.toolUseResult || {};
+        const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
+        if (id && blk.is_error !== true && t.status !== 'completed') helpersRunning.set(id, launch);
       }
 
       if (blk.type === 'tool_result' && blk.tool_use_id && reviewerCalls.has(blk.tool_use_id)) {
@@ -605,7 +619,10 @@ function scanTranscript(transcriptPath) {
     if (userRejected(blk, entry)) return;              // nothing ran
     const isErr = blk.is_error === true;
     const outcome = verificationResult(blk, entry);
-    const taskId = entry.toolUseResult?.backgroundTaskId || entry.toolUseResult?.background_task_id || rec.taskId;
+    // The host names the task in the result's fields or only in its text ("…running in background with ID: b1a2…");
+    // without the id, the finish notice can never be matched and the run stays "running" (2026-11-06).
+    const taskId = entry.toolUseResult?.backgroundTaskId || entry.toolUseResult?.background_task_id || rec.taskId ||
+      (/running in (?:the )?background with ID:\s*([A-Za-z0-9_-]+)/i.exec(resultText(blk, entry)) || [])[1];
     if (outcome === 'pending' && taskId) background.set(taskId, rec);
     else if (taskId) background.delete(taskId);
     if (rec.editSeq !== -1 && !(isErr && rec.verifySeq === -1)) {
@@ -653,7 +670,7 @@ function scanTranscript(transcriptPath) {
     if (outcome === 'failed' && !retired(state)) {
       res.lastFailedVerify = Math.max(res.lastFailedVerify, seq);   // push guard: every failure counts
       if (probed(state)) res.lastProbeFailure = Math.max(res.lastProbeFailure, seq);
-      else res.lastFailedVerifyStop = Math.max(res.lastFailedVerifyStop, seq);
+      else if (seq > res.lastFailedVerifyStop) { res.lastFailedVerifyStop = seq; res.lastFailedVerifyStopCommand = state.command; }
     }
     if (outcome === 'pending') res.lastPendingVerify = Math.max(res.lastPendingVerify, seq);
   }
@@ -661,7 +678,9 @@ function scanTranscript(transcriptPath) {
     if (outcome === 'failed') res.lastFailedProvider = Math.max(res.lastFailedProvider, seq);
     if (outcome === 'pending') res.lastPendingProvider = Math.max(res.lastPendingProvider, seq);
   }
-  res.lastPendingVerifyStop = res.lastPendingVerify;
+  // At a stop, only a background command still known to be running holds it (see below); a launch
+  // that was never matched to its finish does not (2026-11-06).
+  res.lastPendingVerifyStop = -1;
   for (const rec of [...background.values(), ...pending.values()]) {
     res.lastPendingVerify = Math.max(res.lastPendingVerify, rec.verifySeq);
     res.lastPendingProvider = Math.max(res.lastPendingProvider, rec.providerSeq);
@@ -670,8 +689,10 @@ function scanTranscript(transcriptPath) {
   // finished and its result was lost (the host sometimes drops one). Only a
   // background command can still be running (2026-11-05: lost results held the
   // stop at "still running" for hours). The push guard keeps the strict count.
-  for (const rec of background.values()) res.lastPendingVerifyStop = Math.max(res.lastPendingVerifyStop, rec.verifySeq);
-  for (const rec of pending.values()) if (rec.background) res.lastPendingVerifyStop = Math.max(res.lastPendingVerifyStop, rec.verifySeq);
+  res.lastRunningHelper = helpersRunning.size ? Math.max(...helpersRunning.values()) : -1;
+  const holdStop = (rec) => { if (rec.verifySeq > res.lastPendingVerifyStop) { res.lastPendingVerifyStop = rec.verifySeq; res.lastPendingVerifyStopCommand = rec.command || ''; } };
+  for (const rec of background.values()) holdStop(rec);
+  for (const rec of pending.values()) if (rec.background) holdStop(rec);
   return res;
 }
 

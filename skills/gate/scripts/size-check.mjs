@@ -159,6 +159,13 @@ function defName(line) {
   return '';
 }
 const indent = line => /^\s*/.exec(line || '')[0].replace(/\t/g, '    ').length;
+// Opened minus closed brackets on one line, strings and line comments left out.
+function bracketBalance(line) {
+  const code = String(line || '').replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '').replace(/\/\/.*$/, '');
+  let n = 0;
+  for (const c of code) { if (c === '{' || c === '(' || c === '[') n++; else if (c === '}' || c === ')' || c === ']') n--; }
+  return n;
+}
 // A local function is called only from its own file; an exported or public one from anywhere.
 const SHARED = /^\s*(?:export\b|(?:public|internal|protected)\b)/;
 export function changedSymbols(repo, files) {
@@ -170,14 +177,28 @@ export function changedSymbols(repo, files) {
     for (const h of f.hunks) {
       const from = Math.max(0, h.start - 1), to = Math.min(lines.length, from + Math.max(h.count, 1));
       for (let i = from; i < to; i++) keep(defName(lines[i]), f, lines[i]);
-      // The enclosing function: the nearest definition above whose body holds the hunk (deeper indent).
+      // The enclosing function: the nearest definition above whose body is still open at the hunk
+      // (brackets opened since its line are not all closed). Scanned to the top of the file, so a
+      // change deep in a large component still names that component; a sibling helper that ended
+      // before the hunk is skipped.
+      // s[j] = brackets opened from line j down to the hunk and still open there. A bracket opened
+      // on line j (or up to two lines below a definition, for a brace on its own line) holds the
+      // hunk when s[j] is above every s[k] below it.
       let first = from; while (first < to - 1 && !String(lines[first] || '').trim()) first++;
       const depth = indent(lines[first]);
-      for (let i = from - 1; i >= Math.max(0, from - 200); i--) {
+      const s = new Map(), maxBelow = new Map();
+      let sum = 0, best = 0;
+      for (let i = from - 1; i >= 0; i--) {
+        maxBelow.set(i, best);
+        sum += bracketBalance(lines[i]);
+        s.set(i, sum);
+        best = Math.max(best, sum);
         const n = defName(lines[i]);
-        if (!n) continue;
-        if (depth > indent(lines[i])) keep(n, f, lines[i]);
-        break;
+        if (!n || depth <= indent(lines[i])) continue;
+        // A lone `{` one or two lines down is this definition's body (a brace on its own line).
+        const opener = [i, i + 1, i + 2].filter(j => j === i || String(lines[j] || '').trim() === '{');
+        const holds = opener.some(j => j < from && s.get(j) > maxBelow.get(j));
+        if (holds) { keep(n, f, lines[i]); break; }
       }
     }
   }

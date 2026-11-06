@@ -54,6 +54,10 @@ Each part follows loop.md's **Fast test loop** (Step 3) and is re-checked as soo
 - Confirm the model and effort from the remote terminal's banner after launch; a remote default is not proof.
 - A tool signed in only on this machine (for example Codex) runs here: fetch the remote's commits as a bundle into a local worktree first, and write its brief with this machine's paths. Its report is copied to the remote handoff folder when remote agents need it.
 
+## Remote test machine (builds and tests)
+
+Optional, per machine and repository: `git config --global sanad.remoteHost <ssh-alias>` and, in each repository, `git config sanad.remoteRepo <path of its clone there>`. With them set, builds, tests and full suites run on that machine (CLAUDE.md "Verify fast"). `bash ~/.claude/scripts/remote/remote-sync.sh` sends this folder's exact tree as a git bundle, including uncommitted work, without a push, and checks it out detached there. It prints `SYNCED <host>:<path> <commit> tree <tree>`, or `NO-REMOTE` (run here), `REMOTE-DOWN` (ask the user before running here) or `REMOTE-DIRTY` (the remote clone has changes: report them, never discard). Then run each command as `ssh <host> "cd /d <path>\<subfolder> && <command>"`, so its output counts as verification. Use an SSH alias that names the machine, not an IP (`HostName <computer-name>`): a DHCP address changes.
+
 ## Reporting to the user
 
 One short line per remote step (started, done, stuck, lost). A remote failure is reported with its real output and the next step; the user is asked only for what cannot be done remotely (a desktop click, a sign-in, a push).

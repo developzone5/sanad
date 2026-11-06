@@ -42,6 +42,35 @@ test('a plain behavior change is small; its changed functions are listed with th
   assert.equal(pick.count, 2);
 });
 
+test('a change deep in a large component names the component, not a small helper that ended above it', () => {
+  const filler = Array.from({ length: 260 }, (_, i) => `      <li key="${i}">{label(${i})}</li>`).join('\n');
+  const page = [
+    'export default function Panel() {',
+    '  const err = (message, id) =>',
+    '    message ? <div id={id}>{message}</div> : null;',
+    '  return (',
+    '    <ul>',
+    filler,
+    '      <p className="hint">{err("x", "y")}</p>',
+    '    </ul>',
+    '  );',
+    '}',
+    '',
+  ].join('\n');
+  const user = "import Panel from './Panel';\nexport const a = <Panel />;\nexport const b = <Panel />;\n";
+  const repo = change({ 'src/Panel.tsx': page, 'src/Use.tsx': user }, { 'src/Panel.tsx': page.replace('className="hint"', 'className="hint is-shown"') });
+  const r = size(repo);
+  assert.deepEqual(r.callers.map(c => c.name), ['Panel'], JSON.stringify(r.callers));
+  assert.ok(r.callers[0].count >= 3, 'the import and two uses');
+  assert.equal(r.size, 'small');
+});
+
+test('a C# method with its brace on the next line is the enclosing function', () => {
+  const svc = 'public class S\n{\n    public int Total(int a)\n    {\n        var x = a;\n        return x;\n    }\n}\n';
+  const r = size(change({ 'Api/S.cs': svc }, { 'Api/S.cs': svc.replace('return x;', 'return x + 1;') }));
+  assert.ok(r.callers.some(c => c.name === 'Total'), JSON.stringify(r.callers));
+});
+
 test('a local function counts only its own file; an exported one counts every file', () => {
   const a = 'function helper(x) {\n  return x;\n}\nexport function shared(y) {\n  return y;\n}\nhelper(1); shared(1);\n';
   const b = "import { shared } from './a';\nfunction helper() {}\nhelper(); shared(2); shared(3);\n";
