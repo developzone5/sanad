@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { runCommand, assertHttp, withCleanup, evidenceLog, redact } from '../scripts/evidence.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-evidence-tests-'));
+// Runs bound to a repository take a lock (see checkLockDir); keep them out of the real one.
+const lockDir = path.join(root, 'locks');
+process.env.SANAD_CHECK_LOCK_DIR = lockDir;
 const emptyIgnore = path.join(root, 'empty-ignore');
 fs.writeFileSync(emptyIgnore, '');
 function sourceFixture() {
@@ -83,6 +86,26 @@ test('inherited Git redirection cannot bind a different repository', async () =>
     }
   }
 });
+test('a source-bound run holds a lock on its repository while it runs, and releases it after a pass or a failure', async () => {
+  const { repo } = sourceFixture();
+  fs.rmSync(lockDir, { recursive: true, force: true });
+  const lister = 'const fs=require("node:fs"),p=require("node:path"),d=process.argv[1];console.log(JSON.stringify(fs.existsSync(d)?fs.readdirSync(d).map(n=>JSON.parse(fs.readFileSync(p.join(d,n),"utf8"))):[]))';
+  const bound = await runCommand({ executable: process.execPath, args: ['-e', lister, lockDir], cwd: repo, outputRoot: root });
+  assert.equal(bound.status, 'passed');
+  const seen = JSON.parse(fs.readFileSync(bound.stdout, 'utf8'));
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].toplevel, bound.source.toplevel);
+  assert.equal(seen[0].runId, bound.runId);
+  assert.ok(Number.isInteger(seen[0].pid));
+  assert.ok(Date.parse(seen[0].expiresAt) > Date.parse(seen[0].startedAt));
+  assert.deepEqual(fs.readdirSync(lockDir), [], 'released when the run ends');
+  const failed = await runCommand({ executable: process.execPath, args: ['-e', 'process.exitCode = 3'], cwd: repo, outputRoot: root });
+  assert.equal(failed.status, 'failed');
+  assert.deepEqual(fs.readdirSync(lockDir), [], 'released after a failure too');
+  const unbound = await runCommand({ executable: process.execPath, args: ['-e', lister, lockDir], cwd: root, outputRoot: root });
+  assert.equal(fs.readFileSync(unbound.stdout, 'utf8').trim(), '[]', 'a run with no repository takes no lock');
+});
+
 test('non-Git checks cannot produce passing publishing evidence', async () => {
   const result = await runCommand({ executable: process.execPath, args: ['-e', 'console.log("utility")'], cwd: root, outputRoot: root, source: { treeBefore: 'forged' } });
   assert.equal(result.nativeExitCode, 0); assert.equal(result.status, 'failed');

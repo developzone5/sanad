@@ -147,6 +147,20 @@
             "statusMessage": "Checking CSharpier formatting on the .cs files in this commit/push..."
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "C:\\Users\\Asus\\.claude\\hooks\\check-lock-guard.js"
+            ],
+            "timeout": 15,
+            "statusMessage": "check-lock-guard: is a source-bound check running on this repository?"
+          }
+        ]
       }
     ],
     "Stop": [

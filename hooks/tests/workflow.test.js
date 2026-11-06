@@ -172,7 +172,7 @@ test('same-tree memo: a git-only change that leaves HEAD identical to the verifi
   const switched = [...checkedCode(), ...command('switch', 'git switch main', 'Switched to branch main')];
   const allowed = invoke('stop-gate.js', switched, { clean: true });
   assert.equal(allowed.decision, 'allow');
-  assert.match(allowed.output.systemMessage, /identical to the one the last passing evidence check verified/);
+  assert.match(allowed.output.systemMessage, /identical to one a passing evidence check verified/);
   assert.equal(invoke('stop-gate.js', switched, { clean: false }).decision, 'block', 'a dirty worktree is not the verified tree');
   assert.equal(invoke('stop-gate.js', switched, { clean: true, changedTree: true }).decision, 'block', 'a different HEAD tree needs its own check');
   assert.equal(invoke('stop-gate.js', switched).decision, 'block', 'no git status answer: no memo');
@@ -182,6 +182,35 @@ test('same-tree memo: a git-only change that leaves HEAD identical to the verifi
   assert.equal(invoke('policy-guard.js', published, { clean: true }).decision, 'allow');
   assert.equal(invoke('policy-guard.js', published, { clean: false }).decision, 'deny');
   assert.equal(invoke('policy-guard.js', published, { clean: true, changedTree: true }).decision, 'deny');
+});
+// 2026-11-05: three shapes that held the stop with no real reason.
+const bash = (id, cmd, content = 'Completed.', isError = false, extra) => [call(id, 'Bash', { command: cmd }), result(id, content, isError, extra)];
+test('a foreground verify whose result was lost does not hold the stop as still running', () => {
+  const lost = call('lost', 'PowerShell', { command: 'dotnet test' }); // the host never wrote its result
+  const blocked = invoke('stop-gate.js', [...edit(), lost]);
+  assert.equal(blocked.decision, 'block', 'still no passing run after the edit');
+  assert.doesNotMatch(blocked.output.reason, /still running/);
+  assert.equal(invoke('stop-gate.js', [...edit(), lost, ...command('test', 'dotnet test', 'Passed: 20')]).decision, 'allow', 'a later passing run is enough');
+  assert.match(invoke('stop-gate.js', [...edit(), ...background()]).output.reason, /still running/, 'a real background run still holds the stop');
+  assert.match(invoke('stop-gate.js', [...edit(), call('bg-lost', 'PowerShell', { command: 'dotnet test', run_in_background: true })]).output.reason, /still running/, 'so does a background launch with no result yet');
+  assert.equal(invoke('policy-guard.js', [...checkedCode(), lost, ...reviewedPass(), verdict('GATE: PASS')]).decision, 'deny', 'the push guard keeps the strict count');
+});
+test('same-tree memo follows the folder the git change landed in, against any passing tree', () => {
+  for (const cmd of ['git -C C:/repos/main checkout --detach abc1234', 'cd C:/repos/main && git checkout --detach abc1234']) {
+    const r = invoke('stop-gate.js', [...checkedCode(), ...bash('switch', cmd, 'HEAD is now at abc1234')], { clean: true });
+    assert.equal(r.decision, 'allow', cmd);
+    assert.ok(r.gitReads.some((g) => g.args[0] === 'status' && String(g.cwd).replace(/\\/g, '/') === 'C:/repos/main'), 'status is read in the changed folder: ' + cmd);
+    assert.equal(invoke('stop-gate.js', [...checkedCode(), ...bash('switch', cmd, 'ok')], { clean: true, changedTree: true }).decision, 'block', 'another tree needs its own check');
+    assert.equal(invoke('stop-gate.js', [...checkedCode(), ...bash('switch', cmd, 'ok')], { clean: false }).decision, 'block', 'a dirty folder is not the verified tree');
+  }
+});
+test('a build or test run over ssh on another machine is verification, judged by its output', () => {
+  const remote = 'timeout 590 ssh pc2 "cd /d C:/repos/app && dotnet test"';
+  assert.equal(invoke('stop-gate.js', [...edit(), ...bash('remote', remote, 'Passed!  - Failed:     0, Passed:   284, Skipped:     1')]).decision, 'allow');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...bash('remote', remote, 'Failed!  - Failed:     1, Passed:   283')]).decision, 'block', 'a failing remote run is still a failure');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...bash('remote', 'ssh -o ConnectTimeout=10 pc2 "dotnet build"', 'Build succeeded.')]).decision, 'allow', 'options before the host are skipped');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...bash('tunnel', 'ssh -N -L 3000:localhost:3000 pc2', '')]).decision, 'block', 'a tunnel runs nothing');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...bash('listing', 'ssh pc2 "dir C:/repos"', 'ok')]).decision, 'block', 'a remote listing is not a test');
 });
 test('a prose-only push needs no code proof even after session edits', () => {
   assert.equal(invoke('policy-guard.js', edit(), { docsOnly: true }).decision, 'allow');
