@@ -80,7 +80,7 @@ Browser acceptance belongs to the user (2026-09-21): apply [behavior-proof.md](.
 
 ## Step 3.5 — Independent review: two passes and a fresh-eyes review at once, one fix round, then a re-check (user choice 2026-10-12; fresh eyes 2026-10-26; all at once 2026-10-28)
 
-Freeze the source: synchronize with the integration branch per [execution.md](execution.md), finalize bookkeeping, collect the focused test results. Pause source edits while reviewers run.
+Freeze the source: synchronize with the integration branch per [execution.md](execution.md), finalize bookkeeping, collect the focused test results. Pause source edits while reviewers run. Size the real change once more: `node ~/.claude/skills/gate/scripts/size-check.mjs --repo <repo> --base origin/<integration> --was <routed size>`. `SIZE GREW` adds the roles it names to this round. Every review brief carries its `callers:` line, and each listed caller is checked against the new behavior.
 
 **Ready check before launch (2026-09-28):** the verbatim ask, `Done means`, the changed-file list, the focused test commands with their results, the known gaps and open assumptions, the Step 1.5 facts, every sweep `→ finding` / `? unchecked`, and the project's `memory/missed-bugs.md` (each CLASS/CATCH is a standing check). A missing input is collected first; a reviewer started without it comes back incomplete.
 

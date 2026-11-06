@@ -6,7 +6,7 @@ Loaded by the `sanad-implementation` stage (Step 3) and by `/gate`. CLAUDE.md ke
 
 - **Correctness over happy path.** Handle nulls, empties, failures and concurrency. The bug is usually bad data, not bad logic — check the data.
 - **Data discipline.** Read-only queries: no tracking, select only needed columns, no N+1. Lists: always paginated with a stable, unique `OrderBy`. Multi-step writes: atomic. Concurrency: optimistic. Migrations: expand-contract, never edit an applied one.
-- **Storage reality.** Unicode-safe charset (`utf8mb4`) for international text and emoji; know the default collation's case sensitivity (it can break unique checks) and pick deliberately. Store time as UTC.
+- **Storage reality.** Unicode-safe text type for the database in use (MySQL `utf8mb4`, SQL Server `nvarchar`, PostgreSQL UTF-8) for international text and emoji; know the default collation's case sensitivity (it can break unique checks) and pick deliberately. Store time as UTC.
 - **Money is `decimal`. Time is UTC.** Convert to local only at the UI edge.
 - **Errors:** handle in one central place, return the right HTTP status, log once, never leak internals (`Reference: {id}` instead).
 - **Fit the codebase.** Read how it is already done and match it; do not invent a parallel pattern. Replacing old code means deleting it in the same change.

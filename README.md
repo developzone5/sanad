@@ -160,9 +160,9 @@ Six plain Node scripts, wired into Claude Code through `settings.json`. They mak
 | `csharpier-guard.js` | PreToolUse | Denies a commit with unformatted or partly staged `.cs` files. |
 | `stop-gate.js` | Stop | After a code change, missing, failed or pending verification blocks the turn once, then warns honestly. A dev server is not verification; a real test run is, also one run on another machine over `ssh`. Only a background command can still be "running"; a git change that lands on any tree a passing check verified, in any folder, needs no rerun. |
 | `check-lock-guard.js` | PreToolUse (Edit, Write, Bash, PowerShell) | While a source-bound check runs (`evidence.mjs` holds a lock file), refuses an edit, a git switch or generated files inside that repository: such a change voids the whole run. Ignored paths and other folders stay open; a lock whose process is gone is removed. |
-| `session-start.js` | SessionStart | Prints branch, ahead/behind, uncommitted count and PR state before any code is touched. |
+| `session-start.js` | SessionStart | Prints branch, ahead/behind, uncommitted count, PR state and the repo's stack line before any code is touched. |
 
-Supporting pieces: `hooks/lib/` (shell parsing, transcript scan, verification target), `hooks/tests/` (`node --test`), and `skills/gate/scripts/evidence.mjs`, which runs one real check and saves the receipt the publishing guard reads. `skills/gate/scripts/check-ticket-lines.mjs` checks that every verbatim ticket line has a test that quotes it.
+Supporting pieces: `hooks/lib/` (shell parsing, transcript scan, verification target), `hooks/tests/` (`node --test`), and `skills/gate/scripts/evidence.mjs`, which runs one real check and saves the receipt the publishing guard reads. `skills/gate/scripts/check-ticket-lines.mjs` checks that every verbatim ticket line has a test that quotes it. `skills/gate/scripts/stack.mjs` reads the stack from the repo's own project files (.NET, React, Next.js; MySQL, SQL Server, PostgreSQL; versions from the files, saved until one changes). `skills/gate/scripts/size-check.mjs` sizes a task from facts (tiny, small, medium, big), names the roles each size needs, lists the callers of every changed function, and fails when the real change grew past its routed size.
 
 ### The rulebook
 
