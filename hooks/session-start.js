@@ -19,6 +19,7 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 const { execFileSync } = require('child_process');
 
 function readStdin() {
@@ -63,6 +64,10 @@ try {
   lines.push('Branch: ' + branch + (integ
     ? ' · integration branch: ' + integ
     : ' · ⚠ no staging/develop/dev on origin — ask which branch is the PR base before shipping'));
+  // The stack, read from the repository's own project files (saved; re-read only when one changes).
+  const stackScript = path.join(__dirname, '..', 'skills', 'gate', 'scripts', 'stack.mjs');
+  const stack = fs.existsSync(stackScript) ? run(process.execPath, [stackScript, '--repo', cwd], 8000) : '';
+  if (/^Stack: /.test(stack) && !/no known stack files/.test(stack)) lines.push(stack);
 
   const dirty = run('git', ['status', '--porcelain']).split('\n').filter(Boolean).length;
   const up = run('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);

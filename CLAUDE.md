@@ -37,7 +37,7 @@ Never edit, delete or overwrite code you have not read in full this session — 
 
 - Correctness over happy path: nulls, empties, failures, concurrency. Check the data before the logic.
 - Read queries: no tracking, needed columns only, no N+1. Lists paginated with a stable unique order. Multi-step writes atomic; optimistic concurrency; migrations expand-contract, never edit an applied one.
-- `utf8mb4` for text and know the collation's case rule. Money is `decimal`. Time is UTC; local only at the UI edge.
+- Unicode-safe text for the database in use (MySQL `utf8mb4`, SQL Server `nvarchar`, PostgreSQL UTF-8), and know the collation's case rule. Money is `decimal`. Time is UTC; local only at the UI edge.
 - Errors handled centrally, right status, logged once, never leaking internals.
 - Fit the codebase; replacing old code means deleting it in the same change. No new dependencies, major upgrades or destructive/shared-state actions without asking.
 - Ship finished code: no hand-edited generated or applied artifacts, no `TODO`/`FIXME` without an id, no stubs, no `// rest unchanged`.
