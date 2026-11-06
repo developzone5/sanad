@@ -189,7 +189,7 @@ test('real hook processes bind checked content and preserve native HTTP failures
     assert.equal(decision(switched), 'allow', lastReason);
     const stop = stopDecision(switched);
     assert.equal(stop.decision, 'allow', stop.message);
-    assert.match(stop.message, /identical to the one the last passing evidence check verified/);
+    assert.match(stop.message, /identical to one a passing evidence check verified/);
     fs.appendFileSync(path.join(repo, 'src/App.cs'), '// dirty\n');
     assert.equal(decision(switched), 'deny', 'a dirty worktree is not the verified tree');
     assert.equal(stopDecision(switched).decision, 'block', 'a dirty worktree still needs its own check');

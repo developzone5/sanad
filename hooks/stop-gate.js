@@ -63,31 +63,38 @@ if (!r) allow();
 if (r.lastEdit === -1) allow();
 
 // Same-tree memo. A git switch/pull/merge counts as a change, but when the
-// checked-out source is byte-identical to the tree the last passing
-// source-bound evidence check verified, nothing new exists to verify. Tree
-// identity is the same proof the push guard relies on. Any git error → no memo.
-function gitRead(args) {
+// folder it changed is clean and its tree is byte-identical to a tree a passing
+// source-bound evidence check verified, nothing new exists to verify. A tree id
+// names the content, so the same tree in another worktree or clone is the same
+// code (2026-11-05: a checkout of the tested commit in the main folder kept
+// asking for a rerun). Any git error → no memo.
+function gitRead(args, cwd) {
   try {
-    return require('child_process').execFileSync('git', args, { cwd: input.cwd || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000, windowsHide: true }).trim();
+    return require('child_process').execFileSync('git', args, { cwd: cwd || input.cwd || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000, windowsHide: true }).trim();
   } catch (e) { return null; }
 }
+let verifiedTree = '';
 function verifiedTreeCheckedOut() {
+  const trees = new Set(Array.isArray(r.passedTrees) ? r.passedTrees : []);
   const s = r.completedCheck && r.completedCheck.source;
-  if (!s || !s.toplevel || !/^[0-9a-f]{40,64}$/i.test(String(s.treeAfter || ''))) return false;
-  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-  const top = gitRead(['rev-parse', '--show-toplevel']);
-  if (!top || norm(top) !== norm(s.toplevel)) return false;
-  if (gitRead(['status', '--porcelain']) !== '') return false;             // null (error) or dirty: no memo
-  return gitRead(['rev-parse', 'HEAD^{tree}']) === s.treeAfter;
+  if (s && /^[0-9a-f]{40,64}$/i.test(String(s.treeAfter || ''))) trees.add(s.treeAfter);
+  if (!trees.size) return false;
+  const dir = r.lastGitRepo || input.cwd || process.cwd();
+  if (gitRead(['status', '--porcelain'], dir) !== '') return false;        // null (error) or dirty: no memo
+  const tree = gitRead(['rev-parse', 'HEAD^{tree}'], dir);
+  if (!tree || !trees.has(tree)) return false;
+  verifiedTree = tree;
+  return true;
 }
 const treeVerified = r.lastEditPath === '<git>' && verifiedTreeCheckedOut();
 const lastEdit = treeVerified ? r.lastNonGitEdit : r.lastEdit;
-const memo = treeVerified ? ' The checked-out tree is identical to the one the last passing evidence check verified (' + r.completedCheck.source.treeAfter.slice(0, 12) + '), so the git-only change needs no rerun.' : '';
+const memo = treeVerified ? ' The checked-out tree is identical to one a passing evidence check verified (' + verifiedTree.slice(0, 12) + '), so the git-only change needs no rerun.' : '';
 
 // A failure declared with `PROBE EXPECTED:` (a review probe that proves someone
 // else's bug) does not block the stop; the push guard still counts it.
 const failedAfterEdit = (r.lastFailedVerifyStop ?? r.lastFailedVerify) > lastEdit;
-const pendingAfterEdit = r.lastPendingVerify > lastEdit;
+// Only a background command can still be running at a stop (see transcript-scan.js).
+const pendingAfterEdit = (r.lastPendingVerifyStop ?? r.lastPendingVerify) > lastEdit;
 if (!failedAfterEdit && !pendingAfterEdit && lastEdit === -1) {
   out({ systemMessage: 'No code change since the last passing evidence check.' + memo });
 }

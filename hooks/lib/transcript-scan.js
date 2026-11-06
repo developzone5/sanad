@@ -91,8 +91,31 @@ function verificationWords(seg) {
 
 function verificationCommand(seg) { return verificationWords(seg).join(' '); }
 
+// `ssh [options] host <command>`: the command it runs on the other machine, or ''
+// when there is none (-N, a tunnel). A test run on a second machine is a test run:
+// its own output is still judged by the same failure markers (2026-11-05).
+const SSH_VALUE_OPTS = new Set(['-B', '-b', '-c', '-D', '-E', '-e', '-F', '-I', '-i', '-J', '-L', '-l', '-m', '-O', '-o', '-P', '-p', '-Q', '-R', '-S', '-W', '-w']);
+function remoteCommand(words) {
+  let i = 1;
+  for (; i < words.length; i++) {
+    const w = words[i];
+    if (w === '--') { i++; break; }
+    if (!w.startsWith('-') || w === '-') break;
+    if (SSH_VALUE_OPTS.has(w)) { i++; continue; }
+    if (/^-[46AaCfGgKkMNnqsTtVvXxYy]+$/.test(w)) { if (w.includes('N')) return ''; continue; }
+    // -oKey=value, -p22 and similar joined forms carry their value.
+  }
+  return words.slice(i + 1).join(' ').trim();
+}
+function isSsh(words) { return /^ssh(?:\.exe)?$/i.test(String(words[0] || '').split(/[\\/]/).pop()); }
+
 function segmentIsVerify(seg) {
-  const command = verificationCommand(seg);
+  const words = verificationWords(seg);
+  if (isSsh(words)) {
+    const inner = remoteCommand(words);
+    return !!inner && splitSegments(inner).some(segmentIsVerify);
+  }
+  const command = words.join(' ');
   if (/(?:^|\s)(?:--list-tests|--collect-only|--collectonly|--passWithNoTests|--help|--version)(?:\s|=|$)/i.test(command)) return false;
   // TypeScript inventory/help commands can exit 0 without checking any source.
   if (/^(?:npx\s+)?tsc\b/i.test(command) && /(?:^|\s)(?:--listFilesOnly|--showConfig|--help|--version|-h|-v)(?:\s|=|$)/i.test(command)) return false;
@@ -431,7 +454,7 @@ function taskNotifications(entry) {
 }
 
 function scanTranscript(transcriptPath) {
-  const res = { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastGate: -1, lastGateVerdict: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
+  const res = { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastGitRepo: '', passedTrees: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastGate: -1, lastGateVerdict: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
   let lines;
   try { lines = readTranscript(transcriptPath).split('\n'); } catch (e) { return res; }
 
@@ -509,7 +532,7 @@ function scanTranscript(transcriptPath) {
       }
 
       if (blk.type === 'tool_use' && blk.input && typeof blk.input === 'object') {
-        const rec = { editSeq: -1, editPath: '', nonGitEditSeq: -1, verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1 };
+        const rec = { editSeq: -1, editPath: '', nonGitEditSeq: -1, verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background: blk.input.run_in_background === true };
         if (EDIT_TOOLS.has(blk.name)) {
           const p = String(blk.input.file_path || blk.input.notebook_path || '');
           if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; }
@@ -527,13 +550,25 @@ function scanTranscript(transcriptPath) {
           // own failure accounting (setup/cleanup markers) still applies.
           const stashBundle = segs.some((s) => /\bgit(?:\.exe)?\s+stash(?:\s+(?:push|save))?(?:\s|$)/i.test(s) && !/\bstash\s+(?:pop|apply|list|show)\b/i.test(s)) &&
             segs.some((s) => /\bgit(?:\.exe)?\s+stash\s+(?:pop|apply)\b/i.test(s));
+          // The folder a git change lands in: its `-C <dir>`, else the last `cd <dir>`
+          // before it in the same command, else the tool's own working directory.
+          let cdDir = String(blk.input.cwd || blk.input.workdir || entry.cwd || '');
           for (let i = 0; i < segs.length; i++) {
             const frac = seq + (i + 1) / 1000;
+            const cd = /^\s*(?:cd|Set-Location|pushd)\s+(?:\/d\s+)?("[^"]+"|'[^']+'|[^\s;&|]+)\s*$/i.exec(String(expanded[i]));
+            if (cd) cdDir = stripQuotes(cd[1]);
             if (segmentIsVerify(segs[i])) rec.verifySeq = frac;
             if (segs.length === 1 && segmentIsProvider(segs[i])) rec.providerSeq = frac;
             if (segs.length === 1 && /^git(?:\.exe)?\s+range-diff\s/i.test(String(segs[i]).trim())) rec.rangeDiffSeq = frac;
             const paths = segmentEditPaths(expanded[i]).filter((p) => !(stashBundle && p === '<git>' && /\bstash\b/i.test(segs[i])));
-            if (paths.length) { rec.editSeq = frac; rec.editPath = paths[0]; if (paths.some((p) => p !== '<git>')) rec.nonGitEditSeq = frac; }
+            if (paths.length) {
+              rec.editSeq = frac; rec.editPath = paths[0];
+              if (paths.some((p) => p !== '<git>')) rec.nonGitEditSeq = frac;
+              if (paths[0] === '<git>') {
+                const dashC = /\bgit(?:\.exe)?\s+-C\s+("[^"]+"|'[^']+'|\S+)/i.exec(String(expanded[i]));
+                rec.gitRepo = dashC ? stripQuotes(dashC[1]) : cdDir;
+              }
+            }
           }
         } else if (blk.name === 'Agent' && REVIEWER_PROMPT.test(String(blk.input.prompt || ''))) {
           reviewerCalls.set(blk.id, seq);                  // agent id arrives with the result
@@ -576,7 +611,7 @@ function scanTranscript(transcriptPath) {
     if (rec.editSeq !== -1 && !(isErr && rec.verifySeq === -1)) {
       // An Edit/Write that errored changed nothing; a shell segment that
       // wrote a file usually did, even if a later segment failed.
-      if (rec.editSeq > res.lastEdit) { res.lastEdit = rec.editSeq; res.lastEditPath = rec.editPath; }
+      if (rec.editSeq > res.lastEdit) { res.lastEdit = rec.editSeq; res.lastEditPath = rec.editPath; res.lastGitRepo = rec.editPath === '<git>' ? rec.gitRepo || '' : ''; }
       // The last edit that was not a git merge/switch/pull: the same-tree memo falls back to it.
       if ((rec.nonGitEditSeq ?? -1) > res.lastNonGitEdit) res.lastNonGitEdit = rec.nonGitEditSeq;
     }
@@ -593,6 +628,9 @@ function scanTranscript(transcriptPath) {
       if (checkOutcome === 'passed') passes.push({ seq: rec.verifySeq, command: rec.command });
       if (checkOutcome === 'passed') {
         if (receipt && rec.verifySeq > res.lastBoundCheck) { res.completedCheck = receipt.record; res.lastBoundCheck = rec.verifySeq; }
+        // Every tree a passing receipt verified: the same tree is the same code wherever it is checked out.
+        const tree = receipt && receipt.record && receipt.record.source && String(receipt.record.source.treeAfter || '');
+        if (tree && /^[0-9a-f]{40,64}$/i.test(tree) && !res.passedTrees.includes(tree)) res.passedTrees.push(tree);
         if (rec.verifySeq > res.lastVerify) res.lastVerify = rec.verifySeq;
         res.lastVerifyResult = seq;
       }
@@ -623,10 +661,17 @@ function scanTranscript(transcriptPath) {
     if (outcome === 'failed') res.lastFailedProvider = Math.max(res.lastFailedProvider, seq);
     if (outcome === 'pending') res.lastPendingProvider = Math.max(res.lastPendingProvider, seq);
   }
+  res.lastPendingVerifyStop = res.lastPendingVerify;
   for (const rec of [...background.values(), ...pending.values()]) {
     res.lastPendingVerify = Math.max(res.lastPendingVerify, rec.verifySeq);
     res.lastPendingProvider = Math.max(res.lastPendingProvider, rec.providerSeq);
   }
+  // At a stop the turn is over: a foreground command with no recorded result has
+  // finished and its result was lost (the host sometimes drops one). Only a
+  // background command can still be running (2026-11-05: lost results held the
+  // stop at "still running" for hours). The push guard keeps the strict count.
+  for (const rec of background.values()) res.lastPendingVerifyStop = Math.max(res.lastPendingVerifyStop, rec.verifySeq);
+  for (const rec of pending.values()) if (rec.background) res.lastPendingVerifyStop = Math.max(res.lastPendingVerifyStop, rec.verifySeq);
   return res;
 }
 

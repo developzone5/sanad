@@ -115,6 +115,23 @@ function sourceTree(toplevel) {
   }
 }
 
+// While a source-bound check runs, an edit inside its repository changes the tree
+// and voids the whole run (2026-11-05: a full suite was lost twice that way). The
+// run holds a lock file for that time; hooks/check-lock-guard.js reads the same
+// folder and refuses such an edit. A lock is a guard rail, never a reason to
+// refuse the check, so any lock error is ignored.
+export function checkLockDir() { return process.env.SANAD_CHECK_LOCK_DIR || path.join(os.homedir(), '.claude', 'state', 'check-locks'); }
+function takeLock(receipt, timeoutMs) {
+  try {
+    const dir = checkLockDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, receipt.runId + '.json');
+    fs.writeFileSync(file, JSON.stringify({ toplevel: receipt.source.toplevel, pid: process.pid, runId: receipt.runId, startedAt: receipt.startedAt,
+      expiresAt: new Date(Date.now() + timeoutMs + 60000).toISOString(), command: [receipt.executable, ...receipt.args].join(' ').slice(0, 300) }), { flag: 'wx' });
+    return file;
+  } catch { return null; }
+}
+
 export async function runCommand({ executable, args = [], cwd, outputRoot, timeoutMs = 300000, maxBytes, secrets = [] }) {
   if (typeof executable !== 'string' || !executable || !Array.isArray(args) || args.some(a => typeof a !== 'string') || !path.isAbsolute(cwd) || !path.isAbsolute(outputRoot)) throw new Error('Use an executable, argv array and absolute cwd/outputRoot.');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000) throw new Error('Timeout must be 1..3600000 ms.');
@@ -133,40 +150,43 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
   const stderr = evidenceLog(path.join(runDir, 'stderr.log'), { maxBytes, secrets });
   const receipt = { runId: crypto.randomUUID(), executable: redact(executable, secrets), args: args.map(a => redact(a, secrets)), cwd: fs.realpathSync.native(cwd), source, startedAt: new Date().toISOString(), status: 'running' };
   fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
-  const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  let failure = null, fallback;
-  let finish;
-  const abort = reason => {
-    if (failure) return;
-    failure = reason; stopTree(child);
-    fallback = setTimeout(() => { child.kill('SIGKILL'); child.stdout.destroy(); child.stderr.destroy(); child.unref(); finish({ code: null, signal: 'TIMEOUT' }); }, 6000);
-  };
-  const cancel = () => abort('Cancelled');
-  process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
-  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
-  for (const [stream, log] of [[child.stdout, stdout], [child.stderr, stderr]]) stream.on('data', data => { try { log.write(data); } catch (error) { abort(error.message); } });
-  const timer = setTimeout(() => abort('Timed out'), timeoutMs);
-  const terminal = await new Promise(resolve => {
-    finish = resolve;
-    child.once('error', error => { failure = 'Could not start process: ' + error.code; resolve({ code: null, signal: null }); });
-    child.once('close', (code, signal) => resolve({ code, signal }));
-  });
-  clearTimeout(timer); clearTimeout(fallback);
-  process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel);
-  stdout.close(); stderr.close();
-  if (source) {
-    try {
-      if (fs.realpathSync.native(sourceGit(cwd, ['rev-parse', '--show-toplevel'])) !== source.toplevel) throw new Error('Repository changed.');
-      source.treeAfter = sourceTree(source.toplevel);
-      if (source.treeBefore !== source.treeAfter) sourceFailure = 'Verified source changed while the command was running.';
-    } catch { sourceFailure = 'Cannot capture the Git source tree after verification.'; }
-  }
-  failure ||= sourceFailure;
-  Object.assign(receipt, { completedAt: new Date().toISOString(), nativeExitCode: terminal.code, signal: terminal.signal, reason: failure,
-    status: !failure && terminal.code === 0 ? 'passed' : 'failed', stdoutBytes: stdout.bytes, stderrBytes: stderr.bytes,
-    stdout: path.join(runDir, 'stdout.log'), stderr: path.join(runDir, 'stderr.log') });
-  fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
-  return { ...receipt, runDir };
+  const lock = source ? takeLock(receipt, timeoutMs) : null;
+  try {
+    const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let failure = null, fallback;
+    let finish;
+    const abort = reason => {
+      if (failure) return;
+      failure = reason; stopTree(child);
+      fallback = setTimeout(() => { child.kill('SIGKILL'); child.stdout.destroy(); child.stderr.destroy(); child.unref(); finish({ code: null, signal: 'TIMEOUT' }); }, 6000);
+    };
+    const cancel = () => abort('Cancelled');
+    process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    for (const [stream, log] of [[child.stdout, stdout], [child.stderr, stderr]]) stream.on('data', data => { try { log.write(data); } catch (error) { abort(error.message); } });
+    const timer = setTimeout(() => abort('Timed out'), timeoutMs);
+    const terminal = await new Promise(resolve => {
+      finish = resolve;
+      child.once('error', error => { failure = 'Could not start process: ' + error.code; resolve({ code: null, signal: null }); });
+      child.once('close', (code, signal) => resolve({ code, signal }));
+    });
+    clearTimeout(timer); clearTimeout(fallback);
+    process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel);
+    stdout.close(); stderr.close();
+    if (source) {
+      try {
+        if (fs.realpathSync.native(sourceGit(cwd, ['rev-parse', '--show-toplevel'])) !== source.toplevel) throw new Error('Repository changed.');
+        source.treeAfter = sourceTree(source.toplevel);
+        if (source.treeBefore !== source.treeAfter) sourceFailure = 'Verified source changed while the command was running.';
+      } catch { sourceFailure = 'Cannot capture the Git source tree after verification.'; }
+    }
+    failure ||= sourceFailure;
+    Object.assign(receipt, { completedAt: new Date().toISOString(), nativeExitCode: terminal.code, signal: terminal.signal, reason: failure,
+      status: !failure && terminal.code === 0 ? 'passed' : 'failed', stdoutBytes: stdout.bytes, stderrBytes: stderr.bytes,
+      stdout: path.join(runDir, 'stdout.log'), stderr: path.join(runDir, 'stderr.log') });
+    fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
+    return { ...receipt, runDir };
+  } finally { if (lock) { try { fs.rmSync(lock, { force: true }); } catch { /* a stale lock expires on its own */ } } }
 }
 
 export async function assertHttp({ url, expectedStatus, options = {}, expectedCode, codePath = 'code', assertState, timeoutMs = 10000, maxBytes = 1024 * 1024 }) {
