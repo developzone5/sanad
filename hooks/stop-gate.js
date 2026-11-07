@@ -52,12 +52,14 @@ try { r = scan.scanTranscript(transcriptPath); } catch (e) { allow(); }
 if (!r) allow();
 
 /* ---------------------------------------------------------------------------
- * Verdict — exactly one of five exits:
+ * Verdict — exactly one of six exits:
  *   1. no code edit this session               → allow silently
  *   2. PASSING verify ran after the last edit  → allow + confirmation note
- *   3. unverified, already blocked once        → allow + warning (never loop)
- *   4. last verify after the edit FAILED       → block ONCE: fix, re-run
- *   5. no verify at all since the last edit    → block ONCE: run the gate
+ *   3. a helper or a background check of this
+ *      work still running, nothing failed      → allow + wait note (its finish returns here)
+ *   4. unverified, already blocked once        → allow + warning (never loop)
+ *   5. last verify after the edit FAILED       → block ONCE: fix, re-run
+ *   6. no verify at all since the last edit    → block ONCE: run the gate
  * ------------------------------------------------------------------------- */
 
 if (r.lastEdit === -1) allow();
@@ -116,11 +118,20 @@ if (!failedAfterEdit && !pendingAfterEdit && (r.lastRunningHelper ?? -1) > r.las
 function shown(command) { const c = String(command || '').replace(/\s+/g, ' ').trim(); return c ? (c.length > 160 ? c.slice(0, 157) + '…' : c) : 'unknown'; }
 const file = r.lastEditPath === '<git>' ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
 
+// A live background check of the current work, and nothing failed: its finish notice brings the next
+// stop back to this gate, so the stop waits instead of blocking. Blocking here only made every status
+// reply during a remote suite repeat "still running" (2026-11-07). It is still not a passing result.
+// A run no notice can bring back (finished without an exit code, or no task id) still blocks.
+const stuckAfterEdit = (r.lastStuckVerifyStop ?? -1) > lastEdit;
+if (!failedAfterEdit && pendingAfterEdit && !stuckAfterEdit) {
+  out({ systemMessage: 'A build/test for this work is still running in the background: `' + shown(r.lastPendingVerifyStopCommand) + '`. Not verified yet; this check runs again when it finishes.' });
+}
+
 if (input.stop_hook_active) {
   out({
     systemMessage: failedAfterEdit
       ? '⛔ Gate NOT verified: the last build/test after your code edit FAILED. Run /gate before shipping.'
-      : pendingAfterEdit ? '⛔ Gate NOT verified: a verification command is still pending. Collect its completed result before shipping.'
+      : pendingAfterEdit ? '⛔ Gate NOT verified: a verification command\'s result was never collected. Collect it or rerun the check before shipping.'
       : '⛔ Gate NOT verified: code changed after the last passing build/test. Run /gate before shipping.',
   });
 }
@@ -134,7 +145,7 @@ out({
       'The failed check: `' + shown(r.lastFailedVerifyStopCommand) + '`. ' +
       'If every failure is a timeout under machine load (not the code), rerun only the failed tests; to clear this run, send this line alone in a text-only message, with your rerun command filled in, then run that command exactly, which must pass: ' +
       'CHECK RETIRED: ' + JSON.stringify({ failed: r.lastFailedVerifyStopCommand || '<the failed command>', replacement: '<the rerun command>', reason: '<why>' })
-    : pendingAfterEdit ? 'A build/test is still running or its completion has not been collected' + file + ': `' + shown(r.lastPendingVerifyStopCommand) + '`. Read its completed TaskOutput, fix any failure, then run /gate. Starting a background command is not a passing result.'
+    : pendingAfterEdit ? 'A build/test finished or was launched but its result was never collected' + file + ': `' + shown(r.lastStuckVerifyStopCommand) + '`. Read its TaskOutput, or rerun it in the foreground, fix any failure, then run /gate. Starting a background command is not a passing result.'
     : 'Code files were edited this session' + file + ' but no build/test has run since the last edit. ' +
       'Apply the Definition-of-Done at the cheapest correct rung (CLAUDE.md "Verify fast"): run the build and the relevant tests now, quote their real output, then stop again. ' +
       'If verification is genuinely impossible here (no toolchain, needs the user), say exactly what is unverified and why instead of claiming success.',

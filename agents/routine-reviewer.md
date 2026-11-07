@@ -16,7 +16,7 @@ If a changed file touches a sensitive boundary that no Pass A covered (auth/tena
 
 Report contract — nothing else:
 1. `RECOMMEND: PASS|FAIL`
-2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. Every confirmed correctness defect, including a rare path, is a Blocker or Bug, never "info" or "accepted"; one open Blocker or Bug means FAIL.
+2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. Every confirmed correctness defect, including a rare path, is a Blocker or Bug, never "info" or "accepted"; one open Blocker or Bug means FAIL. A Question is only for what the quoted ticket, QA and spec lines leave open: read them first and quote the line that leaves it open. A question those lines already answer (an "Expected" line, a rule row) is not listed; check the change against that answer instead.
 3. Coverage checklist: `✓` / `✗ <what>` / `– n/a <why>`, one short line each. On a re-check, only the items the changed files touch, plus the status of every earlier finding.
 4. `NOT VERIFIED:` one line. `OUTSIDE PR:` defects on paths the change neither touches, exposes nor makes reachable, one line each — the main session puts each to the user before the push. A defect on a path the PR adds, changes, makes visible or reachable is a finding in item 2 even when the line predates the branch.
 

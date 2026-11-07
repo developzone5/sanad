@@ -108,10 +108,18 @@ test('quoted Windows executable is recognized', () => assert.equal(invoke('stop-
 test('an arbitrary script is not build or test evidence', () => assert.equal(invoke('stop-gate.js', [...edit(), ...command('script', 'node helper.js', 'ok')]).decision, 'block'));
 test('starting a dev server is not verification', () => assert.equal(invoke('stop-gate.js', [...edit(), ...command('dev', 'npm run dev', 'Server ready')]).decision, 'block'));
 const background = () => command('test', 'dotnet test', 'Command running in background with ID: task1', false, { backgroundTaskId: 'task1', stdout: '', stderr: '' });
-test('background launch is pending', () => assert.equal(invoke('stop-gate.js', [...edit(), ...background()]).decision, 'block'));
+// 2026-11-07: a live background check made every status reply repeat "still running"; the stop now
+// waits with a note (not a pass), and the finish notice brings the gate back.
+const waits = (r, what) => { assert.equal(r.decision, 'allow', what); assert.match(r.output.systemMessage, /still running in the background: `[^`]+`\. Not verified yet/, what); };
+test('background launch waits, unverified', () => waits(invoke('stop-gate.js', [...edit(), ...background()])));
+test('a failure wins over a running background check', () => {
+  const r = invoke('stop-gate.js', [...edit(), ...command('red', 'dotnet test A.csproj', 'Failed!  - Failed: 1, Passed: 2', true), ...background()]);
+  assert.equal(r.decision, 'block');
+  assert.match(r.output.reason, /The failed check: `dotnet test A\.csproj`/);
+});
 test('completed successful background test counts', () => assert.equal(invoke('stop-gate.js', [...edit(), ...background(), call('wait', 'TaskOutput', { task_id: 'task1' }), result('wait', 'Passed: 20', false, { retrieval_status: 'success', task: { id: 'task1', status: 'completed', exitCode: 0, output: 'Passed: 20' } })]).decision, 'allow'));
 test('background failure blocks despite earlier build', () => assert.equal(invoke('stop-gate.js', [...edit(), ...command('build', 'dotnet build', 'Build succeeded.'), ...background(), call('wait', 'TaskOutput', { task_id: 'task1' }), result('wait', '', false, { retrieval_status: 'success', task: { id: 'task1', status: 'failed', exitCode: 1, output: 'Tests failed.' } })]).decision, 'block'));
-test('background timeout remains pending', () => assert.equal(invoke('stop-gate.js', [...edit(), ...background(), call('wait', 'TaskOutput', { task_id: 'task1' }), result('wait', '', false, { retrieval_status: 'timeout', task: { id: 'task1', status: 'running' } })]).decision, 'block'));
+test('background timeout remains pending', () => waits(invoke('stop-gate.js', [...edit(), ...background(), call('wait', 'TaskOutput', { task_id: 'task1' }), result('wait', '', false, { retrieval_status: 'timeout', task: { id: 'task1', status: 'running' } })])));
 test('background launched before a newer edit is stale', () => assert.equal(invoke('stop-gate.js', [...background(), ...edit(), call('wait', 'TaskOutput', { task_id: 'task1' }), result('wait', 'Passed: 20', false, { retrieval_status: 'success', task: { id: 'task1', status: 'completed', exitCode: 0 } })]).decision, 'block'));
 test('structured nonzero exit code is failure', () => assert.equal(invoke('stop-gate.js', [...edit(), ...command('test', 'dotnet test', '', false, { exitCode: 1 })]).decision, 'block'));
 test('an interrupted verification is not a pass', () => assert.equal(invoke('stop-gate.js', [...edit(), ...command('test', 'dotnet test', '', false, { interrupted: true })]).decision, 'block'));
@@ -213,7 +221,7 @@ test('a launch never matched to its finish does not hold the stop as still runni
   const r = invoke('stop-gate.js', [...edit(), ...orphan]);
   assert.equal(r.decision, 'block', 'still no passing run after the edit');
   assert.doesNotMatch(r.output.reason, /still running/);
-  assert.match(invoke('stop-gate.js', [...edit(), ...background()]).output.reason, /still running or its completion has not been collected.*: `dotnet test`/, 'a known running one is named');
+  assert.match(invoke('stop-gate.js', [...edit(), ...background()]).output.systemMessage, /still running in the background: `dotnet test`/, 'a known running one is named');
 });
 test('the stop names the failed check and hands a clear-line that retires it', () => {
   const red = command('suite', 'dotnet test Big.sln', 'Failed!  - Failed: 1, Passed: 9', true);
@@ -230,8 +238,10 @@ test('a foreground verify whose result was lost does not hold the stop as still 
   assert.equal(blocked.decision, 'block', 'still no passing run after the edit');
   assert.doesNotMatch(blocked.output.reason, /still running/);
   assert.equal(invoke('stop-gate.js', [...edit(), lost, ...command('test', 'dotnet test', 'Passed: 20')]).decision, 'allow', 'a later passing run is enough');
-  assert.match(invoke('stop-gate.js', [...edit(), ...background()]).output.reason, /still running/, 'a real background run still holds the stop');
-  assert.match(invoke('stop-gate.js', [...edit(), call('bg-lost', 'PowerShell', { command: 'dotnet test', run_in_background: true })]).output.reason, /still running/, 'so does a background launch with no result yet');
+  waits(invoke('stop-gate.js', [...edit(), ...background()]), 'a real background run makes the stop wait');
+  const lostLaunch = invoke('stop-gate.js', [...edit(), call('bg-lost', 'PowerShell', { command: 'dotnet test', run_in_background: true })]);
+  assert.equal(lostLaunch.decision, 'block', 'a background launch with no result and no task id can never report back');
+  assert.match(lostLaunch.output.reason, /result was never collected.*: `dotnet test`/);
   assert.equal(invoke('policy-guard.js', [...checkedCode(), lost, ...reviewedPass(), verdict('GATE: PASS')]).decision, 'deny', 'the push guard keeps the strict count');
 });
 test('same-tree memo follows the folder the git change landed in, against any passing tree', () => {
@@ -297,7 +307,7 @@ test('a Codex helper command is no longer review evidence', () => {
 test('worktree locale JSON requires verification', () => assert.equal(invoke('stop-gate.js', edit(repo + '/.claude/worktrees/feature/src/i18n/ar.json')).decision, 'block'));
 test('test in another directory cannot clear a failure', () => assert.equal(invoke('stop-gate.js', [...edit(), ...command('backend', 'cd backend; npm test', '1 failed', true), ...command('frontend', 'cd frontend; npm test', 'Tests passed.')]).decision, 'block'));
 test('retrying only the last test in a bundle cannot clear its failure', () => assert.equal(invoke('stop-gate.js', [...edit(), ...command('both', 'dotnet test Backend.Tests.csproj; dotnet test Frontend.Tests.csproj', '1 failed'), ...command('front', 'dotnet test Frontend.Tests.csproj', 'Tests passed.')]).decision, 'block'));
-test('one completed background test cannot hide another pending task', () => assert.equal(invoke('stop-gate.js', [...edit(), ...background(), ...command('test2', 'dotnet test', 'Command running in background with ID: task2', false, { backgroundTaskId: 'task2' }), call('wait', 'TaskOutput', { task_id: 'task2' }), result('wait', 'Passed: 20', false, { task: { id: 'task2', status: 'completed', exitCode: 0 } })]).decision, 'block'));
+test('one completed background test cannot hide another pending task', () => waits(invoke('stop-gate.js', [...edit(), ...background(), ...command('test2', 'dotnet test', 'Command running in background with ID: task2', false, { backgroundTaskId: 'task2' }), call('wait', 'TaskOutput', { task_id: 'task2' }), result('wait', 'Passed: 20', false, { task: { id: 'task2', status: 'completed', exitCode: 0 } })])));
 test('git -C checks outgoing code in its target worktree', () => {
   const codeCwd = repo + '/.claude/worktrees/code';
   const r = invoke('policy-guard.js', [], { codeCwd, input: { tool_input: { command: 'git -C "' + codeCwd + '" push origin feature/check' } } });
@@ -445,7 +455,7 @@ test('completed background evidence clears its own launch pending state', () => 
   const collect = [call('collect', 'TaskOutput', { task_id: 'saved-check' }), result('collect', 'CHECK_COMPLETED ' + JSON.stringify(checkRecord()), false, { task: { status: 'completed', exitCode: 0 } })];
   assert.equal(invoke('stop-gate.js', [...edit(), ...launch, ...collect]).decision, 'allow');
   const other = command('other', evidenceCommand('other'), 'running in background', false, { backgroundTaskId: 'other-check' });
-  assert.equal(invoke('stop-gate.js', [...edit(), ...launch, ...other, ...collect]).decision, 'block');
+  waits(invoke('stop-gate.js', [...edit(), ...launch, ...other, ...collect]), 'the other check still runs');
 });
 // This host reports a finished background command as a task-notification attachment
 // (no TaskOutput call); the saved output file carries the command's result.
@@ -458,9 +468,12 @@ test('a background evidence check is collected from its task notification', () =
   assert.equal(invoke('policy-guard.js', [...edit(), ...bgLaunch, notification('bg1', 'completed', 0), ...claimedPass()], { outputFiles: bgOutput }).decision, 'allow');
 });
 test('a failed, foreign or exit-less task notification does not collect the check', () => {
-  for (const note of [notification('bg1', 'completed', 1), notification('bg1', 'failed', 1), notification('bg1', 'killed'), notification('other', 'completed', 0), notification('bg1', 'completed')]) {
+  for (const note of [notification('bg1', 'completed', 1), notification('bg1', 'failed', 1), notification('bg1', 'killed'), notification('bg1', 'completed')]) {
     assert.equal(invoke('stop-gate.js', [...edit(), ...bgLaunch, note], { outputFiles: bgOutput }).decision, 'block', JSON.stringify(note.attachment.prompt));
   }
+  waits(invoke('stop-gate.js', [...edit(), ...bgLaunch, notification('other', 'completed', 0)], { outputFiles: bgOutput }), 'a foreign notice leaves bg1 running');
+  const exitless = invoke('stop-gate.js', [...edit(), ...bgLaunch, notification('bg1', 'completed')], { outputFiles: bgOutput });
+  assert.match(exitless.output.reason, /finished or was launched but its result was never collected/, 'a finished run is not waited for: no later notice will come');
   assert.equal(invoke('stop-gate.js', [...edit(), ...bgLaunch, notification('bg1', 'completed', 0, 'C:/tasks/missing.output')], { outputFiles: bgOutput }).decision, 'block', 'An unreadable output file has no receipt.');
 });
 test('a background check launched before the last edit stays stale after its notification', () => {

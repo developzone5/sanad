@@ -8,11 +8,13 @@
 //   lint        ESLint on the changed script files of each package that has it
 //   types       tsc --noEmit on each package with a changed .ts/.tsx file (tsconfig.app.json first)
 //   ticket      check-ticket-lines.mjs, when --lines is given
+//   asserts     check-test-asserts.mjs: new test lines — a range where the exact value is known, a "nothing
+//               happens" check no break run proved, and (with --check) a check line with no [Cn] test
 //   size        size-check.mjs on the real change (--was <size> fails when it grew)
 //   mechanical  the project's own script, when `git config sanad.mechanical <path>` is set
 // A .NET change is built and tested by the test step, not here.
 //
-// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--node <path>]
+// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--node <path>]
 //   --base defaults to origin/<sanad.integration | staging>; --node (or `git config sanad.node`)
 //   is the Node that runs the package tools.
 // Exit 0: every check passed. 1: a check failed. 2: usage error.
@@ -48,7 +50,7 @@ function packageOf(repo, file) {
   return null;
 }
 
-export function planChecks({ repo, base, was, lines, node }) {
+export function planChecks({ repo, base, was, lines, check, node }) {
   const files = changedFiles(repo, base);
   const checks = [];
   const byPackage = new Map();
@@ -71,6 +73,7 @@ export function planChecks({ repo, base, was, lines, node }) {
     }
   }
   if (lines) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
+  checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : [])], cwd: repo });
   checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : [])], cwd: repo, show: true });
   const mechanical = git(repo, ['config', '--get', 'sanad.mechanical']);
   if (mechanical) checks.push({ name: 'mechanical', cmd: process.execPath, args: [mechanical, '--repo', repo, '--base', base], cwd: repo, show: true });
@@ -108,7 +111,7 @@ function parse(argv) {
   const o = {};
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
-    if (!['--repo', '--base', '--was', '--lines', '--node'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
+    if (!['--repo', '--base', '--was', '--lines', '--check', '--node'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
   return o;
@@ -121,11 +124,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (!repo) throw new Error('not inside a git repository: ' + (o.repo || process.cwd()));
     const integration = git(repo, ['config', '--get', 'sanad.integration']) || 'staging';
     const node = o.node || git(repo, ['config', '--get', 'sanad.node']) || process.execPath;
-    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), node });
+    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), node });
     process.stdout.write(text + '\n');
     process.exitCode = ok ? 0 : 1;
   } catch (error) {
-    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--node <path>]\n');
+    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--node <path>]\n');
     process.exitCode = 2;
   }
 }

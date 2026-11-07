@@ -16,7 +16,7 @@ Work: for each trace-list input, follow it through the changed code, its callers
 
 Report contract — nothing else:
 1. `RECOMMEND: PASS|FAIL`
-2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. Every confirmed correctness defect, including a rare path, is a Blocker or Bug, never "info" or "acceptable"; one open Blocker or Bug means FAIL.
+2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. Every confirmed correctness defect, including a rare path, is a Blocker or Bug, never "info" or "acceptable"; one open Blocker or Bug means FAIL. A Question is only for what the quoted ticket, QA and spec lines leave open: read them first and quote the line that leaves it open. A question those lines already answer (an "Expected" line, a rule row) is not listed; check the change against that answer instead.
 3. Coverage items you were asked for: `✓` / `✗ <what>` / `– n/a <why>`, one short line each.
 4. `NOT VERIFIED:` one line. `OUTSIDE PR:` defects on paths the change neither touches, exposes nor makes reachable, one line each — the main session puts each to the user before the push. A defect on a path the PR adds, changes, makes visible or reachable is a finding in item 2 even when the line predates the branch.
 
