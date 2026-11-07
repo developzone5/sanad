@@ -460,6 +460,7 @@ function scanTranscript(transcriptPath) {
 
   const pending = new Map(); // tool_use_id -> { editSeq, editPath, verifySeq }
   const background = new Map(); // task id -> originating command (not its polling command)
+  const finishedUncollected = new Set(); // background task ids whose finish notice carried no exit code
   const verificationStates = new Map(); // retries clear only the same command's failure
   const providerStates = new Map();
   const reviewerCalls = new Map();  // Agent tool_use id -> launch seq (reviewer prompt)
@@ -491,7 +492,7 @@ function scanTranscript(transcriptPath) {
           settle({ ...background.get(note.id), editSeq: -1, taskId: note.id },
             { type: 'tool_result', content: output, is_error: false },
             { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } } });
-        }
+        } else if (background.has(note.id)) finishedUncollected.add(note.id);
         if (helpersRunning.has(note.id) && /^(?:completed|failed|killed|cancelled|canceled|stopped)$/.test(note.status)) helpersRunning.delete(note.id);
         // An independent reviewer agent finished: credit the run it completed.
         const agent = reviewerAgents.get(note.id);
@@ -691,8 +692,12 @@ function scanTranscript(transcriptPath) {
   // stop at "still running" for hours). The push guard keeps the strict count.
   res.lastRunningHelper = helpersRunning.size ? Math.max(...helpersRunning.values()) : -1;
   const holdStop = (rec) => { if (rec.verifySeq > res.lastPendingVerifyStop) { res.lastPendingVerifyStop = rec.verifySeq; res.lastPendingVerifyStopCommand = rec.command || ''; } };
-  for (const rec of background.values()) holdStop(rec);
-  for (const rec of pending.values()) if (rec.background) holdStop(rec);
+  // A held run that no finish notice can bring back (its notice came without an exit code, or the
+  // launch has no task id) is "stuck": the stop gate blocks on it instead of waiting (2026-11-07).
+  res.lastStuckVerifyStop = -1;
+  const stuck = (rec) => { if (rec.verifySeq > res.lastStuckVerifyStop) { res.lastStuckVerifyStop = rec.verifySeq; res.lastStuckVerifyStopCommand = rec.command || ''; } };
+  for (const [id, rec] of background) { holdStop(rec); if (finishedUncollected.has(id)) stuck(rec); }
+  for (const rec of pending.values()) if (rec.background) { holdStop(rec); stuck(rec); }
   return res;
 }
 

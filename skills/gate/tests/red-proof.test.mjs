@@ -21,7 +21,10 @@ function fixture() {
   fs.writeFileSync(path.join(repo, 'check.cjs'), 'process.exit(require("./app.cjs") === 2 ? 0 : 1);\n');
   return { repo, git };
 }
-const run = (args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', windowsHide: true });
+// The fixtures must not see this machine's git settings (a test machine there sends runs away).
+const emptyConfig = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'red-proof-git-')), 'config');
+fs.writeFileSync(emptyConfig, ['[user]', '\tname = Fixture', '\temail = fixture@example.invalid', ''].join('\n'));
+const run = (args, env = {}) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: '1', ...env } });
 
 test('a test that fails on the old code is RED, and the fix comes back byte for byte', () => {
   const { repo } = fixture();
@@ -148,4 +151,95 @@ test('tests listed together above one shared error each get its reason', () => {
   assert.match(result.stdout, /✓ assert\s+src\/a\.test\.tsx > form > after Next, it appears once — AssertionError: expected 2 to be 1/);
   assert.match(result.stdout, /✗ setup\s+src\/a\.test\.tsx > form > ticks a type — TypeError/);
   assert.doesNotMatch(result.stdout, /\? other/);
+});
+
+// 2026-11-07: a "nothing happens" check passed review three rounds in a row that no run had ever
+// seen fail. --breaks breaks the rule under test and names the tests that must then fail.
+function breakFixture() {
+  const { repo, git } = fixture();
+  process.env.SANAD_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'red-proof-state-'));
+  fs.writeFileSync(path.join(repo, 'rule.cjs'), 'module.exports = { blocks: true };\n');
+  git('add', 'rule.cjs'); git('commit', '-qm', 'rule');
+  fs.mkdirSync(path.join(repo, 'src'));
+  fs.writeFileSync(path.join(repo, 'src/a.test.cjs'), '// the tests\n');
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'const blocks = require("./rule.cjs").blocks;',
+    'const fails = [];',
+    'if (!blocks) fails.push(" FAIL  src/a.test.cjs > form > saves nothing", "AssertionError: expected 1 to be 0");',
+    'if (require("./app.cjs") !== 2) fails.push(" FAIL  src/a.test.cjs > form > shows it once", "AssertionError: expected 2 to be 1");',
+    'if (fails.length) { console.log(fails.join(String.fromCharCode(10))); process.exit(1); }', ''].join('\n'));
+  const breaks = path.join(repo, '..', path.basename(repo) + '-breaks.json');
+  return { repo, breaks };
+}
+const writeBreaks = (file, mustFail) => fs.writeFileSync(file, JSON.stringify([{ name: 'the rule does not block', file: 'rule.cjs', find: 'blocks: true', put: 'blocks: false', mustFail }]));
+
+test('--breaks: the named tests fail under the break, the old code is red, the fix is green, files restored', async () => {
+  const { repo, breaks } = breakFixture();
+  writeBreaks(breaks, ['saves nothing']);
+  const rule = fs.readFileSync(path.join(repo, 'rule.cjs'));
+  const result = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD~1', '--files', 'app.cjs', '--breaks', breaks, '--then-green', '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /RED-PROOF: RED ✓/);
+  assert.match(result.stdout, /BREAK ✓ the rule does not block: all 1 named test\(s\) fail/);
+  assert.match(result.stdout, /GREEN ✓/);
+  assert.match(result.stdout, /RED-PROOF: PROVED ✓ — red on the old code, 1 break\(s\) caught, green on the fix/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'rule.cjs')), rule);
+  const { readRecord, testFileHashes, provesCurrent } = await import('../scripts/proof-record.mjs');
+  const record = readRecord(repo);
+  assert.equal(record.breaks, 1);
+  assert.ok(provesCurrent(record, testFileHashes(repo, ['src/a.test.cjs'])), 'the record covers the test file as it is now');
+  fs.appendFileSync(path.join(repo, 'src/a.test.cjs'), '// edited after the proof\n');
+  assert.ok(!provesCurrent(record, testFileHashes(repo, ['src/a.test.cjs'])), 'an edit after the proof voids it');
+});
+
+test('--breaks: a named test that still passes under the break is reported and fails the proof', () => {
+  const { repo, breaks } = breakFixture();
+  writeBreaks(breaks, ['saves nothing', 'shows it once']);
+  const result = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stdout, /BREAK ✗ the rule does not block: still pass \(or not seen failing\): shows it once/);
+  assert.match(result.stdout, /NOT PROVED ✗/);
+});
+
+test('--then-green: a test that fails on the fixed tree fails the proof', () => {
+  const { repo, breaks } = breakFixture();
+  writeBreaks(breaks, ['saves nothing']);
+  fs.writeFileSync(path.join(repo, 'app.cjs'), 'module.exports = 3;\n');
+  const result = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--then-green', '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stdout, /GREEN ✗/);
+});
+
+test('--breaks: a break whose text is not found once, or with no mustFail list, changes nothing', () => {
+  const { repo, breaks } = breakFixture();
+  fs.writeFileSync(breaks, JSON.stringify([{ name: 'x', file: 'rule.cjs', find: 'not there', put: 'y', mustFail: ['a'] }]));
+  assert.equal(run(['--repo', repo, '--breaks', breaks, '--', process.execPath, 'check.cjs']).status, 2);
+  fs.writeFileSync(breaks, JSON.stringify([{ name: 'x', file: 'rule.cjs', find: 'blocks: true', put: 'y' }]));
+  assert.equal(run(['--repo', repo, '--breaks', breaks, '--', process.execPath, 'check.cjs']).status, 2);
+});
+
+// 2026-11-07: eleven runs one after another took 2 minutes. Each run now has its own copy, several
+// at a time, and the working folder is never touched.
+test('--parallel: every run in its own copy; the folder is untouched and every copy is removed', () => {
+  const { repo, breaks } = breakFixture();
+  writeBreaks(breaks, ['saves nothing']);
+  const before = fs.readFileSync(path.join(repo, 'rule.cjs'));
+  const result = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD~1', '--files', 'app.cjs', '--breaks', breaks, '--then-green', '--parallel', '3', '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /3 run\(s\), 3 at a time, each in its own copy/);
+  assert.match(result.stdout, /RED-PROOF: PROVED ✓/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'rule.cjs')), before);
+  const worktrees = execFileSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' }).trim().split(/\r?\n/);
+  assert.equal(worktrees.length, 1, 'every temporary copy is removed: ' + worktrees.join(' | '));
+});
+
+test('a test machine in git config sends the run there; --local keeps it here', () => {
+  const { repo, breaks } = breakFixture();
+  writeBreaks(breaks, ['saves nothing']);
+  execFileSync('git', ['config', 'sanad.remoteHost', 'no-such-host'], { cwd: repo });
+  const away = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--', process.execPath, 'check.cjs']);
+  assert.equal(away.status, 2, away.stdout);
+  assert.match(away.stdout, /sanad\.remoteRepo is not; set it, or run with --local/);
+  const here = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--local', '--', process.execPath, 'check.cjs']);
+  assert.equal(here.status, 0, here.stdout);
 });
