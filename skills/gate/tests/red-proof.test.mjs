@@ -243,3 +243,33 @@ test('a test machine in git config sends the run there; --local keeps it here', 
   const here = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--local', '--', process.execPath, 'check.cjs']);
   assert.equal(here.status, 0, here.stdout);
 });
+
+// 2026-11-07: a test that crashed because the break removed its element stopped the whole proof as a
+// "setup" failure, twice. Under a break, any failure of a named test catches the break.
+test('--breaks: a named test that crashes under the break catches it; the proof goes on', () => {
+  const { repo, breaks } = breakFixture();
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'const blocks = require("./rule.cjs").blocks;',
+    'if (!blocks) { console.log([" FAIL  src/a.test.cjs > form > saves nothing", "TypeError: Cannot read properties of null"].join(String.fromCharCode(10))); process.exit(1); }', ''].join('\n'));
+  writeBreaks(breaks, ['saves nothing']);
+  const result = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--then-green', '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /BREAK ✓ the rule does not block: all 1 named test\(s\) fail/);
+  assert.match(result.stdout, /RED-PROOF: PROVED ✓/);
+});
+
+// 2026-11-07: the CI machine names its temp folder with a short 8.3 name (RUNNER~1) while git names it
+// in full, so the proof record was written under one name and looked up under the other. A folder link
+// gives the same two spellings here.
+test('the proof record is found under any spelling of the same folder', async () => {
+  const { repo } = breakFixture();
+  const alias = repo + '-alias';
+  fs.symlinkSync(repo, alias, 'junction');
+  try {
+    const { writeRecord, readRecord } = await import('../scripts/proof-record.mjs');
+    writeRecord(alias, { ok: true, breaks: 1, files: { 'src/a.test.cjs': 'x' } });
+    assert.equal(readRecord(repo)?.breaks, 1, 'written through the link, read through the real path');
+  } finally {
+    fs.unlinkSync(alias);
+  }
+});
