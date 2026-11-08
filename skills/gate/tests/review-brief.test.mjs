@@ -5,7 +5,28 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildBrief, buildFreshBrief, buildLaunch, outsideItems, splitOutside, checkLines, missedClasses, decidedItems } from '../scripts/review-brief.mjs';
+import { buildBrief, buildFreshBrief, buildLaunch, outsideItems, splitOutside, checkLines, missedClasses, decidedItems, checkSources, coverageProblems } from '../scripts/review-brief.mjs';
+
+// 2026-11-08 (user: "check lines should comes from all tickets"): every ticket line has a Check line,
+// every Check line names its source, and cases outside the ticket are EXTRA TEST lines for the user.
+test('every ticket line needs a Check line, and every Check line names its source', () => {
+  const ticketLines = ['create a homework, proceed or save as a draft/publish', 'The message should appear once', 'Required when the type includes a file'];
+  const good = ['[T1, T2] Once after Save, Next and Publish', '[T2] Once before saving', '[T3] Nothing saved without a type', '[rule: both languages] Arabic and English', '[change] Still announced'];
+  assert.deepEqual(coverageProblems(ticketLines, good), []);
+  assert.deepEqual(checkSources('[T1, change] x'), ['T1', 'change']);
+  assert.equal(checkSources('no tag here'), null);
+  assert.equal(checkSources('[maybe] x'), null);
+  const bad = coverageProblems(ticketLines, ['[T2] Once before saving', 'untagged line', '[T9] beyond the ticket']);
+  assert.ok(bad.some(p => /^T1 has no Check line/.test(p)));
+  assert.ok(bad.some(p => /^T3 has no Check line/.test(p)));
+  assert.ok(bad.some(p => /^C2 names no source/.test(p)));
+  assert.ok(bad.some(p => /^C3 names T9, but the ticket has T1\.\.T3/.test(p)));
+  const brief = buildBrief({ repo: 'C:/r', branch: 'b', base: 'origin/staging', mergeBase: 'a'.repeat(40), ticket: 't', ticketLines, checks: good, outside: { other: [], touched: [] }, facts: { stack: '', size: '', callers: '' } });
+  assert.match(brief, /## Ticket lines — every one has a Check line\n\n- T1\. create a homework/);
+  assert.match(brief, /- C1\. \[T1, T2\] Once after Save/);
+  assert.match(brief, /`EXTRA TEST:` line/);
+  assert.match(brief, /## Problems outside the ticket — known, do not report again/);
+});
 
 // 2026-11-07: a reviewer re-asked a question the user had closed; the slowest reviewer had the widest job.
 test('decided questions go into both briefs; a small change gives the whole-diff reviewer one narrow job', () => {
@@ -35,11 +56,11 @@ test('the framed brief: numbered Check lines, pinned diff, callers, both known l
   assert.match(brief, /- C1\. Once after Save\n- C2\. Once after saving twice/);
   assert.match(brief, /git diff a{40}/, 'the diff is pinned to the merge base, never a moving branch');
   assert.match(brief, /^Callers: Form ×2 \[src\/Page\.tsx:4\]$/m);
-  assert.match(brief, /## Known outside items — do not report again\n\n- Old twin message \(Other\.tsx:10\)/);
-  assert.match(brief, /## Known items in the files this change touches — report only if this change alters or worsens it\n\n- Old-language error/);
+  assert.match(brief, /## Problems outside the ticket — known, do not report again\n\n- Old twin message \(Other\.tsx:10\)/);
+  assert.match(brief, /## Problems outside the ticket in the files this change touches — report only if this change alters or worsens them\n\n- Old-language error/);
   assert.equal((brief.split('## Rules')[1].match(/^- /gm) || []).length, 3, 'three standing rules, no more');
   assert.match(brief, /A `Question` is only for what the ticket lines above leave open/);
-  assert.match(brief, /A test weakness is reported as a concrete break/);
+  assert.match(brief, /A test weakness on a Check line is reported as a concrete break/);
   assert.match(brief, /## Focused brief/);
 });
 
@@ -49,7 +70,7 @@ test('the fresh brief carries no author framing: no Check lines, no callers, no 
   assert.match(fresh, /fresh eyes/);
   assert.match(fresh, /## Bug classes this project missed before — check the change for each\n\n- wrong scope — catch: grep the guard/);
   assert.match(fresh, /git diff a{40}/);
-  assert.match(fresh, /## Known outside items/);
+  assert.match(fresh, /## Problems outside the ticket — known/);
 });
 
 test('the proof run result goes into the framed brief only', () => {
@@ -92,12 +113,13 @@ test('the command writes all three files from git and the files, and refuses mis
   fs.writeFileSync(path.join(repo, 'F.tsx'), 'y\n');
   const notes = fs.mkdtempSync(path.join(root, 'notes-'));
   const ticket = path.join(notes, 'ticket.md'), check = path.join(notes, 'check.md'), outsideFile = path.join(notes, 'outside.md'), missedFile = path.join(notes, 'missed.md'), out = path.join(notes, 'brief.md'), proof = path.join(notes, 'proof.log');
-  fs.writeFileSync(ticket, 'QA: "appear once"\n'); fs.writeFileSync(check, '- once on save\n- once twice\n');
+  const lines = path.join(notes, 'lines.md');
+  fs.writeFileSync(ticket, 'QA: "appear once"\n'); fs.writeFileSync(lines, '- appear once\n'); fs.writeFileSync(check, '- [T1] once on save\n- [T1] once twice\n');
   fs.writeFileSync(outsideFile, '- 2026-11-06 · Twin · F.tsx:1 · open\n- 2026-11-06 · Other · G.tsx:2 · open\n');
   fs.writeFileSync(missedFile, '- d · CLASS: lost line · WHY MISSED: z · CATCH: quote it\n');
   fs.writeFileSync(proof, 'RED-PROOF: RED ✓ — x\n  BREAK ✓ rule: all 1 named test(s) fail\nnoise line\n');
   git('config', 'sanad.outsideList', outsideFile); git('config', 'sanad.missedBugs', missedFile);
-  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--check', check, '--repo', repo, '--base', 'main', '--proof-log', proof], { encoding: 'utf8', env, windowsHide: true });
+  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--proof-log', proof], { encoding: 'utf8', env, windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /BRIEF: .* · 2 check line\(s\) C1\.\.C2 · 2 known item\(s\), 1 in touched files, 0 decided · callers: .* · proof: yes/);
   assert.match(r.stdout, /FRESH: .*brief-fresh\.md · 1 missed-bug class\(es\)/);
@@ -108,7 +130,11 @@ test('the command writes all three files from git and the files, and refuses mis
   assert.doesNotMatch(brief, /noise line/);
   assert.match(fs.readFileSync(path.join(notes, 'brief-fresh.md'), 'utf8'), /- lost line — catch: quote it/);
   assert.match(fs.readFileSync(path.join(notes, 'launch.md'), 'utf8'), /brief-fresh\.md/);
-  const missing = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--repo', repo], { encoding: 'utf8', env, windowsHide: true });
+  const missing = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--repo', repo], { encoding: 'utf8', env, windowsHide: true });
   assert.equal(missing.status, 2);
   assert.match(missing.stderr, /--check is required/);
+  fs.writeFileSync(lines, '- appear once\n- save as a draft\n');
+  const uncovered = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main'], { encoding: 'utf8', env, windowsHide: true });
+  assert.equal(uncovered.status, 2, 'a ticket line with no Check line stops the brief');
+  assert.match(uncovered.stderr, /T2 has no Check line: save as a draft/);
 });
