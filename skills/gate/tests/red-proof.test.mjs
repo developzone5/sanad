@@ -273,3 +273,17 @@ test('the proof record is found under any spelling of the same folder', async ()
     fs.unlinkSync(alias);
   }
 });
+
+// 2026-11-08: a rebase rewrote a proven test file with CRLF line endings, and pre-review called its
+// proven checks unproven. The proof record now hashes the text with line endings made the same.
+test('a test file rewritten with CRLF line endings keeps its proof', async () => {
+  const { testFileHashes } = await import('../scripts/proof-record.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proof-crlf-'));
+  fs.writeFileSync(path.join(dir, 'a.test.ts'), 'one\ntwo\n');
+  const lf = testFileHashes(dir, ['a.test.ts']);
+  fs.writeFileSync(path.join(dir, 'a.test.ts'), 'one\r\ntwo\r\n');
+  assert.deepEqual(testFileHashes(dir, ['a.test.ts']), lf, 'only the line endings changed');
+  fs.writeFileSync(path.join(dir, 'a.test.ts'), 'one\r\nthree\r\n');
+  assert.notDeepEqual(testFileHashes(dir, ['a.test.ts']), lf, 'a real edit still voids the proof');
+  fs.rmSync(dir, { recursive: true, force: true });
+});

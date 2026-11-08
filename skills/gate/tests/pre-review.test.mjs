@@ -38,8 +38,8 @@ test('every check passes: lint, types, size and the project check, with one summ
   write('web/src/a.ts', 'export const a = 2;\n');
   const r = run(repo);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /PRE-REVIEW: 5 of 5 checks passed/);
-  for (const name of ['lint web \\(1 file\\)', 'types web', 'test asserts', 'size', 'mechanical']) assert.match(r.stdout, new RegExp('✓ ' + name));
+  assert.match(r.stdout, /PRE-REVIEW: 6 of 6 checks passed/);
+  for (const name of ['lint web \\(1 file\\)', 'types web', 'test asserts', 'commits', 'size', 'mechanical']) assert.match(r.stdout, new RegExp('✓ ' + name));
   assert.match(r.stdout, /MECHANICAL: 0 bugs/, 'the project check got --repo');
 });
 

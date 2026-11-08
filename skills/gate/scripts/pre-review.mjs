@@ -10,6 +10,7 @@
 //   ticket      check-ticket-lines.mjs, when --lines is given
 //   asserts     check-test-asserts.mjs: new test lines — a range where the exact value is known, a "nothing
 //               happens" check no break run proved, and (with --check) a check line with no [Cn] test
+//   commits     check-commits.mjs: one commit, a Conventional subject that ends with the ticket ID
 //   size        size-check.mjs on the real change (--was <size> fails when it grew)
 //   mechanical  the project's own script, when `git config sanad.mechanical <path>` is set
 // A .NET change is built and tested by the test step, not here.
@@ -74,6 +75,7 @@ export function planChecks({ repo, base, was, lines, check, node }) {
   }
   if (lines) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
   checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : [])], cwd: repo });
+  checks.push({ name: 'commits', cmd: process.execPath, args: [path.join(here, 'check-commits.mjs'), '--repo', repo, '--base', base], cwd: repo });
   checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : [])], cwd: repo, show: true });
   const mechanical = git(repo, ['config', '--get', 'sanad.mechanical']);
   if (mechanical) checks.push({ name: 'mechanical', cmd: process.execPath, args: [mechanical, '--repo', repo, '--base', base], cwd: repo, show: true });
