@@ -31,8 +31,16 @@ export function testFileHashes(top, files) {
   return Object.fromEntries(files.map(f => [f, crypto.createHash('sha256').update(fs.readFileSync(path.join(top, f))).digest('hex')]));
 }
 
+// One folder can have several spellings (a short 8.3 name such as RUNNER~1 on a CI machine, a link,
+// another case): the writer and the reader must name it the same, so both ask git for the top level
+// and the system for the real path (2026-11-07: CI saved a record under one name and read another).
+export function canonicalTop(top) {
+  let p = git(top, ['rev-parse', '--show-toplevel']) || path.resolve(top);
+  try { p = fs.realpathSync.native(p); } catch { /* keep the git answer */ }
+  return path.resolve(p).replace(/\\/g, '/').toLowerCase();
+}
 function recordPath(top) {
-  return path.join(proofDir(), crypto.createHash('sha1').update(path.resolve(top).replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 16) + '.json');
+  return path.join(proofDir(), crypto.createHash('sha1').update(canonicalTop(top)).digest('hex').slice(0, 16) + '.json');
 }
 export function writeRecord(top, record) {
   fs.mkdirSync(proofDir(), { recursive: true });

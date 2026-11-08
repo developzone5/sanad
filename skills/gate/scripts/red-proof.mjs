@@ -72,9 +72,11 @@ export function failureReasons(text) {
   return [...found.values()];
 }
 
-// The mustFail names a break run did not see failing by an assertion.
+// The mustFail names a break run did not see failing. Under a break, any failure of a named test
+// catches it, an error as well as an assertion (2026-11-07: a test that crashed because the break
+// removed its element was called a broken test, and the whole proof ran again, twice).
 export function survivors(mustFail, reasons) {
-  const failed = reasons.filter(r => r.kind !== 'setup').map(r => r.name.toLowerCase());
+  const failed = reasons.map(r => r.name.toLowerCase());
   return mustFail.filter(part => !failed.some(name => name.includes(String(part).toLowerCase())));
 }
 
@@ -363,7 +365,6 @@ async function main() {
       else { say(`RED-PROOF: NOT RED ✗ — the test passes with ${b.file} broken, so it does not check that code; files restored.`); ok = false; }
       continue;
     }
-    if (r.code !== 0) setupStop(r);
     const left = survivors(b.mustFail, r.why);
     if (r.code !== 0 && !left.length) say(`  BREAK ✓ ${b.name}: all ${b.mustFail.length} named test(s) fail`);
     else { say(`  BREAK ✗ ${b.name}: still pass (or not seen failing): ${left.join(' | ')}`); ok = false; }
