@@ -257,6 +257,15 @@ function copyWrites(tokens) {
 function segmentEditPaths(seg) {
   const out = [];
   let m;
+  // A command sent over ssh runs on another machine: its git checkout or file writes change nothing
+  // here (2026-11-08: a checkout on the remote test machine blocked two stops here). Only a local
+  // redirection of its output can write a file here.
+  if (/^(?:ssh|scp)(?:\.exe)?$/i.test(String(tokenize(seg)[0] || '').split(/[\\/]/).pop())) {
+    const unquoted = seg.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
+    REDIRECT.lastIndex = 0;
+    while ((m = REDIRECT.exec(unquoted)) !== null) if (isCodePath(m[2])) out.push(stripQuotes(m[2]));
+    return [...new Set(out)];
+  }
   REDIRECT.lastIndex = 0;
   while ((m = REDIRECT.exec(seg)) !== null) {
     if (isCodePath(m[2])) out.push(stripQuotes(m[2]));

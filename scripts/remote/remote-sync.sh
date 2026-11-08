@@ -5,6 +5,7 @@
 #   Optional setting (none set = run everything locally, as before):
 #     git config --global sanad.remoteHost <ssh-alias>      the remote test machine
 #     git config sanad.remoteRepo <path-on-remote>          this repository's clone there (per repo)
+#     git config --global --add sanad.remoteAddress <ip>   tried when the alias's name does not answer
 #   The commit here plus every uncommitted, not-ignored change goes over as a git bundle (your index
 #   and branch are untouched). The remote clone, which must be clean, checks out that exact tree
 #   (detached). Then run builds and tests there as a plain command, judged by its output:
@@ -23,11 +24,19 @@ rrepo=$(git -C "$top" config --get sanad.remoteRepo || true)
 case "$rrepo" in *[\"\&\|\<\>\^%]*) echo "FAILED: sanad.remoteRepo holds a shell character"; exit 1;; esac
 integ=$(git -C "$top" config --get sanad.integration || echo staging)
 
-ssh_q() { ssh -o BatchMode=yes -o ConnectTimeout=12 "$host" "$@"; }
-if ! ssh_q "echo ok" >/dev/null 2>&1; then
-  echo "REMOTE-DOWN: $host does not answer. Ask the user before running on this machine."
-  exit 4
+# The machine by its name first, then by each saved address (2026-11-08: the name stopped resolving
+# while the address answered): git config --global --add sanad.remoteAddress <ip>.
+via=()
+reach() { ssh -o BatchMode=yes -o ConnectTimeout=12 "$@" "$host" "echo ok" >/dev/null 2>&1; }
+if ! reach; then
+  found=""
+  for a in $(git config --get-all sanad.remoteAddress 2>/dev/null); do
+    if reach -o "HostName=$a"; then found=$a; break; fi
+  done
+  [ -n "$found" ] || { echo "REMOTE-DOWN: $host does not answer by name or by any sanad.remoteAddress. Ask the user before running on this machine."; exit 4; }
+  via=(-o "HostName=$found")
 fi
+ssh_q() { ssh -o BatchMode=yes -o ConnectTimeout=12 ${via[@]+"${via[@]}"} "$host" "$@"; }
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # The working tree as a commit, through a temporary index (the real index is never touched).
@@ -52,7 +61,7 @@ if [ "$range" = "$ref" ] && [ -n "$base" ]; then
   : # the commit is already on the integration branch: nothing to send
 else
   git -C "$top" bundle create "$tmp/run.bundle" "$range" >/dev/null 2>&1 || { git -C "$top" update-ref -d "$ref"; echo "FAILED: bundle"; exit 1; }
-  scp -q -o BatchMode=yes "$tmp/run.bundle" "$host:$rrepo/.git/sanad-run.bundle" || { git -C "$top" update-ref -d "$ref"; echo "FAILED: copy to $host"; exit 1; }
+  scp -q -o BatchMode=yes ${via[@]+"${via[@]}"} "$tmp/run.bundle" "$host:$rrepo/.git/sanad-run.bundle" || { git -C "$top" update-ref -d "$ref"; echo "FAILED: copy to $host"; exit 1; }
   ssh_q "cd /d \"$rrepo\" && git fetch -q -f .git/sanad-run.bundle +$ref:$ref && del .git\\sanad-run.bundle" >/dev/null 2>&1 || { git -C "$top" update-ref -d "$ref"; echo "FAILED: fetch the bundle on $host"; exit 1; }
 fi
 git -C "$top" update-ref -d "$ref"
@@ -60,4 +69,5 @@ ssh_q "cd /d \"$rrepo\" && git -c advice.detachedHead=false checkout -q --detach
 got=$(ssh_q "cd /d \"$rrepo\" && git rev-parse HEAD^^{tree}" 2>/dev/null | tr -d '\r' | tail -1)
 [ "$got" = "$tree" ] || { echo "FAILED: $host has tree $got, expected $tree"; exit 1; }
 echo "SYNCED $host:$rrepo $commit tree $tree"
-echo "Run there: ssh $host \"cd /d $rrepo\\<subfolder> && <command>\""
+[ ${#via[@]} -eq 0 ] || echo "VIA ${via[1]#HostName=} (the name $host did not answer; this address did)"
+echo "Run there: ssh ${via[@]+"${via[@]} "}$host \"cd /d $rrepo\\<subfolder> && <command>\""
