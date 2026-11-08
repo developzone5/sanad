@@ -185,7 +185,10 @@ async function main() {
     if (/REMOTE-DOWN/.test(syncOut)) { say('RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).'); process.exit(4); }
     const synced = /SYNCED \S+ (\w+) tree (\w+)/.exec(syncOut);
     if (!synced) { say('RED-PROOF: the test machine was not synced — ' + (syncOut.split(/\r?\n/).find(l => /NO-REMOTE|REMOTE-DIRTY|FAILED|fatal|error/i.test(l)) || 'no SYNCED line')); process.exit(2); }
-    say(`RED-PROOF: on ${remoteHost} (${synced[1].slice(0, 12)})`);
+    // The address remote-sync reached when the machine's name did not answer (its VIA line).
+    const via = /^VIA (\S+)/m.exec(syncOut);
+    const viaOpt = via ? ['-o', 'HostName=' + via[1]] : [];
+    say(`RED-PROOF: on ${remoteHost}${via ? ' at ' + via[1] : ''} (${synced[1].slice(0, 12)})`);
     const dir = remoteRepo + '/.git/sanad-proof';
     const local = fs.mkdtempSync(path.join(os.tmpdir(), 'sanad-proof-'));
     fs.writeFileSync(path.join(local, 'plan.json'), JSON.stringify({
@@ -194,10 +197,10 @@ async function main() {
     }));
     const here = path.dirname(fileURLToPath(import.meta.url));
     for (const f of ['red-proof.mjs', 'proof-record.mjs', 'check-ticket-lines.mjs']) fs.copyFileSync(path.join(here, f), path.join(local, f));
-    const ssh = (cmd) => spawnSync('ssh', [remoteHost, cmd], { encoding: 'utf8', windowsHide: true, timeout: 40 * 60 * 1000, maxBuffer: 64 * 1024 * 1024 });
+    const ssh = (cmd) => spawnSync('ssh', [...viaOpt, remoteHost, cmd], { encoding: 'utf8', windowsHide: true, timeout: 40 * 60 * 1000, maxBuffer: 64 * 1024 * 1024 });
     ssh(windows ? `if not exist "${dir.replace(/\//g, '\\')}" mkdir "${dir.replace(/\//g, '\\')}"` : `mkdir -p '${dir}'`);
     // scp reads "C:/..." as a host name, so it copies by file name from inside the folder.
-    const scp = spawnSync('scp', ['-q', 'plan.json', 'red-proof.mjs', 'proof-record.mjs', 'check-ticket-lines.mjs', `${remoteHost}:${dir}/`], { cwd: local, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+    const scp = spawnSync('scp', ['-q', ...viaOpt, 'plan.json', 'red-proof.mjs', 'proof-record.mjs', 'check-ticket-lines.mjs', `${remoteHost}:${dir}/`], { cwd: local, encoding: 'utf8', windowsHide: true, timeout: 120000 });
     if (scp.status !== 0) { say('RED-PROOF: could not copy the proof to the test machine — ' + ((scp.stderr || '').trim().split(/\r?\n/).pop() || 'scp failed')); process.exit(2); }
     const q = (a) => (/[\s"&|<>^()]/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a);
     const exe = /^node(?:\.exe)?$/i.test(path.basename(command[0])) ? remoteNode : command[0];
@@ -210,7 +213,7 @@ async function main() {
     for (const l of text) say(l);
     if (opt('--log')) {
       const logPath = path.resolve(opt('--log'));
-      spawnSync('scp', ['-q', `${remoteHost}:${dir}/proof.log`, path.basename(logPath)], { cwd: path.dirname(logPath), windowsHide: true, timeout: 120000 });
+      spawnSync('scp', ['-q', ...viaOpt, `${remoteHost}:${dir}/proof.log`, path.basename(logPath)], { cwd: path.dirname(logPath), windowsHide: true, timeout: 120000 });
     }
     fs.rmSync(local, { recursive: true, force: true });
     // The record is this machine's: the test files proved are the ones here, unchanged since the sync.

@@ -641,3 +641,12 @@ test('display tails never make a different check look like the failed one', () =
     ...command('red', 'git stash push; dotnet test Backend.Tests.csproj | head -5; git stash pop', 'SETUP_EXIT=0\nFailed! - Failed: 1, Passed: 0\nCLEANUP_EXIT=0'),
     ...command('green', 'dotnet test Backend.Tests.csproj | head -5', 'Passed: 1')]).decision, 'block');
 });
+
+// 2026-11-08: a checkout on the remote test machine, sent over ssh, blocked two stops here.
+test('git commands sent over ssh change nothing here; a local checkout or a local redirect still counts', () => {
+  const passed = [...edit(), ...command('test', 'dotnet test', 'Passed!  - Failed: 0, Passed: 3')];
+  const remote = bash('remote', 'ssh -o HostName=10.0.0.5 pc2 "cd /d C:\\repos\\sanad && git fetch -q origin && git checkout -q main && git pull -q"', 'ok');
+  assert.equal(invoke('stop-gate.js', [...passed, ...remote]).decision, 'allow');
+  assert.equal(invoke('stop-gate.js', [...passed, ...bash('local', 'git checkout -q main', 'ok')]).decision, 'block', 'a local checkout still counts');
+  assert.equal(invoke('stop-gate.js', [...passed, ...bash('out', 'ssh pc2 "type x" > ' + repo + '/src/App.cs', 'ok')]).decision, 'block', 'a local redirect into a code file still counts');
+});
