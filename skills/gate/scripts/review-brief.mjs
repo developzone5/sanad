@@ -13,10 +13,19 @@
 // branch; and the "unframed" review read the author's framing. The standing rules are kept to
 // three: anything else a reviewer used to be told is now a script check (pre-review).
 //
-// Usage: node review-brief.mjs --out <brief.md> --ticket <file> --check <file>
+// 2026-11-08 (user: "check lines should come from the tickets"; "extra ... mention in the end"): every
+// line of the ticket (steps, expected, actual, the linked ticket's rows) is numbered T1..Tn, and each
+// Check line names where it comes from: [T2], [change] (what the change itself touches) or [rule: x]
+// (a project rule, such as both languages). A ticket line no Check line covers, or a Check line with
+// no source, stops the brief. Cases outside the ticket are not Check lines: reviewers and the Test
+// designer list them as EXTRA TEST lines for the user to decide at the end.
+//
+// Usage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file>
 //          [--repo <path>] [--base <ref>] [--outside <file>] [--missed <file>] [--size <size>] [--proof-log <file>]
 //   --ticket     the ticket and QA text, verbatim
-//   --check      what must hold, one line each; numbered C1..Cn here, and each needs a test tagged [Cn]
+//   --lines      every requirement line of the ticket, one per line (the check-ticket-lines file)
+//   --check      what must hold, one line each, each starting with its source tag; numbered C1..Cn
+//                here, and each needs a test tagged [Cn]
 //   --outside    the project's outside list (default: `git config sanad.outsideList`)
 //   --missed     the project's missed-bugs list (default: `git config sanad.missedBugs`)
 //   --size       tiny or small adds the focused budget (default: the size check's answer)
@@ -27,8 +36,36 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { readLines } from './check-ticket-lines.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+
+// Each Check line's sources: "[T1, T3]", "[change]", "[rule: both languages]" or a mix, at its start.
+export function checkSources(line) {
+  const m = /^\[([^\]]+)\]/.exec(String(line).trim());
+  if (!m) return null;
+  const parts = m[1].split(',').map(p => p.trim()).filter(Boolean);
+  return parts.every(p => /^T\d+$/i.test(p) || /^change$/i.test(p) || /^rule:\s*\S/i.test(p)) ? parts : null;
+}
+
+// Problems that stop the brief: a ticket line with no Check line, a Check line with no source, or a
+// source that names a ticket line that does not exist.
+export function coverageProblems(ticketLines, checks) {
+  const problems = [];
+  const covered = new Set();
+  checks.forEach((c, i) => {
+    const sources = checkSources(c);
+    if (!sources) { problems.push(`C${i + 1} names no source ([T1], [change] or [rule: ...]): ${c}`); return; }
+    for (const s of sources) {
+      const n = /^T(\d+)$/i.exec(s);
+      if (!n) continue;
+      if (Number(n[1]) < 1 || Number(n[1]) > ticketLines.length) problems.push(`C${i + 1} names ${s}, but the ticket has T1..T${ticketLines.length}`);
+      else covered.add(Number(n[1]));
+    }
+  });
+  ticketLines.forEach((t, i) => { if (!covered.has(i + 1)) problems.push(`T${i + 1} has no Check line: ${t}`); });
+  return problems;
+}
 
 function git(cwd, args) {
   try { return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
@@ -83,12 +120,12 @@ function sizeFacts(repo, base) {
   return { stack: line(/^Stack:/), size: line(/^SIZE/), callers: line(/^\s*callers:/).replace(/^callers:\s*/, '') };
 }
 
-const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`; or "no findings" and what you checked. Then `OUTSIDE PR:` lines, if any.';
+const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`; or "no findings" and what you checked. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any.';
 // Three standing rules. A new rule replaces one of these or becomes a script check.
 const RULES = [
   '- A `Question` is only for what the ticket lines above leave open: quote the line that leaves it open. A question those lines already answer (an "Expected" line, a rule row) is not listed; check the change against that answer instead.',
-  '- A test weakness is reported as a concrete break: the change to the product code (file, what changes) that the tests would let through, and the test that should then fail. Ranges, untagged Check lines and "nothing happens" checks no break proved are already caught by scripts before review.',
-  '- A defect on a path the change neither touches, exposes nor makes reachable goes under `OUTSIDE PR:`. A known outside item is not reported, unless this change alters or worsens it; then it is a finding.',
+  '- A test weakness on a Check line is reported as a concrete break: the change to the product code (file, what changes) that the tests would let through, and the test that should then fail. A case that no Check line covers and the ticket does not name is an `EXTRA TEST:` line (one line: the case and why it matters), not a finding: the user decides it.',
+  '- A defect on a path the change neither touches, exposes nor makes reachable goes under `OUTSIDE PR:`. A problem outside the ticket that is already listed is not reported, unless this change alters or worsens it; then it is a finding.',
 ];
 
 function diffLine({ repo, branch, base, mergeBase }) {
@@ -97,8 +134,8 @@ function diffLine({ repo, branch, base, mergeBase }) {
 function known({ touched, other, decided = [] }) {
   const fmt = o => `- ${o.what}${o.where ? ` (${o.where})` : ''}`;
   return [
-    '## Known outside items — do not report again', '', ...(other.length ? other.map(fmt) : ['- none']), '',
-    ...(touched.length ? ['## Known items in the files this change touches — report only if this change alters or worsens it', '', ...touched.map(fmt), ''] : []),
+    '## Problems outside the ticket — known, do not report again', '', ...(other.length ? other.map(fmt) : ['- none']), '',
+    ...(touched.length ? ['## Problems outside the ticket in the files this change touches — report only if this change alters or worsens them', '', ...touched.map(fmt), ''] : []),
     ...(decided.length ? ['## Decided by the user — do not ask again', '', ...decided.map(d => '- ' + d), ''] : []),
   ];
 }
@@ -107,12 +144,13 @@ const focusedBlock = ['## Focused brief (small change)', '',
 const isFocused = (facts, size) => /^(?:tiny|small)$/.test(size || (/^SIZE(?: GREW)?:\s*(\w+)/.exec(facts.size) || [])[1] || '');
 const tidy = lines => lines.filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n') + '\n';
 
-export function buildBrief({ repo, branch, base, mergeBase, ticket, checks, outside, facts, size, proof = [] }) {
+export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines = [], checks, outside, facts, size, proof = [] }) {
   return tidy([
     ROLE, '', diffLine({ repo, branch, base, mergeBase }), '',
     facts.stack || 'Stack: unknown', facts.size || '', `Callers: ${facts.callers || 'none yet (no change yet)'}`, '',
     '## Ticket (verbatim)', '', ticket.trim(), '',
-    '## Check — each line holds on every path; its tests carry the tag [Cn]', '',
+    ...(ticketLines.length ? ['## Ticket lines — every one has a Check line', '', ...ticketLines.map((t, i) => `- T${i + 1}. ${t}`), ''] : []),
+    '## Check — each line names its source ([Tn] a ticket line, [change], [rule: ...]); its tests carry the tag [Cn]', '',
     ...checks.map((c, i) => `- C${i + 1}. ${c}`), '',
     ...known(outside),
     ...(proof.length ? ['## Proof run (red-proof.mjs)', '', ...proof.map(p => '    ' + p), ''] : []),
@@ -156,10 +194,10 @@ function parse(argv) {
   const o = {};
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
-    if (!['--out', '--ticket', '--check', '--repo', '--base', '--outside', '--missed', '--size', '--proof-log'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
+    if (!['--out', '--ticket', '--lines', '--check', '--repo', '--base', '--outside', '--missed', '--size', '--proof-log'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
-  for (const need of ['out', 'ticket', 'check']) if (!o[need]) throw new Error('--' + need + ' is required');
+  for (const need of ['out', 'ticket', 'lines', 'check']) if (!o[need]) throw new Error('--' + need + ' is required');
   return o;
 }
 
@@ -173,6 +211,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (!mergeBase) throw new Error('no merge base with ' + base);
     const checks = checkLines(fs.readFileSync(o.check, 'utf8'));
     if (!checks.length) throw new Error('the check file has no lines');
+    const ticketLines = readLines(fs.readFileSync(o.lines, 'utf8'));
+    if (!ticketLines.length) throw new Error('the ticket lines file has no lines');
+    const gaps = coverageProblems(ticketLines, checks);
+    if (gaps.length) throw new Error('the Check lines do not cover the ticket:\n  ' + gaps.join('\n  '));
     const listFile = (flag, key) => { const f = flag || git(repo, ['config', '--get', key]); return f && fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : ''; };
     const changed = [...git(repo, ['diff', '--name-only', mergeBase]).split(/\r?\n/), ...git(repo, ['ls-files', '--others', '--exclude-standard']).split(/\r?\n/)].filter(Boolean);
     const outsideText = listFile(o.outside, 'sanad.outsideList');
@@ -184,13 +226,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const branch = git(repo, ['branch', '--show-current']) || '(detached)';
     const ticket = fs.readFileSync(o.ticket, 'utf8');
     const out = path.resolve(o.out), fresh = out.replace(/(\.md)?$/, '-fresh.md'), launch = path.join(path.dirname(out), 'launch.md');
-    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, checks, outside, facts, size: o.size, proof }));
+    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof }));
     fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, missed, facts, size: o.size }));
     fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, focused: isFocused(facts, o.size) }));
     process.stdout.write(`BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'}\n` +
       `FRESH: ${fresh} · ${missed.length} missed-bug class(es)\nLAUNCH: ${launch}\n`);
   } catch (error) {
-    process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--missed <file>] [--size <size>] [--proof-log <file>]\n');
+    process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--missed <file>] [--size <size>] [--proof-log <file>]\n');
     process.exitCode = 2;
   }
 }
