@@ -27,8 +27,10 @@ export function changedTestFiles(top, base) {
   return [...new Set([...tracked, ...untracked].filter(f => f && TEST_FILE.test(f) && fs.existsSync(path.join(top, f))))].sort();
 }
 
+// Hashed with line endings made the same, so a rebase or checkout that rewrites LF as CRLF does not
+// make a proven test look new (2026-11-08: after a rebase, pre-review called proven checks unproven).
 export function testFileHashes(top, files) {
-  return Object.fromEntries(files.map(f => [f, crypto.createHash('sha256').update(fs.readFileSync(path.join(top, f))).digest('hex')]));
+  return Object.fromEntries(files.map(f => [f, crypto.createHash('sha256').update(fs.readFileSync(path.join(top, f), 'utf8').replace(/\r\n/g, '\n')).digest('hex')]));
 }
 
 // One folder can have several spellings (a short 8.3 name such as RUNNER~1 on a CI machine, a link,
