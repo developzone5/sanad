@@ -319,8 +319,10 @@ async function main() {
     const q = (a) => (/[\s"&|<>^()]/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a);
     const exe = /^node(?:\.exe)?$/i.test(path.basename(command[0])) ? remoteNode : command[0];
     const rel = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
-    // The env file is read on the test machine: only its path crosses over, never a value.
-    const envFile = (opt('--test-env') || gitText(['config', '--get', 'sanad.remoteTestEnv'])).replace(/\\/g, '/');
+    // The env file is read on the test machine: only its path crosses over, never a value. The repository's default
+    // (sanad.remoteTestEnv, a database connection) goes only to `dotnet` runs; --test-env always applies.
+    const dotnetRun = /^dotnet(?:\.exe)?$/i.test(path.basename(command[0]));
+    const envFile = (opt('--test-env') || (dotnetRun ? gitText(['config', '--get', 'sanad.remoteTestEnv']) : '')).replace(/\\/g, '/');
     const remoteCmd = [q(remoteNode), q(dir + '/red-proof.mjs'), '--repo', q(remoteRepo), '--local', '--plan', q(dir + '/plan.json'),
       ...(opt('--parallel') ? ['--parallel', String(parallel)] : []), '--timeout-min', String(timeoutMin), ...(envFile ? ['--test-env', q(envFile)] : []),
       '--base', 'HEAD', '--cwd', q(rel ? remoteRepo + '/' + rel : remoteRepo), '--log', q(dir + '/proof.log'),

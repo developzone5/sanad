@@ -24,8 +24,10 @@
 const fs = require('fs');
 const path = require('path');
 
-function out(obj) { process.stdout.write(JSON.stringify(obj)); process.exit(0); }
-function allow() { process.exit(0); }
+// A stop that goes through starts the task timer's idle wait (lib/timer-idle.cjs); a blocked stop does not.
+function markIdle() { try { require('./lib/timer-idle.cjs').idle(input); } catch (e) { /* the timer never blocks a stop */ } }
+function out(obj) { if (!obj || obj.decision !== 'block') markIdle(); process.stdout.write(JSON.stringify(obj)); process.exit(0); }
+function allow() { markIdle(); process.exit(0); }
 
 function readStdin() {
   try {

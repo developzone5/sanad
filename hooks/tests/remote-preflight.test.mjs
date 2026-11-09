@@ -36,7 +36,9 @@ case "$cmd" in
   *schtasks*) touch "$d/engine-up" ;;
   *docker-hold.txt*) echo "$cmd" > "$d/hold.txt" ;;
   *"Health}}x{{end}}"*) echo x ;;
+  *"docker inspect"*eduquest-api) if [ -f "$d/app-state" ]; then cat "$d/app-state"; else echo exited; fi ;;
   *"docker inspect"*) if [ -f "$d/db-state" ]; then cat "$d/db-state"; else echo exited; fi ;;
+  *"compose up"*app) echo healthy > "$d/app-state" ;;
   *"compose up"*) echo healthy > "$d/db-state" ;;
   *) exit 1 ;;
 esac
@@ -66,6 +68,24 @@ function setup({ files = [], config = {} } = {}) {
 }
 
 const db = { 'sanad.remoteHost': 'pc2', 'sanad.remoteDbUp': 'cd /d C:\\repo && docker compose up -d --pull never mysql', 'sanad.remoteDbContainer': 'eduquest-mysql' };
+
+// 2026-11-09 (TUW-239): the app was started at the end for the browser check, about 1.5 minutes of waiting.
+test('--app starts the app beside the database, under the same hold; --app without settings refuses', () => {
+  const app = { 'sanad.remoteAppUp': 'cd /d C:\\repo && docker compose up -d --no-build --pull never app', 'sanad.remoteAppContainer': 'eduquest-api' };
+  const { root, bin, run } = setup({ files: ['engine-up'], config: { ...db, ...app } });
+  const r = run('--db', '--app');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /READY pc2 docker 29\.9\.2 db eduquest-mysql healthy app eduquest-api healthy \(held until /);
+  const calls = fs.readFileSync(path.join(bin, 'calls.log'), 'utf8');
+  assert.ok(calls.indexOf('docker-hold.txt') < calls.indexOf('compose up'), 'the hold is written before anything starts');
+  fs.rmSync(root, { recursive: true, force: true });
+
+  const bare = setup({ files: ['engine-up'], config: db });
+  const missing = bare.run('--app');
+  assert.equal(missing.code, 1, missing.out);
+  assert.match(missing.out, /--app needs git config sanad\.remoteAppUp and sanad\.remoteAppContainer/);
+  fs.rmSync(bare.root, { recursive: true, force: true });
+});
 
 test('name down, address answers, engine closed, database stopped: all fixed, then READY with a hold', () => {
   const { root, bin, run } = setup({ files: ['name-down'], config: { ...db, 'sanad.remoteAddress': '10.20.40.46' } });

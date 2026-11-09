@@ -85,12 +85,18 @@ export function readDiff(repo, base) {
       const newName = line.slice(4).replace(/^b\//, '').trim();
       const deleted = newName === '/dev/null';
       const name = deleted ? oldName : newName;
-      cur = files.get(name) || { name, added: [], removed: [], hunks: [], deleted };
+      cur = files.get(name) || { name, oldName: oldName === '/dev/null' ? null : oldName, from, added: [], removed: [], hunks: [], deleted };
       files.set(name, cur);
       continue;
     }
-    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (h && cur) { cur.hunks.push({ start: Number(h[1]), count: h[2] === undefined ? 1 : Number(h[2]) }); continue; }
+    const h = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (h && cur) {
+      cur.hunks.push({
+        oldStart: Number(h[1]), oldCount: h[2] === undefined ? 1 : Number(h[2]),
+        start: Number(h[3]), count: h[4] === undefined ? 1 : Number(h[4]),
+      });
+      continue;
+    }
     if (!cur) continue;
     if (line.startsWith('+')) cur.added.push(line.slice(1));
     else if (line.startsWith('-')) cur.removed.push(line.slice(1));
@@ -166,6 +172,54 @@ function bracketBalance(line) {
   for (const c of code) { if (c === '{' || c === '(' || c === '[') n++; else if (c === '}' || c === ')' || c === ']') n--; }
   return n;
 }
+/**
+ * For each line of a C-style source (JS/TS/C#/Java…), whether it holds any code — false for blank lines and lines
+ * that are only `//`, `/* … *\/` or JSX `{/* … *\/}` comment, including the inside of a multi-line comment.
+ */
+export function codeLines(text) {
+  const lines = String(text).split(/\r?\n/);
+  let inBlock = false, jsx = false;
+  return lines.map((line) => {
+    let j = 0;
+    while (j < line.length) {
+      if (inBlock) {
+        const end = line.indexOf('*/', j);
+        if (end < 0) return false;
+        inBlock = false; j = end + 2;
+        if (jsx) { const close = /^\s*\}/.exec(line.slice(j)); if (close) j += close[0].length; jsx = false; }
+        continue;
+      }
+      const rest = line.slice(j);
+      if (/^\s/.test(rest)) { j++; continue; }
+      if (rest.startsWith('{/*')) { inBlock = true; jsx = true; j += 3; continue; }
+      if (rest.startsWith('/*')) { inBlock = true; j += 2; continue; }
+      if (rest.startsWith('//')) return false;
+      return true;
+    }
+    return false;
+  });
+}
+const C_STYLE = /\.(?:cs|[cm]?[jt]sx?|java|kt|go|php|vue|svelte)$/i;
+const oldTexts = new Map();
+function oldText(repo, f) {
+  const key = `${f.from}:${f.oldName || f.name}`;
+  if (!oldTexts.has(key)) {
+    let t = '';
+    if (f.from && f.oldName !== null) { try { t = git(repo, ['show', key]); } catch { /* new file */ } }
+    oldTexts.set(key, t);
+  }
+  return oldTexts.get(key);
+}
+// A hunk that changes only comments or blank lines, on both sides, changes no function (2026-11-09: a reworded
+// JSX comment in a dialog sized a one-line style fix "big", because the dialog has eleven callers).
+function commentOnlyHunk(repo, f, h) {
+  if (!C_STYLE.test(f.name) || h.oldStart == null) return false;
+  const now = codeLines(fileText(repo, f.name)), before = codeLines(oldText(repo, f));
+  for (let i = h.start - 1; i < h.start - 1 + h.count; i++) if (now[i]) return false;
+  for (let i = h.oldStart - 1; i < h.oldStart - 1 + h.oldCount; i++) if (before[i]) return false;
+  return true;
+}
+
 // A local function is called only from its own file; an exported or public one from anywhere.
 const SHARED = /^\s*(?:export\b|(?:public|internal|protected)\b)/;
 export function changedSymbols(repo, files) {
@@ -175,6 +229,7 @@ export function changedSymbols(repo, files) {
     if (KIND(f.name) !== 'code' || !CODE.test(f.name)) continue;
     const lines = fileText(repo, f.name).split(/\r?\n/);
     for (const h of f.hunks) {
+      if (commentOnlyHunk(repo, f, h)) continue;
       const from = Math.max(0, h.start - 1), to = Math.min(lines.length, from + Math.max(h.count, 1));
       for (let i = from; i < to; i++) keep(defName(lines[i]), f, lines[i]);
       // The enclosing function: the nearest definition above whose body is still open at the hunk
@@ -205,11 +260,48 @@ export function changedSymbols(repo, files) {
   return [...names.entries()].slice(0, 12).map(([name, v]) => ({ name, ...v }));
 }
 
+// A JavaScript or TypeScript export is reached only through an import of its own file. A same-named
+// function in another file (each page's local `buildSchema`) or a word in a doc is not a caller
+// (2026-11-09: 35 such hits sized a change whose two functions had one caller each "big").
+const JS = /\.[cm]?[jt]sx?$/i;
+const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// The names other files import a module by: its file name without the extension; for an index
+// file, its folder name too.
+function moduleNames(file) {
+  const noExt = file.replace(/\\/g, '/').replace(/\.[^./]+$/, '');
+  const base = path.posix.basename(noExt);
+  return base === 'index' ? [path.posix.basename(path.posix.dirname(noExt)), 'index'] : [base];
+}
+function importsModule(text, names) {
+  return names.some(n => new RegExp(`(?:\\bfrom|\\bimport|\\brequire)\\s*\\(?\\s*['"\`](?:[^'"\`]*/)?${escapeRe(n)}(?:\\.[cm]?[jt]sx?)?['"\`]`).test(text));
+}
+// The files that reach `name` of `file`: the file itself, every file that imports it, and through one
+// re-export (`export { name } from './file'`, a barrel) that file's importers.
+export function reachingFiles(repo, file, name, candidates) {
+  const names = moduleNames(file);
+  const reach = new Set([file]);
+  const reExport = new RegExp(`export\\s*(?:\\*|\\{[^}]*\\b${escapeRe(name)}\\b[^}]*\\})\\s*from`);
+  for (let pass = 0; pass < 2; pass++) {
+    for (const f of candidates) {
+      if (reach.has(f) || !JS.test(f)) continue;
+      const text = fileText(repo, f);
+      if (!importsModule(text, names)) continue;
+      reach.add(f);
+      if (reExport.test(text)) for (const n of moduleNames(f)) if (!names.includes(n)) names.push(n);
+    }
+  }
+  return reach;
+}
+
 export function callers(repo, symbols) {
   return symbols.map(({ name, file, shared = true }) => {
-    const rows = git(repo, ['grep', '-n', '-w', '-I', '--no-color', '-e', name], { allowFail: true }).split(/\r?\n/).filter(Boolean)
+    let rows = git(repo, ['grep', '-n', '-w', '-I', '--no-color', '-e', name], { allowFail: true }).split(/\r?\n/).filter(Boolean)
       .map(l => { const m = /^(.+?):(\d+):(.*)$/.exec(l); return m ? { file: m[1], line: Number(m[2]), text: m[3] } : null; })
-      .filter(r => r && (shared || r.file === file) && defName(r.text) !== name && !/^\s*(?:\/\/|\*|#)/.test(r.text) && !SKIP_PATH.test(r.file));
+      .filter(r => r && (shared || r.file === file) && CODE.test(r.file) && defName(r.text) !== name && !/^\s*(?:\/\/|\*|#)/.test(r.text) && !SKIP_PATH.test(r.file));
+    if (shared && JS.test(file)) {
+      const reach = reachingFiles(repo, file, name, [...new Set(rows.map(r => r.file))]);
+      rows = rows.filter(r => reach.has(r.file));
+    }
     // Two calls on one line are two callers.
     const word = new RegExp('(?<![\\w$])' + name.replace(/[$]/g, '\\$') + '(?![\\w$])', 'g');
     const uses = list => list.reduce((n, r) => n + Math.max(1, (r.text.match(word) || []).length), 0);
@@ -242,6 +334,7 @@ export function roles(size, found) {
 export function sizeTask({ repo, base, files: planned }) {
   const root = path.resolve(git(path.resolve(repo), ['rev-parse', '--show-toplevel']).trim());
   texts.clear();
+  oldTexts.clear();
   const plan = !base;
   const files = plan ? planned.map(n => ({ name: n.replace(/\\/g, '/'), added: [], removed: [], hunks: [] })) : readDiff(root, base);
   const found = signals(files, { plan, repo: root });
