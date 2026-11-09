@@ -4,6 +4,19 @@ Loaded by the `sanad-implementation` stage for substantive implementation. "Sana
 
 Use the saved engine and the actual runtime assignments in [engines.md](engines.md) throughout; child assignments inherit that choice.
 
+## Speed — the same checks, started earlier and side by side (user rule 2026-11-09)
+
+The user: "same results and quality, the difference is only speed". Nothing here drops a check. (TUW-238 took 3 h 10 for a one-PR ticket; about 50 minutes were waits and stops, and planning took 23.)
+- **Timer.** Each stage marks itself: `node ~/.claude/skills/gate/scripts/sanad-timer.mjs mark <notes> "<stage>"`; a wait (for the user, a machine, a stuck run) uses `wait` in place of `mark`. The ship brief ends with the output of `sanad-timer.mjs report <notes>`: minutes per stage, work and waiting apart. When the user asks about time, show that report; never rebuild it from memory.
+- **Test machine ready first.** With `sanad.remoteHost` set, start `bash ~/.claude/scripts/remote/remote-preflight.sh` (add `--db` when the task has real-database tests) in the background as the task starts, beside routing. It reaches the machine by name or address, opens its container app, starts the database and holds it against the idle stop ([remote-host.md](remote-host.md)). `REMOTE-DOWN` → ask the user once, at the start, never in the middle of a proof.
+- **Start side by side.** After the size line, launch the fact checks, the panel (or the one Database seat) and the Test designer in one message. Read the code you will change while they work.
+- **Panel time cap.** Every seat's brief carries: about 4 minutes and 40 tool uses, stop once the position is stable, probes on the test machine (name and address in the brief), no scan of the whole repository. A seat still running at 8 minutes gets one message asking for its report now; still none at 12 → handled as a failed seat (braintrust Step 4), named to the boss, never invented.
+- **One question round.** Collect every open user decision after the boss verdict and ask them together, once, each with a recommended answer. A low-impact choice with a clear default is not asked: take the default and name it on the PR-plan line, where the user can change it. A later question needs new evidence, and says which.
+- **One PR per ticket by default.** Recommend one PR per ticket unless it passes the Step 2 size limits; the PR plan still waits for the user's OK.
+- **Tests beside the code.** Once the designer reports, a `sonnet-worker` writes the tests from its SETUP, CASES and BREAKS (exact brief: test files, cases, setup) while the main session writes the fix; the main session reads and owns that diff. Compile the test project on the test machine before the proof run, so a missing `using` or type costs seconds, not a proof run.
+- **Reviews beside the suites.** When the suites run on the test machine, launch every round-1 reviewer as soon as the proof run passes, on any size; the commit, the sync, `pre-review` and the full suites run there while they read. On this machine alone, the suite still runs first (Step 3.5).
+- **Re-checks.** A fix round's re-check is a fresh whole-diff reviewer (Sonnet) on the changed lines. The risk reviewer (Opus) joins only when a fix touches access, the database or another sensitive boundary (Step 3.5).
+
 ## Step 1 — Impact triage
 
 Reuse the routing assessment from [boss-routing.md](boss-routing.md) (self-route or boss), its evidence and open facts; do not repeat the scan. Two one-liners scope the DB and security checks and, when a panel is convened, decide the auditor seats (Database optimizer when DB impact is not `no`, Security auditor when security impact is `yes`). Relevant checks stay required when no advisors sit:

@@ -88,9 +88,21 @@ function verifiedTreeCheckedOut() {
   verifiedTree = tree;
   return true;
 }
-const treeVerified = r.lastEditPath === '<git>' && verifiedTreeCheckedOut();
-const lastEdit = treeVerified ? r.lastNonGitEdit : r.lastEdit;
-const memo = treeVerified ? ' The checked-out tree is identical to one a passing evidence check verified (' + verifiedTree.slice(0, 12) + '), so the git-only change needs no rerun.' : '';
+// Remote-ref memo. A move to a fetched remote ref (`git checkout --detach FETCH_HEAD`,
+// `git switch --detach origin/staging`) after every other change, in a folder left
+// clean, only shows upstream code: nothing new exists to verify (2026-11-09: reading
+// the newest staging in the main folder asked for a build). Any git error → no memo.
+function remoteRefsOnly() {
+  const moves = Array.isArray(r.remoteCheckouts) ? r.remoteCheckouts : [];
+  if (r.lastEditPath !== '<git-remote>' || !moves.length) return false;
+  return [...new Set(moves.map((m) => m.repo))].every((dir) => !!dir && gitRead(['status', '--porcelain'], dir) === '');
+}
+const remoteOnly = remoteRefsOnly();
+if (remoteOnly && (r.lastNonRemoteEdit ?? -1) === -1) allow();             // no code change of its own this session
+const treeVerified = !remoteOnly && r.lastEditPath === '<git>' && verifiedTreeCheckedOut();
+const lastEdit = remoteOnly ? r.lastNonRemoteEdit : treeVerified ? r.lastNonGitEdit : r.lastEdit;
+const memo = treeVerified ? ' The checked-out tree is identical to one a passing evidence check verified (' + verifiedTree.slice(0, 12) + '), so the git-only change needs no rerun.'
+  : remoteOnly ? ' The last change only moved a clean folder to a fetched remote ref, so it needs no rerun.' : '';
 
 // A failure declared with `PROBE EXPECTED:` (a review probe that proves someone
 // else's bug) does not block the stop; the push guard still counts it.
@@ -116,7 +128,7 @@ if (!failedAfterEdit && !pendingAfterEdit && (r.lastRunningHelper ?? -1) > r.las
 
 // The check that blocks, named, so it is found at once (2026-11-06: hunting an unnamed one cost ~20 min).
 function shown(command) { const c = String(command || '').replace(/\s+/g, ' ').trim(); return c ? (c.length > 160 ? c.slice(0, 157) + '…' : c) : 'unknown'; }
-const file = r.lastEditPath === '<git>' ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
+const file = /^<git(?:-remote)?>$/.test(r.lastEditPath) ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
 
 // A live background check of the current work, and nothing failed: its finish notice brings the next
 // stop back to this gate, so the stop waits instead of blocking. Blocking here only made every status

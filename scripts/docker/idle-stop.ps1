@@ -23,6 +23,14 @@ if ($LASTEXITCODE -ne 0 -or $running.Count -eq 0) { exit 0 }
 
 if (@(Get-Process testhost -ErrorAction SilentlyContinue).Count -gt 0) { exit 0 }
 
+# A task holds the containers between its test runs (remote-preflight.sh --db writes the UTC end time).
+# 2026-11-09 (TUW-238): MySQL was stopped twice while the code between two test runs was written.
+$holdFile = Join-Path $home_ 'docker-hold.txt'
+if (Test-Path $holdFile) {
+  $until = [DateTimeOffset]::MinValue
+  if ([DateTimeOffset]::TryParse((Get-Content $holdFile -Raw).Trim(), [ref]$until) -and $until.UtcDateTime -gt (Get-Date).ToUniversalTime()) { exit 0 }
+}
+
 $cutoff = (Get-Date).ToUniversalTime().AddMinutes(-$IdleMinutes)
 foreach ($id in $running) {
   $started = [DateTimeOffset]::Parse((docker inspect -f '{{.State.StartedAt}}' $id)).UtcDateTime

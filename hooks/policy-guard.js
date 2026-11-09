@@ -321,14 +321,25 @@ function gateCheck(base) {
   // last passing evidence check verified needs no rerun; only earlier real edits count.
   let status = null;
   try { status = gitRaw(['status', '--porcelain']); } catch (e) { status = null; }
-  const treeVerified = treeMatches && r.lastEditPath === '<git>' && status === '';
-  const lastEdit = treeVerified ? r.lastNonGitEdit : r.lastEdit;
+  // Remote-ref memo (as in stop-gate.js): a move to a fetched remote ref after every other
+  // change, in folders left clean, only shows upstream code; earlier changes still count.
+  const moves = Array.isArray(r.remoteCheckouts) ? r.remoteCheckouts : [];
+  const remoteOnly = r.lastEditPath === '<git-remote>' && moves.length > 0 && [...new Set(moves.map((m) => m.repo))].every((dir) => {
+    try { return !!dir && execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000, windowsHide: true }) === ''; } catch (e) { return false; }
+  });
+  const treeVerified = !remoteOnly && treeMatches && r.lastEditPath === '<git>' && status === '';
+  const lastEdit = remoteOnly ? r.lastNonRemoteEdit : treeVerified ? r.lastNonGitEdit : r.lastEdit;
   if (!treeMatches || r.lastBoundCheck <= lastEdit) {
     deny('publishing requires a completed evidence.mjs check of this repository and the exact outgoing tree. Run the final check through skills/gate/scripts/evidence.mjs; bare output or a written PASS cannot replace it. Commit or ignore unrelated untracked files before checking.');
   }
-  const file = r.lastEditPath === '<git>' ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
-  if (r.lastVerify <= lastEdit || r.lastFailedVerify !== -1 || r.lastPendingVerify !== -1) {
-    deny('code has missing, failing, or pending verification' + file + '. Complete the checks, collect their results, then run review and /gate. For a malformed command or lost result that cannot be retried, use the recovery procedure in skills/gate/reference/command-evidence.md; never rerun destructive setup just to clear evidence.');
+  const file = /^<git(?:-remote)?>$/.test(r.lastEditPath) ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
+  // A check stopped with TaskStop is neither a pass nor running: it is cleared by a later pass of
+  // the same command (in the scanner) or a passing evidence receipt of this exact tree after it.
+  const stopped = (r.lastCancelledVerify ?? -1) !== -1 && !(treeMatches && r.lastBoundCheck > r.lastCancelledVerify);
+  if (r.lastVerify <= lastEdit || r.lastFailedVerify !== -1 || r.lastPendingVerify !== -1 || stopped) {
+    deny('code has missing, failing, or pending verification' + file + '. ' +
+      (stopped ? 'A check was stopped before it finished (`' + String(r.lastCancelledVerifyCommand || '').slice(0, 160) + '`): rerun that command to a pass, or run a final evidence.mjs check of this tree after it. ' : '') +
+      'Complete the checks, collect their results, then run review and /gate. For a malformed command or lost result that cannot be retried, use the recovery procedure in skills/gate/reference/command-evidence.md; never rerun destructive setup just to clear evidence.');
   }
   if (r.lastGate <= Math.max(lastEdit, r.lastVerifyResult) || r.lastGateVerdict !== 'PASS') {
     deny('code requires `GATE: PASS` after the last edit and completed verification' + file + '. ' +

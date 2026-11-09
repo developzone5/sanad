@@ -650,3 +650,122 @@ test('git commands sent over ssh change nothing here; a local checkout or a loca
   assert.equal(invoke('stop-gate.js', [...passed, ...bash('local', 'git checkout -q main', 'ok')]).decision, 'block', 'a local checkout still counts');
   assert.equal(invoke('stop-gate.js', [...passed, ...bash('out', 'ssh pc2 "type x" > ' + repo + '/src/App.cs', 'ok')]).decision, 'block', 'a local redirect into a code file still counts');
 });
+
+// 2026-11-09: a background check stopped with TaskStop never sends a finish notice, so it stayed
+// "pending" for good and refused `gh pr create` long after a passing evidence check of the tree.
+const stoppedCheck = (id = 'bgs1', cmd = 'dotnet test Big.sln') => [
+  ...command('launch-' + id, cmd, 'Command running in background with ID: ' + id, false, { backgroundTaskId: id }),
+  call('stop-' + id, 'TaskStop', { task_id: id }),
+  result('stop-' + id, JSON.stringify({ message: 'Successfully stopped task: ' + id + ' (' + cmd + ')', task_id: id, task_type: 'local_bash', command: cmd }), false,
+    { message: 'Successfully stopped task: ' + id + ' (' + cmd + ')', task_id: id, task_type: 'local_bash', command: cmd }),
+];
+test('a check stopped with TaskStop is cancelled: never a pass, never pending; a same-command pass or a later bound receipt clears it', () => {
+  const stop = invoke('stop-gate.js', [...edit(), ...stoppedCheck()]);
+  assert.equal(stop.decision, 'block', 'a stopped check is not a pass');
+  assert.doesNotMatch(JSON.stringify(stop.output), /still running|never collected/, 'a stopped check is not running and owes no TaskOutput');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...stoppedCheck(), ...command('rerun', 'dotnet test Big.sln', 'Passed!  - Failed: 0, Passed: 9')]).decision, 'allow');
+  assert.equal(invoke('policy-guard.js', [...edit(), ...stoppedCheck(), ...command('test', 'dotnet test', 'Passed: 3'), ...boundCheck(), ...claimedPass()]).decision, 'allow', 'a later bound receipt of the outgoing tree clears it');
+  const after = invoke('policy-guard.js', [...checkedCode(), ...stoppedCheck(), ...claimedPass()]);
+  assert.equal(after.decision, 'deny', 'stopped after the last receipt, never rerun: still unverified');
+  assert.match(reviewReason(after), /stopped before it finished.*dotnet test Big\.sln/);
+  assert.equal(invoke('policy-guard.js', [...checkedCode(), ...stoppedCheck(), ...command('rerun', 'dotnet test Big.sln', 'Passed: 9'), ...claimedPass()]).decision, 'allow', 'a later pass of the same command clears it');
+  assert.equal(invoke('policy-guard.js', [...edit(), ...stoppedCheck(), ...command('test', 'dotnet test', 'Passed: 3'), ...boundCheck(), ...claimedPass()], { changedTree: true }).decision, 'deny', 'a receipt of another tree clears nothing');
+  const refused = [...command('launch-bgs1', 'dotnet test Big.sln', 'Command running in background with ID: bgs1', false, { backgroundTaskId: 'bgs1' }), call('stop-bgs1', 'TaskStop', { task_id: 'bgs1' }), result('stop-bgs1', 'No task found with ID: bgs1', true)];
+  waits(invoke('stop-gate.js', [...edit(), ...refused]), 'a TaskStop that failed leaves the check running');
+  const stoppedApi = stoppedCheck('api1', liveCurl);
+  assert.equal(invoke('policy-guard.js', providerProof(stoppedApi), { relationalDiff: true }).decision, 'deny', 'a stopped provider run proves nothing');
+  assert.equal(invoke('policy-guard.js', providerProof([...stoppedApi, ...command('api2', liveCurl, 'ok')]), { relationalDiff: true }).decision, 'allow', 'a later provider pass clears it');
+});
+
+// 2026-11-09: the host now also writes a copy of every API request into the transcript
+// ("api-request-blob"). Its tool_use copies came back as new launches with no result (phantom
+// pending checks), and copies of older results and verdicts could land after a newer edit.
+const requestCopy = (entry) => ({ type: 'api-request-blob', sessionId: 's1', hash: 'h' + JSON.stringify(entry).length, message: entry.message });
+test('request copies in the transcript are not new tool calls, results or verdicts', () => {
+  const [testCall, testResult] = command('t1', 'dotnet test', 'Passed!  - Failed: 0, Passed: 3');
+  assert.equal(invoke('policy-guard.js', [...fullProof(), requestCopy(testCall)]).decision, 'allow', 'a copied launch is not a pending check');
+  assert.equal(invoke('stop-gate.js', [testCall, testResult, ...edit(), requestCopy(testCall), requestCopy(testResult)]).decision, 'block', 'a copied old pass does not verify a newer edit');
+  const regated = [...checkedCode(), ...reviewedPass(), verdict('GATE: PASS'), ...edit(), ...command('t2', 'dotnet test'), ...boundCheck('b2'), ...reviewedPass()];
+  assert.equal(invoke('policy-guard.js', [...regated, requestCopy(verdict('GATE: PASS'))]).decision, 'deny', 'a copied old gate line is not a new gate');
+  assert.equal(invoke('policy-guard.js', [...regated, verdict('GATE: PASS')]).decision, 'allow');
+});
+
+// 2026-11-09: `CHECK RETIRED:` copied from the stop message never matched. The stop message shows the
+// check without its quotes, so reading it again split the quoted ssh command at its `&&` and the sed
+// script at its `;`; `N="C:/…/tuw238"` was shown as `tuw238`. The replacement was written the same way.
+const remoteFull = 'cd C:/repos/example && N="C:/Users/Asus/AppData/Local/Temp/claude/h1/s1/scratchpad/t1" && ssh pc2 "cd /d C:\\repos\\app\\web && C:\\tools\\node20\\node.exe node_modules\\vitest\\vitest.mjs run 2>&1" > "$N/full.log" 2>&1; sed \'s/\\x1b\\[[0-9;]*m//g\' "$N/full.log" | grep -aE "Test Files|Tests  | FAIL " | head -8';
+const remoteRerun = 'ssh pc2 "cd /d C:\\repos\\app\\web && C:\\tools\\node20\\node.exe node_modules\\vitest\\vitest.mjs run src/a.test.ts"';
+test('a retirement copied from the stop message clears the failed check; the replacement must pass after the line', () => {
+  const red = bash('full', remoteFull, ' FAIL  src/a.test.ts > slow case\n Test Files  1 failed | 104 passed (105)\n      Tests  1 failed | 1709 passed (1710)');
+  const blocked = invoke('stop-gate.js', [...edit(), ...red]);
+  assert.equal(blocked.decision, 'block');
+  assert.doesNotMatch(blocked.output.reason, / ; t1 ; /, 'an assignment is shown as written, not as its last path part');
+  const handed = JSON.parse(/CHECK RETIRED: (\{.*\})$/m.exec(blocked.output.reason)[1]);
+  const line = (fields) => verdict('CHECK RETIRED: ' + JSON.stringify({ ...handed, reason: 'a 5000 ms timeout under load in a file this change does not touch', ...fields }));
+  const rerun = bash('rerun', remoteRerun, ' Test Files  1 passed (1)\n      Tests  12 passed (12)');
+  const shownRerun = 'ssh pc2 cd /d C:\\repos\\app\\web && C:\\tools\\node20\\node.exe node_modules\\vitest\\vitest.mjs run src/a.test.ts';
+  for (const replacement of [remoteRerun, shownRerun]) {
+    assert.equal(invoke('stop-gate.js', [...edit(), ...red, line({ replacement }), ...rerun]).decision, 'allow', replacement);
+    assert.equal(invoke('stop-gate.js', [...edit(), ...red, ...rerun, line({ replacement })]).decision, 'block', 'a pass before the line retires nothing: ' + replacement);
+  }
+  assert.equal(invoke('stop-gate.js', [...edit(), ...red, line({ failed: remoteFull, replacement: remoteRerun }), ...rerun]).decision, 'allow', 'the original command text still names the failed check');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...red, line({ replacement: remoteRerun.replace('src/a.test.ts', 'src/b.test.ts') }), ...rerun]).decision, 'block', 'only the named replacement counts');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...red, line({ failed: remoteRerun, replacement: remoteRerun }), ...rerun]).decision, 'block', 'only the named failure is retired');
+});
+test('a bare assignment runs nothing, so it is never a verification', () => {
+  for (const cmd of ['T=C:/tools/vitest', 'J="C:/tools/jest"', 'N=C:/Users/Asus/AppData/Local/Temp/claude/h/s/scratchpad/tsc']) {
+    assert.equal(invoke('stop-gate.js', [...edit(), ...bash('assign', cmd, '')]).decision, 'block', cmd);
+  }
+});
+
+// 2026-11-08: a read-only SQL file in the session scratchpad, changed with `cd <scratchpad> && sed -i … find.sql`,
+// counted as a code edit: the relative name was judged without the folder it was in.
+const scratch = 'C:/Users/Asus/AppData/Local/Temp/claude/b9e0c17b/c3f67ad9/scratchpad/grading-q';
+test('files in the session scratchpad or the temp folder are never code edits, also by cd and a relative name', () => {
+  const built = [...edit(), ...command('build', 'dotnet build', 'Build succeeded.')];
+  for (const cmd of [
+    'cd "' + scratch + '" && sed -i -e \'s/FROM Assignments a/FROM Assignment a/\' find.sql',
+    'cd /c/Users/Asus/AppData/Local/Temp/claude/b9e0c17b/c3f67ad9/scratchpad/q && echo "SELECT 1;" > find.sql',
+    'N="' + scratch + '"; cd "$N" && cp base.sql find.sql',
+    'cd /tmp/q && sed -i s/a/b/ find.sql',
+    'cp ' + repo + '/src/App.cs "$TEMP/App.cs"',
+    'Set-Location "' + scratch + '"; Set-Content -Path query.sql -Value "SELECT 1"',
+  ]) {
+    assert.equal(invoke('stop-gate.js', [...built, ...bash('scratch', cmd)]).decision, 'allow', cmd);
+  }
+  for (const file of [scratch.replace(/\//g, '\\') + '\\find.sql', scratch + '/spec.yaml']) {
+    assert.equal(invoke('stop-gate.js', [...built, call('w', 'Write', { file_path: file }), result('w', 'File created.')]).decision, 'allow', file);
+  }
+  for (const cmd of ['cd C:/repos/example && sed -i s/a/b/ src/App.cs', 'cd "' + scratch + '" && sed -i s/a/b/ ' + repo + '/src/App.cs', 'sed -i s/a/b/ find.sql', 'cd "' + scratch + '" && cd C:/repos/example && sed -i s/a/b/ src/App.cs',
+    'cd "' + scratch + '" && sed -i s/a/b/ ../../../../../../../../repos/example/src/App.cs', 'sed -i s/a/b/ C:/Users/Asus/AppData/Local/Temp/../../../../repos/example/src/App.cs']) {
+    assert.equal(invoke('stop-gate.js', [...built, ...bash('code', cmd)]).decision, 'block', cmd);
+  }
+  assert.equal(invoke('policy-guard.js', [...fullProof(), ...bash('scratch', 'cd "' + scratch + '" && sed -i s/a/b/ find.sql')]).decision, 'allow', 'the push guard agrees');
+});
+
+// 2026-11-09: `git fetch origin staging` then `git checkout --detach FETCH_HEAD` in a clean folder (to read the
+// newest staging code) counted as a code change that needed a build.
+test('a checkout of a fetched remote ref in a clean folder is not a code change; a dirty folder or a later edit still is', () => {
+  const built = [...edit(), ...command('build', 'dotnet build', 'Build succeeded.')];
+  for (const cmd of [
+    'cd C:/repos/main && git checkout --detach FETCH_HEAD 2>&1 | tail -1; git log -1 --oneline',
+    'cd C:/repos/main && git fetch origin staging && git checkout --detach FETCH_HEAD',
+    'git -C C:/repos/main switch --detach origin/staging',
+    'git -C C:/repos/main checkout -q origin/staging',
+    'git -C C:/repos/main checkout refs/remotes/origin/staging',
+  ]) {
+    const r = invoke('stop-gate.js', [...built, ...bash('co', cmd, 'HEAD is now at bd3aab2 fix')], { clean: true });
+    assert.equal(r.decision, 'allow', cmd);
+    assert.ok(r.gitReads.some((g) => g.args[0] === 'status' && String(g.cwd).replace(/\\/g, '/') === 'C:/repos/main'), 'status is read in the changed folder: ' + cmd);
+    assert.equal(invoke('stop-gate.js', [...built, ...bash('co', cmd, 'ok')], { clean: false }).decision, 'block', 'a dirty folder: ' + cmd);
+    assert.equal(invoke('stop-gate.js', [...built, ...bash('co', cmd, 'ok')]).decision, 'block', 'no git answer: ' + cmd);
+  }
+  for (const cmd of ['git -C C:/repos/main checkout feature/other', 'git -C C:/repos/main checkout -b mine origin/staging', 'git -C C:/repos/main checkout origin/staging -- src/App.cs', 'git -C C:/repos/main merge origin/staging', 'git -C C:/repos/main checkout --detach FETCH_HEAD && git -C C:/repos/main stash pop']) {
+    assert.equal(invoke('stop-gate.js', [...built, ...bash('co', cmd, 'ok')], { clean: true }).decision, 'block', cmd);
+  }
+  const fetched = bash('co', 'cd C:/repos/main && git checkout --detach FETCH_HEAD', 'HEAD is now at bd3aab2 fix');
+  assert.equal(invoke('stop-gate.js', [...built, ...fetched, ...edit()], { clean: true }).decision, 'block', 'a later edit still needs verification');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...fetched], { clean: true }).decision, 'block', 'an earlier unverified edit is still owed');
+  assert.equal(invoke('policy-guard.js', [...fullProof(), ...fetched], { clean: true }).decision, 'allow', 'the push guard agrees');
+  assert.equal(invoke('policy-guard.js', [...fullProof(), ...fetched], { clean: false }).decision, 'deny');
+});

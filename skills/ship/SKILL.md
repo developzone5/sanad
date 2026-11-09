@@ -43,6 +43,7 @@ Pushing and opening a PR are **explicit-approval steps, never automatic.** Befor
 - **How I checked it** — what you ran → what you saw (build, tests, the real run).
 - **Risk** — migrations, config/env, deleted code, anything needing a manual step. `none` if nothing.
 - **Not done** — what you didn't touch, guessed, or left for the human.
+- **Time** — when the task kept a timer (Sanad loop "Speed", user rule 2026-11-09): the total line of `node ~/.claude/skills/gate/scripts/sanad-timer.mjs report <notes>` and its longest step, e.g. `52 min (work 44, waiting 8); longest: review 14 min`. The full report goes into the task-metrics line's notes.
 - **Where it goes** — `Pushing <branch> → PR base <staging>. Approve?`
 
 Talk like a peer explaining a change, not a form and not a wall of text. Use the plain words of CLAUDE.md "How you talk": no Sanad labels, each line readable without asking. Then **wait for the yes.** Told to "just push" with the task → still give the what-and-why first, then push. A "yes" to the task is not a "yes" to the push. (`/ship` runs this brief + the draft-PR flow, and still stops for the explicit yes.)

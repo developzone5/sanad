@@ -39,17 +39,40 @@ const CODE_BASENAME = /(^|[/\\])dockerfile[^/\\]*$/i;
 const CODE_JSON = /(^|[/\\])(appsettings[^/\\]*|tsconfig[^/\\]*|launchSettings)\.json$|(^|[/\\])src[/\\].*\.json$/i;
 const MANIFEST_BASENAME = /(^|[/\\])(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|requirements[^/\\]*\.txt|Pipfile(\.lock)?|go\.(mod|sum)|Cargo\.(toml|lock)|Gemfile(\.lock)?|pom\.xml|build\.gradle(\.kts)?|global\.json|docker-compose(\.[^/\\]+)?\.ya?ml|compose(\.[^/\\]+)?\.ya?ml)$/i;
 // Paths that never oblige a verify: Claude's and Codex's own config, memory,
-// scratch, specs, vendored/VCS-internal trees, device files.
-const EXEMPT = /((^|[/\\])\.claude([/\\]|$)|(^|[/\\])\.codex([/\\]|$)|[/\\]memory[/\\]|[/\\]specs[/\\]|AppData[/\\]Local[/\\]Temp|[/\\]node_modules[/\\]|[/\\]\.git[/\\]|^\/tmp\/|^\/dev\/|^\/proc\/)/i;
+// scratch, specs, vendored/VCS-internal trees, device files. The temp folder
+// (the session scratchpad lives in it) is named literally or by its variable.
+const EXEMPT = /((^|[/\\])\.claude([/\\]|$)|(^|[/\\])\.codex([/\\]|$)|[/\\]memory[/\\]|[/\\]specs[/\\]|AppData[/\\]Local[/\\]Temp|[/\\]node_modules[/\\]|[/\\]\.git[/\\]|^\/tmp\/|^\/private\/tmp\/|^\/(?:private\/)?var\/folders\/|^\$\{?(?:TEMP|TMP|TMPDIR)\}?[/\\]|^\$env:(?:TEMP|TMP)[/\\]|^%(?:TEMP|TMP)%[/\\]|^\/dev\/|^\/proc\/)/i;
 
 function stripQuotes(s) { return String(s || '').replace(/^["']+|["']+$/g, ''); }
+
+// A relative name written by a shell command lands in the folder that command is
+// in (its `cd`, else the tool's folder). Judge it there: `cd <scratchpad> && sed -i
+// … find.sql` writes the scratchpad, not the project (2026-11-08). Unknown folder or
+// an unexpanded variable: the name is judged as written (conservative).
+function inFolder(p, base) {
+  const s = stripQuotes(p);
+  if (!base || !s || /^(?:[A-Za-z]:[\\/]|[\\/~$%<])/.test(s)) return s;
+  return String(base).replace(/[\\/]+$/, '') + '/' + s;
+}
+
+// `a/b/../c` is `a/c`: a name that climbs out of an exempt folder is judged where it lands.
+function collapseDots(p) {
+  const parts = [];
+  for (const part of p.split('/')) {
+    if (part === '.') continue;
+    const last = parts[parts.length - 1];
+    if (part === '..' && parts.length && last !== '..' && last !== '' && !/^[A-Za-z]:$/.test(last)) { parts.pop(); continue; }
+    parts.push(part);
+  }
+  return parts.join('/');
+}
 
 function isCodePath(p) {
   p = stripQuotes(p).replace(/[),;]+$/, '');
   if (!p) return false;
   // Claude-managed worktrees contain application code, even though their
   // absolute path starts inside .claude. Apply exemptions within that checkout.
-  p = p.replace(/\\/g, '/').replace(/^.*(?:^|\/)\.claude\/worktrees\/[^/]+\//i, '');
+  p = collapseDots(p.replace(/\\/g, '/')).replace(/^.*(?:^|\/)\.claude\/worktrees\/[^/]+\//i, '');
   if (EXEMPT.test(p)) return false;
   return CODE_EXT.test(p) || CODE_BASENAME.test(p) || CODE_JSON.test(p) || MANIFEST_BASENAME.test(p);
 }
@@ -85,6 +108,9 @@ function verificationWords(seg) {
     .replace(/^(?:sudo|time|env|command|timeout\s+\d+[smh]?)\s+/, '');      // benign wrappers
   const tokens = tokenize(s);
   if (!tokens.length) return [];
+  // A bare assignment (`N="C:/…/tuw238"`) runs nothing: keep it as written. Read as a
+  // program it showed as `tuw238`, and `T=C:/tools/vitest` passed as a test run (2026-11-09).
+  if (tokens.length === 1 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) return tokens;
   const target = nativeVerificationTarget(tokens[0], tokens.slice(1));
   return [target.executable, ...target.args];
 }
@@ -254,7 +280,28 @@ function copyWrites(tokens) {
   return sources.map(s => target + '/' + stripQuotes(s).split(/[\\/]/).pop());
 }
 
-function segmentEditPaths(seg) {
+// A plain move to a fetched remote ref (`git checkout --detach FETCH_HEAD`, `git switch
+// --detach origin/staging`): it shows upstream code and writes none of its own. Any other
+// option (-b, -f, --, a pathspec, git -c, GIT_* variables) is an ordinary git change.
+const REMOTE_REF = /^(?:FETCH_HEAD|(?:refs\/remotes\/)?(?:origin|upstream)\/\S+|refs\/remotes\/\S+)$/;
+function remoteCheckout(seg) {
+  const words = tokenize(String(seg).trim());
+  if (!/^git(?:\.exe)?$/i.test(String(words[0] || '').split(/[\\/]/).pop())) return false;
+  let i = 1;
+  while (words[i] === '-C') i += 2;
+  const sub = String(words[i] || '').toLowerCase();
+  if (sub !== 'checkout' && sub !== 'switch') return false;
+  const refs = [];
+  for (const w of stripRedirects(words.slice(i + 1))) {
+    if (/^(?:-q|--quiet|--detach|--progress|--no-progress)$/.test(w) || (sub === 'switch' && w === '-d')) continue;
+    if (w.startsWith('-')) return false;
+    refs.push(w);
+  }
+  return refs.length === 1 && REMOTE_REF.test(refs[0]);
+}
+
+// base: the folder the segment runs in, for relative names (see inFolder).
+function segmentEditPaths(seg, base) {
   const out = [];
   let m;
   // A command sent over ssh runs on another machine: its git checkout or file writes change nothing
@@ -263,23 +310,24 @@ function segmentEditPaths(seg) {
   if (/^(?:ssh|scp)(?:\.exe)?$/i.test(String(tokenize(seg)[0] || '').split(/[\\/]/).pop())) {
     const unquoted = seg.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
     REDIRECT.lastIndex = 0;
-    while ((m = REDIRECT.exec(unquoted)) !== null) if (isCodePath(m[2])) out.push(stripQuotes(m[2]));
+    while ((m = REDIRECT.exec(unquoted)) !== null) if (isCodePath(inFolder(m[2], base))) out.push(stripQuotes(m[2]));
     return [...new Set(out)];
   }
   REDIRECT.lastIndex = 0;
   while ((m = REDIRECT.exec(seg)) !== null) {
-    if (isCodePath(m[2])) out.push(stripQuotes(m[2]));
+    if (isCodePath(inFolder(m[2], base))) out.push(stripQuotes(m[2]));
   }
   if (WRITE_TOOL.test(seg)) {
     const tokens = tokenize(seg);
     const program = String(tokens[0] || '').split(/[\\/]/).pop().replace(/\.exe$/i, '');
     const written = COPY_PROGRAM.test(program) ? copyWrites(tokens) : null;
-    for (const t of written || tokens) if (isCodePath(t)) out.push(stripQuotes(t));
+    for (const t of written || tokens) if (isCodePath(inFolder(t, base))) out.push(stripQuotes(t));
   }
   if (PATHLESS_WRITE.test(seg)) out.push('<generated>');
-  if (GIT_CONTENT_CHANGE.test(seg)) out.push('<git>');
+  if (GIT_CONTENT_CHANGE.test(seg)) out.push(remoteCheckout(seg) ? '<git-remote>' : '<git>');
   return [...new Set(out)];
 }
+const GIT_CHANGE = /^<git(?:-remote)?>$/;
 
 // Resolve simple variables assigned earlier in the same command (`W=C:/tmp/x; cp a
 // "$W/b.js"`, or PowerShell `$W = "..."`), so a path is judged by its real location.
@@ -294,9 +342,11 @@ function expandVariables(segs) {
   });
 }
 
+// Every git content change is '<git>' here: a move to a remote ref still changes the
+// working tree (check-lock-guard refuses it while a check runs on that tree).
 function shellEditPaths(cmd) {
   const out = [];
-  for (const seg of expandVariables(splitSegments(cmd))) out.push(...segmentEditPaths(seg));
+  for (const seg of expandVariables(splitSegments(cmd))) out.push(...segmentEditPaths(seg).map((p) => GIT_CHANGE.test(p) ? '<git>' : p));
   return [...new Set(out)];
 }
 
@@ -396,6 +446,13 @@ const RETIRE_RE = /^CHECK RETIRED:\s*(\{.*\})\s*$/gm;
 // only — the push guard still counts it as a failure, so nothing ships red.
 const PROBE_RE = /^PROBE EXPECTED:\s*(\{.*\})\s*$/gm;
 function commandIdentity(text) { return identitySegments(splitSegments(String(text || ''))).map(verificationIdentity).join(' ; ').trim().replace(/\s+/g, ' '); }
+// A command named in a CHECK RETIRED / PROBE EXPECTED line: its identity, or the text
+// exactly as written. The stop message shows a check's identity without its quotes, so
+// that shown text, read again as a command, splits a quoted `a && b` or `s/x;y/` into
+// other segments and never matched (2026-11-09). The shown text itself is compared as is.
+function namedCommand(text) {
+  return [commandIdentity(text), String(text || '').trim().replace(/\s+/g, ' ')].filter(Boolean);
+}
 
 function verificationResult(block, entry) {
   const t = entry.toolUseResult || {};
@@ -463,7 +520,7 @@ function taskNotifications(entry) {
 }
 
 function scanTranscript(transcriptPath) {
-  const res = { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastGitRepo: '', passedTrees: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastGate: -1, lastGateVerdict: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
+  const res = { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastGitRepo: '', passedTrees: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
   let lines;
   try { lines = readTranscript(transcriptPath).split('\n'); } catch (e) { return res; }
 
@@ -478,16 +535,22 @@ function scanTranscript(transcriptPath) {
   // launched after the last change works, the stop waits for it instead of asking for a check (2026-11-06).
   const helperCalls = new Map();    // tool_use id -> seq
   const helpersRunning = new Map(); // agent id -> launch seq
-  const retirements = []; // CHECK RETIRED lines: { seq, failed, replacement }
-  const probes = [];      // PROBE EXPECTED lines: { seq, command }
+  const retirements = []; // CHECK RETIRED lines: { seq, failed: [names], replacement: [names] }
+  const probes = [];      // PROBE EXPECTED lines: { seq, command: [names] }
   const passes = [];      // passing verifications: { seq, command }
+  const stopCalls = new Map();      // TaskStop tool_use id -> background task id
+  const remoteCheckouts = [];       // moves to a fetched remote ref: { seq, repo }
   let seq = 0;
 
   for (const l of lines) {
     if (!MAYBE_LINE.test(l)) continue;
+    // The host also writes a copy of each API request (`api-request-blob`): old tool calls,
+    // results and verdicts again, out of order. Copies are not events (2026-11-09: copied
+    // launches stayed "pending" and refused a PR; a copied old pass could follow a newer edit).
+    if (l.startsWith('{"type":"api-request')) continue;
     let entry = null;
     try { entry = JSON.parse(l); } catch (e) { continue; }
-    if (!entry) continue;
+    if (!entry || /^api-request/.test(String(entry.type || ''))) continue;
     const notes = taskNotifications(entry);
     if (notes.length > 0) {
       for (const note of notes) {
@@ -531,7 +594,7 @@ function scanTranscript(transcriptPath) {
           try {
             const r = JSON.parse(m[1]);
             if ([r.failed, r.replacement, r.reason].every((v) => typeof v === 'string' && v.trim())) {
-              retirements.push({ seq: seq + (m.index + 1) / (plain.length + 1), failed: commandIdentity(r.failed), replacement: commandIdentity(r.replacement) });
+              retirements.push({ seq: seq + (m.index + 1) / (plain.length + 1), failed: namedCommand(r.failed), replacement: namedCommand(r.replacement) });
             }
           } catch (e) { /* a malformed retirement retires nothing */ }
         }
@@ -539,7 +602,7 @@ function scanTranscript(transcriptPath) {
           try {
             const p = JSON.parse(m[1]);
             if ([p.command, p.reason].every((v) => typeof v === 'string' && v.trim())) {
-              probes.push({ seq: seq + (m.index + 1) / (plain.length + 1), command: commandIdentity(p.command) });
+              probes.push({ seq: seq + (m.index + 1) / (plain.length + 1), command: namedCommand(p.command) });
             }
           } catch (e) { /* a malformed probe declaration covers nothing */ }
         }
@@ -547,10 +610,10 @@ function scanTranscript(transcriptPath) {
       }
 
       if (blk.type === 'tool_use' && blk.input && typeof blk.input === 'object') {
-        const rec = { editSeq: -1, editPath: '', nonGitEditSeq: -1, verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background: blk.input.run_in_background === true };
+        const rec = { editSeq: -1, editPath: '', nonGitEditSeq: -1, nonRemoteEditSeq: -1, remotes: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background: blk.input.run_in_background === true };
         if (EDIT_TOOLS.has(blk.name)) {
           const p = String(blk.input.file_path || blk.input.notebook_path || '');
-          if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; }
+          if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; rec.nonRemoteEditSeq = seq; }
         } else if (SHELL_TOOLS.has(blk.name)) {
           const segs = splitSegments(String(blk.input.command || ''));
           // A failed compound command must be retried as a whole; a success in
@@ -575,16 +638,21 @@ function scanTranscript(transcriptPath) {
             if (segmentIsVerify(segs[i])) rec.verifySeq = frac;
             if (segs.length === 1 && segmentIsProvider(segs[i])) rec.providerSeq = frac;
             if (segs.length === 1 && /^git(?:\.exe)?\s+range-diff\s/i.test(String(segs[i]).trim())) rec.rangeDiffSeq = frac;
-            const paths = segmentEditPaths(expanded[i]).filter((p) => !(stashBundle && p === '<git>' && /\bstash\b/i.test(segs[i])));
+            const paths = segmentEditPaths(expanded[i], cdDir).filter((p) => !(stashBundle && p === '<git>' && /\bstash\b/i.test(segs[i])));
             if (paths.length) {
               rec.editSeq = frac; rec.editPath = paths[0];
-              if (paths.some((p) => p !== '<git>')) rec.nonGitEditSeq = frac;
-              if (paths[0] === '<git>') {
+              if (paths.some((p) => !GIT_CHANGE.test(p))) rec.nonGitEditSeq = frac;
+              if (paths.some((p) => p !== '<git-remote>')) rec.nonRemoteEditSeq = frac;
+              if (paths.some((p) => GIT_CHANGE.test(p))) {
                 const dashC = /\bgit(?:\.exe)?\s+-C\s+("[^"]+"|'[^']+'|\S+)/i.exec(String(expanded[i]));
-                rec.gitRepo = dashC ? stripQuotes(dashC[1]) : cdDir;
+                const repo = dashC ? stripQuotes(dashC[1]) : cdDir;
+                if (GIT_CHANGE.test(paths[0])) rec.gitRepo = repo;
+                if (paths.includes('<git-remote>')) rec.remotes.push({ seq: frac, repo });
               }
             }
           }
+        } else if ((blk.name === 'TaskStop' || blk.name === 'KillShell') && background.has(String(blk.input.task_id || blk.input.shell_id || ''))) {
+          stopCalls.set(blk.id, String(blk.input.task_id || blk.input.shell_id));   // judged when its result arrives
         } else if (blk.name === 'Agent' && REVIEWER_PROMPT.test(String(blk.input.prompt || ''))) {
           reviewerCalls.set(blk.id, seq);                  // agent id arrives with the result
         } else if (blk.name === 'SendMessage' && reviewerAgents.has(String(blk.input.to || ''))) {
@@ -616,12 +684,34 @@ function scanTranscript(transcriptPath) {
         continue;
       }
 
+      if (blk.type === 'tool_result' && blk.tool_use_id && stopCalls.has(blk.tool_use_id)) {
+        const id = stopCalls.get(blk.tool_use_id);
+        stopCalls.delete(blk.tool_use_id);
+        const said = String((entry.toolUseResult || {}).message || '') + '\n' + resultText(blk, entry);
+        if (blk.is_error !== true && !userRejected(blk, entry) && background.has(id) &&
+            /\bsuccessfully\s+(?:stopped|killed|terminated|cancell?ed)\b/i.test(said)) cancel(id);
+        continue;
+      }
+
       if (blk.type === 'tool_result' && blk.tool_use_id && pending.has(blk.tool_use_id)) {
         const rec = pending.get(blk.tool_use_id);
         pending.delete(blk.tool_use_id);
         settle(rec, blk, entry);
       }
     }
+  }
+
+  // A background check stopped with TaskStop never reports back: it is cancelled, neither a
+  // pass nor still running (2026-11-09: two stopped checks stayed "pending" for good and refused
+  // a PR). Only a later pass of the same command clears it here; the push guard also accepts a
+  // later passing evidence receipt of the outgoing tree (lastCancelledVerify).
+  function cancel(id) {
+    const rec = background.get(id);
+    background.delete(id); finishedUncollected.delete(id);
+    const state = verificationStates.get(rec.verifyKey);
+    if (rec.verifySeq !== -1 && state && state.outcome === 'pending' && state.seq === rec.verifySeq) verificationStates.set(rec.verifyKey, { ...state, outcome: 'cancelled' });
+    const provider = providerStates.get(rec.verifyKey);
+    if (rec.providerSeq !== -1 && provider && provider.outcome === 'pending' && provider.seq === rec.providerSeq) providerStates.set(rec.verifyKey, { ...provider, outcome: 'cancelled' });
   }
 
   // Credit a collected result: a tool_result, or a background task's completion.
@@ -638,9 +728,12 @@ function scanTranscript(transcriptPath) {
     if (rec.editSeq !== -1 && !(isErr && rec.verifySeq === -1)) {
       // An Edit/Write that errored changed nothing; a shell segment that
       // wrote a file usually did, even if a later segment failed.
-      if (rec.editSeq > res.lastEdit) { res.lastEdit = rec.editSeq; res.lastEditPath = rec.editPath; res.lastGitRepo = rec.editPath === '<git>' ? rec.gitRepo || '' : ''; }
+      if (rec.editSeq > res.lastEdit) { res.lastEdit = rec.editSeq; res.lastEditPath = rec.editPath; res.lastGitRepo = GIT_CHANGE.test(rec.editPath) ? rec.gitRepo || '' : ''; }
       // The last edit that was not a git merge/switch/pull: the same-tree memo falls back to it.
       if ((rec.nonGitEditSeq ?? -1) > res.lastNonGitEdit) res.lastNonGitEdit = rec.nonGitEditSeq;
+      // The last change that was not a move to a fetched remote ref, and those moves themselves.
+      if ((rec.nonRemoteEditSeq ?? -1) > res.lastNonRemoteEdit) res.lastNonRemoteEdit = rec.nonRemoteEditSeq;
+      for (const c of rec.remotes || []) remoteCheckouts.push(c);
     }
     if (rec.verifySeq !== -1) {
       const receipt = rec.evidence ? checkReceipt(blk, entry) : null;
@@ -672,9 +765,10 @@ function scanTranscript(transcriptPath) {
       }
     }
   }
-  const retired = (state) => retirements.some((r) => r.failed === state.command && r.seq > state.seq &&
-    passes.some((p) => p.command === r.replacement && p.seq > r.seq));
-  const probed = (state) => probes.some((p) => p.command === state.command && p.seq > state.seq);
+  // The same failed check is retired only by its named replacement passing AFTER the line.
+  const retired = (state) => retirements.some((r) => r.failed.includes(state.command) && r.seq > state.seq &&
+    passes.some((p) => r.replacement.includes(p.command) && p.seq > r.seq));
+  const probed = (state) => probes.some((p) => p.command.includes(state.command) && p.seq > state.seq);
   for (const state of verificationStates.values()) {
     const { seq, outcome } = state;
     if (outcome === 'failed' && !retired(state)) {
@@ -683,11 +777,17 @@ function scanTranscript(transcriptPath) {
       else if (seq > res.lastFailedVerifyStop) { res.lastFailedVerifyStop = seq; res.lastFailedVerifyStopCommand = state.command; }
     }
     if (outcome === 'pending') res.lastPendingVerify = Math.max(res.lastPendingVerify, seq);
+    if (outcome === 'cancelled' && seq > res.lastCancelledVerify && !passes.some((p) => p.command === state.command && p.seq > seq)) {
+      res.lastCancelledVerify = seq; res.lastCancelledVerifyCommand = state.command;
+    }
   }
   for (const { seq, outcome } of providerStates.values()) {
     if (outcome === 'failed') res.lastFailedProvider = Math.max(res.lastFailedProvider, seq);
-    if (outcome === 'pending') res.lastPendingProvider = Math.max(res.lastPendingProvider, seq);
+    // A stopped provider run proves nothing: it stays owed until a later provider run passes.
+    if (outcome === 'pending' || (outcome === 'cancelled' && res.lastProviderRun <= seq)) res.lastPendingProvider = Math.max(res.lastPendingProvider, seq);
   }
+  // Moves to a fetched remote ref after every other change: the gates check their folders are clean.
+  res.remoteCheckouts = remoteCheckouts.filter((c) => c.seq > res.lastNonRemoteEdit);
   // At a stop, only a background command still known to be running holds it (see below); a launch
   // that was never matched to its finish does not (2026-11-06).
   res.lastPendingVerifyStop = -1;
