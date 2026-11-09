@@ -14,6 +14,8 @@ Every request still enters Sanad. Teaching, explanations, lesson status, checkin
 
 The executor gathers a compact factual packet once: original request, directly affected source and callers, intended behavior, known DB/security/shared-state boundaries, material uncertainty and existing valid evidence. Read enough to support routing; no full-repository scan, test run or panel solely to classify the request. Reuse this packet in later stages.
 
+While the boss reads, start what every route needs anyway (user rule 2026-11-09, loop.md "Speed"): the test-machine preflight, the ticket lines file and the readers search. They never wait for the route.
+
 Launch one separate read-only Boss using the engine map (Claude `routing-boss`, Fable 5.1 / xhigh; Codex `sanad-boss`, GPT-6 Astra / xhigh), verifying the model and effort in actual run metadata. The parent retains its engine's routing effort; do not change global effort. Use the existing host agent mechanism and preserve the returned agent/session ID. The boss may inspect targeted cited source or request one missing fact that changes routing. It does not implement, run a second audit or spawn specialists during this assessment. A named material unknown is a reason for the braintrust route, not an unbounded discovery loop. Missing requested behavior still needs user clarification.
 
 Return at most four short lines:
