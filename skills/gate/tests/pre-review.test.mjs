@@ -43,6 +43,29 @@ test('every check passes: lint, types, size and the project check, with one summ
   assert.match(r.stdout, /MECHANICAL: 0 bugs/, 'the project check got --repo');
 });
 
+// 2026-11-10 (PR #767): two C# files from an earlier commit failed CI's format check after the push.
+test('changed C# files get the project CSharpier check, from the folder whose tool manifest lists it', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, git, write } = fixture();
+  write('Api/.config/dotnet-tools.json', '{"tools":{"csharpier":{"version":"1.0.0","commands":["csharpier"]}}}\n');
+  write('Api/Svc/A.cs', 'class A {}\n');
+  write('Tools/B.cs', 'class B {}\n');
+  git('add', '-A'); git('commit', '-qm', 'base 2'); git('branch', '-f', 'base');
+  write('Api/Svc/A.cs', 'class A { }\n');
+  write('Api/Svc/New.cs', 'class N {}\n');
+  write('Tools/B.cs', 'class B { }\n');
+  const { checks } = planChecks({ repo, base: 'base', node: process.execPath });
+  const format = checks.filter(c => c.name.startsWith('format'));
+  assert.equal(format.length, 1, 'one check for the folder with the manifest; a .cs file outside it gets none');
+  assert.equal(format[0].name, 'format Api (2 C# files)');
+  assert.equal(format[0].cmd, 'dotnet');
+  assert.deepEqual(format[0].args, ['csharpier', 'check', 'Svc/A.cs', 'Svc/New.cs']);
+  assert.equal(path.resolve(format[0].cwd), path.resolve(repo, 'Api'));
+  write('Api/Svc/A.cs', 'class A {}\n'); write('Api/Svc/New.cs', ''); fs.rmSync(path.join(repo, 'Api/Svc/New.cs'));
+  write('Tools/B.cs', 'class B {}\n');
+  assert.equal(planChecks({ repo, base: 'base', node: process.execPath }).checks.filter(c => c.name.startsWith('format')).length, 0, 'no changed C# file, no format check');
+});
+
 test('a failing check fails the run and shows its output; the others still run', () => {
   const { repo, write } = fixture();
   write('web/src/a.ts', 'export const a = "BAD";\n');

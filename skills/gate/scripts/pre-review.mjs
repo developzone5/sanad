@@ -7,6 +7,8 @@
 // always on the git top level of --repo (default: the current folder):
 //   lint        ESLint on the changed script files of each package that has it
 //   types       tsc --noEmit on each package with a changed .ts/.tsx file (tsconfig.app.json first)
+//   format      `dotnet csharpier check` on the changed .cs files, from the folder whose tool manifest
+//               (.config/dotnet-tools.json) lists CSharpier: the project's own version, CI's command
 //   ticket      check-ticket-lines.mjs, when --lines is given
 //   asserts     check-test-asserts.mjs: new test lines — a range where the exact value is known, a "nothing
 //               happens" check no break run proved, and (with --check) a check line with no [Cn] test
@@ -51,6 +53,18 @@ function packageOf(repo, file) {
   return null;
 }
 
+// The nearest folder above a file whose .config/dotnet-tools.json lists CSharpier, up to the repo root.
+function csharpierRootOf(repo, file) {
+  for (let dir = path.dirname(path.join(repo, file)); dir.length >= repo.length; dir = path.dirname(dir)) {
+    try {
+      const manifest = path.join(dir, '.config', 'dotnet-tools.json');
+      if (fs.existsSync(manifest) && /csharpier/i.test(fs.readFileSync(manifest, 'utf8'))) return dir;
+    } catch { /* unreadable manifest: keep looking up */ }
+    if (dir === repo) break;
+  }
+  return null;
+}
+
 export function planChecks({ repo, base, was, lines, check, node }) {
   const files = changedFiles(repo, base);
   const checks = [];
@@ -72,6 +86,20 @@ export function planChecks({ repo, base, was, lines, check, node }) {
       const info = path.join(os.tmpdir(), 'sanad-tsc-' + crypto.createHash('sha1').update(pkg.toLowerCase() + config).digest('hex').slice(0, 12) + '.tsbuildinfo');
       checks.push({ name: `types ${name}`, cmd: node, args: [tsc, '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', info], cwd: pkg });
     }
+  }
+  // 2026-11-10 (PR #767): CI's format check failed on two C# files that came in an earlier commit. The commit
+  // guard checks only the files staged right then, and the user's own push runs no hook. Every changed .cs
+  // file is checked here, with the same command CI runs.
+  const byTool = new Map();
+  for (const f of files.filter(f => /\.cs$/i.test(f))) {
+    const dir = csharpierRootOf(repo, f);
+    if (!dir) continue;
+    if (!byTool.has(dir)) byTool.set(dir, []);
+    byTool.get(dir).push(path.relative(dir, path.join(repo, f)).replace(/\\/g, '/'));
+  }
+  for (const [dir, list] of byTool) {
+    const name = path.relative(repo, dir).replace(/\\/g, '/') || '.';
+    checks.push({ name: `format ${name} (${list.length} C# file${list.length === 1 ? '' : 's'})`, cmd: 'dotnet', args: ['csharpier', 'check', ...list], cwd: dir });
   }
   if (lines) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
   checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : [])], cwd: repo });
