@@ -88,6 +88,58 @@ test('more than 10 callers of a changed function is big', () => {
   assert.ok(r.signals.callersMany);
 });
 
+// 2026-11-09: a two-line exam form change was sized "big": 35 hits of `buildSchema` were other
+// pages' own local functions of that name, and some were words in docs.
+test('a same-named function in a file that does not import the changed one, and a doc, are not callers', () => {
+  const lib = 'export function buildSchema(t) {\n  return t;\n}\n';
+  const others = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`src/page${i}.tsx`, 'function buildSchema() { return 1; }\nexport const x = buildSchema();\n']));
+  const user = "import { buildSchema } from './lib';\nexport const s = buildSchema('t');\n";
+  const doc = 'buildSchema buildSchema buildSchema buildSchema buildSchema buildSchema buildSchema buildSchema buildSchema buildSchema buildSchema\n';
+  const repo = change({ 'src/lib.ts': lib, 'src/user.tsx': user, 'docs/plan.md': doc, ...others }, { 'src/lib.ts': lib.replace('return t;', 'return t + 1;') });
+  const r = size(repo);
+  const row = r.callers.find(c => c.name === 'buildSchema');
+  assert.equal(row.count, 2, 'the import line and one use in src/user.tsx: ' + JSON.stringify(row));
+  assert.equal(r.signals.callersMany, undefined);
+  assert.equal(r.size, 'small');
+});
+
+// 2026-11-09 (TUW-239): rewording a JSX comment in a dialog with eleven callers sized a style fix "big".
+test('a change to comments only changes no function; a code line in the same place still does', () => {
+  const dialog = [
+    "export default function Dialog() {",
+    "  return (",
+    "    <div>",
+    "      {/* The tools show under the text",
+    "          while the teacher is in it. */}",
+    "      <p>text</p>",
+    "    </div>",
+    "  );",
+    "}",
+    "",
+  ].join('\n');
+  const users = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`src/u${i}.tsx`, "import Dialog from './Dialog';\nexport const x = <Dialog />;\n"]));
+  const commentOnly = size(change({ 'src/Dialog.tsx': dialog, ...users }, { 'src/Dialog.tsx': dialog.replace('show under the text', 'show above the text').replace('while the teacher is in it.', 'always.') }));
+  assert.equal(commentOnly.callers.find(c => c.name === 'Dialog'), undefined, JSON.stringify(commentOnly.callers));
+  assert.equal(commentOnly.signals.callersMany, undefined);
+  const codeToo = size(change({ 'src/Dialog.tsx': dialog, ...users }, { 'src/Dialog.tsx': dialog.replace('<p>text</p>', '<p>other</p>') }));
+  assert.ok(codeToo.signals.callersMany, JSON.stringify(codeToo.callers));
+});
+
+test('codeLines tells comment-only lines from code', async () => {
+  const { codeLines } = await import('../scripts/size-check.mjs');
+  assert.deepEqual(codeLines('a();\n// c\n/* b\n still */\n{/* x */}\nx = 1; // y\n\n  {/* open\n close */}'),
+    [true, false, false, false, false, true, false, false, false]);
+});
+
+test('importers through a re-export still count, so many real callers stay big', () => {
+  const lib = 'export function formatDate(d) {\n  return d;\n}\n';
+  const barrel = "export { formatDate } from './lib';\n";
+  const users = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`src/u${i}.ts`, "import { formatDate } from './barrel';\nformatDate(1);\n"]));
+  const r = size(change({ 'src/lib.ts': lib, 'src/barrel.ts': barrel, ...users }, { 'src/lib.ts': lib.replace('return d;', 'return String(d);') }));
+  assert.ok(r.signals.callersMany, JSON.stringify(r.callers));
+  assert.equal(r.size, 'big');
+});
+
 test('a migration, server access rules, server file handling and a new package are big, each with its seat', () => {
   const schema = size(change({}, { 'Api/Migrations/20260101_AddX.cs': 'public partial class AddX : Migration { protected override void Up(MigrationBuilder migrationBuilder) { } }\n' }));
   assert.equal(schema.size, 'big');

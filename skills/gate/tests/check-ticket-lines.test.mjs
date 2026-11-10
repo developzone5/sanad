@@ -48,6 +48,19 @@ test('a line quoted in a test name or a wrapped comment above a test is covered;
   assert.match(r.out, /src\/list\.test\.tsx:4\b/);
 });
 
+// 2026-11-09: lines files number each line ("T6: …") but a test may quote only the line's own words.
+test('a numbered line is covered by a test that quotes only its words', () => {
+  const { repo } = fixture({
+    'src/box.test.ts': [
+      '// "The markdown options should appear at the top of the text area"',
+      "it('[C1] keeps the toolbar first', () => {});",
+    ].join('\n'),
+  });
+  const r = run(repo, 'T6: The markdown options should appear at the top of the text area\n');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /1 of 1 covered/);
+});
+
 test('a line with no quoting test fails, and so does a quote far from any test or in a non-test file', () => {
   const far = ['// Search matches the homework title.', ...Array(14).fill('const x = 1;'), "it('later', () => {});"].join('\n');
   const { repo } = fixture({ 'src/far.test.ts': far, 'src/page.tsx': "// Section filter resets to all sections\nit('not a test file', () => {});" });

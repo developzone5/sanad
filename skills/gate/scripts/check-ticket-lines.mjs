@@ -70,8 +70,11 @@ export function findQuote(file, needle) {
 }
 
 export function cover(line, files) {
-  const whole = normalize(line).replace(/[.!?؟:;,]+$/, '');
-  for (const f of files) { const at = findQuote(f, whole); if (at) return [{ file: f.name, line: at, changed: f.changed }]; }
+  // The line as written ("T6: The options …"), or without its number (a test quoting only the text, 2026-11-09).
+  const wholes = [...new Set([line, String(line).replace(/^\s*T\d+\s*:\s*/i, '')])].map(l => normalize(l).replace(/[.!?؟:;,]+$/, ''));
+  for (const whole of wholes) {
+    for (const f of files) { const at = findQuote(f, whole); if (at) return [{ file: f.name, line: at, changed: f.changed }]; }
+  }
   const parts = sentences(line);
   if (parts.length < 2) return null;
   const hits = [];

@@ -453,6 +453,10 @@ test('--show-remote: the env file (flag, or git config sanad.remoteTestEnv) and 
   assert.match(fromFlag.stdout, /--test-env D:\/other\.env /);
   assert.match(fromFlag.stdout, /--timeout-min 5 /);
   assert.doesNotMatch(fromFlag.stdout, /eq\.env/);
+  // 2026-11-09: the repository default is a database connection, so a frontend run does not get it.
+  const vitest = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--show-remote', '--', 'node', 'node_modules/vitest/vitest.mjs', 'run', 'a.test.ts']);
+  assert.equal(vitest.status, 0, vitest.stdout);
+  assert.doesNotMatch(vitest.stdout, /--test-env/);
 });
 
 // 2026-11-09: nothing limited a run's time, so a hang was silent. Each run now has a limit (15 minutes

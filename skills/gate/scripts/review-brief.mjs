@@ -40,11 +40,12 @@ import { readLines } from './check-ticket-lines.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-// Each Check line's sources: "[T1, T3]", "[change]", "[rule: both languages]" or a mix, at its start.
+// Each Check line's sources: "[T1, T3]", "[change]", "[rule: both languages]" or a mix, at its start — in one
+// bracket or several ("[T1] [T2] …", 2026-11-09: only the first bracket was read, so steps needed a line each).
 export function checkSources(line) {
-  const m = /^\[([^\]]+)\]/.exec(String(line).trim());
-  if (!m) return null;
-  const parts = m[1].split(',').map(p => p.trim()).filter(Boolean);
+  const lead = /^(?:\[[^\]]+\]\s*)+/.exec(String(line).trim());
+  if (!lead) return null;
+  const parts = [...lead[0].matchAll(/\[([^\]]+)\]/g)].flatMap(m => m[1].split(',')).map(p => p.trim()).filter(Boolean);
   return parts.every(p => /^T\d+$/i.test(p) || /^change$/i.test(p) || /^rule:\s*\S/i.test(p)) ? parts : null;
 }
 

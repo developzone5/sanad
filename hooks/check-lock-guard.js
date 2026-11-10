@@ -39,6 +39,9 @@ try {
   input = JSON.parse(s.trim() || '{}');
 } catch (e) { allow(); }
 
+// The first tool call after a stop ends the task timer's idle wait (lib/timer-idle.cjs).
+try { require('./lib/timer-idle.cjs').resume(input); } catch (e) { /* the timer never blocks a tool call */ }
+
 // Same folder as checkLockDir() in evidence.mjs.
 const LOCK_DIR = process.env.SANAD_CHECK_LOCK_DIR || path.join(os.homedir(), '.claude', 'state', 'check-locks');
 

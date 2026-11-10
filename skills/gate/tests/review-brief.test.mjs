@@ -14,6 +14,9 @@ test('every ticket line needs a Check line, and every Check line names its sourc
   const good = ['[T1, T2] Once after Save, Next and Publish', '[T2] Once before saving', '[T3] Nothing saved without a type', '[rule: both languages] Arabic and English', '[change] Still announced'];
   assert.deepEqual(coverageProblems(ticketLines, good), []);
   assert.deepEqual(checkSources('[T1, change] x'), ['T1', 'change']);
+  // 2026-11-09: separate brackets were cut to the first one, so each step needed its own line.
+  assert.deepEqual(checkSources('[T1] [T2] [T3] the path'), ['T1', 'T2', 'T3']);
+  assert.deepEqual(coverageProblems(['a b c', 'd e f'], ['[T1] [T2] both']), []);
   assert.equal(checkSources('no tag here'), null);
   assert.equal(checkSources('[maybe] x'), null);
   const bad = coverageProblems(ticketLines, ['[T2] Once before saving', 'untagged line', '[T9] beyond the ticket']);
