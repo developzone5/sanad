@@ -14,19 +14,19 @@ These assignments control all Sanad roles. Claude retains its existing setup. **
 
 | Role | Claude | Codex |
 |---|---|---|
-| Main executor | existing Claude session; Opus 5.5 for behavior code | current Codex-family session / xhigh; GPT-6.1 Sol for a new launch |
-| Boss / extra gap reviewer | `routing-boss`: Fable 5.1 / xhigh | `sanad-boss`: `gpt-6-astra` / xhigh |
-| Pass A, risk files | `independent-reviewer`: Opus 5.5 / xhigh | `sanad-risk-reviewer`: `gpt-6-astra` / xhigh |
-| Pass B, whole diff and re-check | `routine-reviewer`: Sonnet 5.5 / xhigh | `sanad-reviewer`: `gpt-6.1-sol` / xhigh |
-| Deep-risk expert (Architect, Skeptic, Database, Security, Authenticity, Client state, added domain) | `braintrust-expert`: Opus 5.5 / xhigh | `sanad-expert`: `gpt-6-astra` / xhigh |
-| Practical expert (Pragmatist, Performance, Product, Test designer) | `braintrust-expert-sonnet`: Sonnet 5.5 / xhigh | `sanad-practical-expert`: `gpt-6.1-sol` / xhigh |
-| Mechanical worker / test-only items / narrow fact or evidence chore | `sonnet-worker`: Sonnet 5.5 / medium | `sanad-worker`: `gpt-6-luna` / xhigh |
+| Main executor | existing Claude session; Opus (newest) for behavior code | current Codex-family session / xhigh; GPT-6.1 Sol for a new launch |
+| Boss / extra gap reviewer | `routing-boss`: Fable (newest) / xhigh | `sanad-boss`: `gpt-6-astra` / xhigh |
+| Pass A, risk files | `independent-reviewer`: Opus (newest) / xhigh | `sanad-risk-reviewer`: `gpt-6-astra` / xhigh |
+| Pass B, whole diff and re-check | `routine-reviewer`: Sonnet (newest) / xhigh | `sanad-reviewer`: `gpt-6.1-sol` / xhigh |
+| Deep-risk expert (Architect, Skeptic, Database, Security, Authenticity, Client state, added domain) | `braintrust-expert`: Opus (newest) / xhigh | `sanad-expert`: `gpt-6-astra` / xhigh |
+| Practical expert (Pragmatist, Performance, Product, Test designer) | `braintrust-expert-sonnet`: Sonnet (newest) / xhigh | `sanad-practical-expert`: `gpt-6.1-sol` / xhigh |
+| Mechanical worker / test-only items / narrow fact or evidence chore | `sonnet-worker`: Sonnet (newest) / medium | `sanad-worker`: `gpt-6-luna` / xhigh |
 
 Bosses, experts and reviewers are read-only and do not spawn children. A worker receives exact files/commands and returns its diff/evidence to the main executor; it never owns behavior changes or publishing. All existing scope, independence, two-pass review, security, verification and publishing controls still apply.
 
 ## Activate the real runtime
 
-- **Claude host + Claude choice:** use the existing pinned `~/.claude/agents/*.md` types. Preserve Claude's medium routing/teaching and xhigh implementation effort. Verify the actual model in run metadata. If an alias resolves to another version, use the requested explicit ID (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-1`).
+- **Claude host + Claude choice:** use the existing pinned `~/.claude/agents/*.md` types. Preserve Claude's medium routing/teaching and xhigh implementation effort. Verify the actual model in run metadata. Every Claude role names a family alias — `fable`, `opus`, `sonnet` — which always means the newest model of that family, here and on the remote (agent files, `orca-launch.sh`); no file names a Claude version (user rule 2026-11-10: "for all models to use latest model"). Codex has no such alias: its model names live only in `~/.codex/config.toml` and `~/.codex/agents/*.toml`, and launch lines never pass `-m`; a new Codex model is one edit there.
 - **Codex host + Codex choice:** use the pinned `~/.codex/agents/sanad-*.toml` roles where supported. If the available native spawn tool takes a model rather than an agent type, read that role file, pass its instructions, explicit `model` and `reasoning_effort: "xhigh"`, and use fresh context (`fork_turns: "none"`). Include the compact assignment/evidence pack, not the conversation. Do not rely on the selected model's default effort. Keep the actual agent ID and completion result. Read-only roles use a read-only sandbox when supported; otherwise their assignment forbids edits and state-changing commands, and the host permission boundary remains in force. Do not widen it.
 - **Choice differs from the current host:** a prompt cannot change providers or turn Claude's native Agent tool into Codex. Hand off the whole task to the selected engine before implementation or delegation. Use a supported native handoff if available; otherwise prepare a small handoff file containing the verbatim ask, selected engine, workspace, current stage, approved decisions and evidence paths. Give the user the verified CLI launch command in the same workspace, with a prompt to read that file. New Codex launches use `codex -m gpt-6.1-sol -c 'model_reasoning_effort="xhigh"'`; Claude launches use `claude`. Append the handoff prompt as one safely quoted argument. Do not spawn a hidden autonomous implementation session or leave two executors editing the same files. State that the handoff is pending until the chosen engine actually starts.
 

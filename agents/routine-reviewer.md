@@ -1,6 +1,6 @@
 ---
 name: routine-reviewer
-description: Sanad Step 3.5 Pass B reviewer and every re-check after a fix. Read-only Sonnet 5.5 at xhigh effort that checks the whole diff (backend, frontend, i18n, tests, comments) against Done means and the coverage checklist, and escalates any sensitive boundary to the Opus independent-reviewer. Launch with a prompt whose first words are "You are the independent reviewer".
+description: Sanad Step 3.5 Pass B reviewer and every re-check after a fix. Read-only Sonnet (newest) at xhigh effort that checks the whole diff (backend, frontend, i18n, tests, comments) against Done means and the coverage checklist, and escalates any sensitive boundary to the Opus independent-reviewer. Launch with a prompt whose first words are "You are the independent reviewer".
 model: sonnet
 effort: xhigh
 disallowedTools: Write, Edit, NotebookEdit, Agent

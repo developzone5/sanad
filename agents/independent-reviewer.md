@@ -1,6 +1,6 @@
 ---
 name: independent-reviewer
-description: Sanad Step 3.5 Pass A reviewer. Read-only Opus 5.5 at xhigh effort that traces a list of concrete inputs through the risk files of a finished code change (auth/tenant, DB/concurrency, money, file/URL trust, shared contracts) and reports defects only. Launch with a prompt whose first words are "You are the independent reviewer".
+description: Sanad Step 3.5 Pass A reviewer. Read-only Opus (newest) at xhigh effort that traces a list of concrete inputs through the risk files of a finished code change (auth/tenant, DB/concurrency, money, file/URL trust, shared contracts) and reports defects only. Launch with a prompt whose first words are "You are the independent reviewer".
 model: opus
 effort: xhigh
 disallowedTools: Write, Edit, NotebookEdit, Agent

@@ -2,14 +2,16 @@
 # orca-launch.sh — start one Claude agent on a remote Orca host that reads a brief file.
 #
 # Usage: bash ~/.claude/scripts/remote/orca-launch.sh [--role <role>] <environment> <remote-worktree> <remote-brief> ["one-line note"]
-#   --role             picks the model the same way Sanad does on the local machine (default: code)
-#                        code         writes or fixes code              Opus 5.5
-#                        risk-review  risk files / fresh whole-PR review Opus 5.5
-#                        review       whole-diff review                 Sonnet 5.5
-#                        recheck      re-check of changed lines         Sonnet 5.5
-#                        chore        tests, logs, data, design compare Sonnet 5.5
-#                        tests        adds tests, changes no product code Sonnet 5.5
-#                        judge       final judgement over reports      Fable 5.1
+#   --role             picks the model the same way Sanad does on the local machine (default: code). Each is a
+#                      Claude alias — always the newest model of that family, so no version is ever pinned here
+#                      (2026-11-10: this file still launched Fable 5.1 after the boss had moved on).
+#                        code         writes or fixes code              opus
+#                        risk-review  risk files / fresh whole-PR review opus
+#                        review       whole-diff review                 sonnet
+#                        recheck      re-check of changed lines         sonnet
+#                        chore        tests, logs, data, design compare sonnet
+#                        tests        adds tests, changes no product code sonnet
+#                        judge       final judgement over reports      fable
 #   <environment>      saved Orca environment name (also the SSH alias unless ORCA_SSH_HOST is set)
 #   <remote-worktree>  workspace path on the remote, e.g. C:/Users/me/source/repos/App
 #   <remote-brief>     brief file path on the remote; it must already exist there
@@ -21,9 +23,9 @@ set -euo pipefail
 ROLE=code
 if [ "${1:-}" = "--role" ]; then ROLE="${2:?role}"; shift 2; fi
 case "$ROLE" in
-  code | risk-review) MODEL_ID=claude-opus-5-5; MODEL_NAME='Opus 5.5' ;;
-  review | recheck | chore | tests) MODEL_ID=claude-sonnet-5-5; MODEL_NAME='Sonnet 5.5' ;;
-  judge) MODEL_ID=claude-fable-5-1; MODEL_NAME='Fable 5.1' ;;
+  code | risk-review) MODEL_ID=opus; MODEL_NAME='Opus' ;;
+  review | recheck | chore | tests) MODEL_ID=sonnet; MODEL_NAME='Sonnet' ;;
+  judge) MODEL_ID=fable; MODEL_NAME='Fable' ;;
   *) echo "REFUSED: unknown role '$ROLE' (code, risk-review, review, recheck, chore, tests, judge)"; exit 2 ;;
 esac
 
@@ -69,8 +71,9 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
   if echo "$SCREEN" | grep -q "Enter to select"; then echo "STUCK $HANDLE (the agent is asking a question)"; exit 3; fi
   if echo "$SCREEN" | grep -qF "$NAME"; then
     BANNER="$(echo "$SCREEN" | grep -o -m1 '[A-Z][a-z]* [0-9.]* with [a-z]* effort' || true)"
+    # Any version of the role's family is right (the alias picks the newest); only the family and effort are checked.
     case "$BANNER" in
-      "$MODEL_NAME with xhigh effort") echo "LAUNCHED $HANDLE ($ROLE: $BANNER)"; exit 0 ;;
+      "$MODEL_NAME "[0-9]*" with xhigh effort") echo "LAUNCHED $HANDLE ($ROLE: $BANNER)"; exit 0 ;;
       "") echo "LAUNCHED $HANDLE ($ROLE: banner not seen; expected $MODEL_NAME xhigh)"; exit 0 ;;
       *) echo "MODEL MISMATCH $HANDLE (role $ROLE wants $MODEL_NAME xhigh, banner says: $BANNER)"; exit 5 ;;
     esac

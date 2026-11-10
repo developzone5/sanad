@@ -140,14 +140,14 @@ Roles have explicit model and effort assignments. The table below describes Clau
 
 | Agent | Model / effort | Role |
 |---|---|---|
-| `routing-boss` | Fable 5.1 / xhigh | Routes uncertain or sensitive work. Reviews braintrust reports and makes the final design call. Read-only, never writes code. |
-| `braintrust-expert` | Opus 5.5 / xhigh | Deep-risk seats: Architect, Skeptic, Database optimizer, Security auditor, Authenticity, Client state. Read-only; read-only probes such as `EXPLAIN` are expected. |
-| `braintrust-expert-sonnet` | Sonnet 5.5 / xhigh | Practical seats: Pragmatist, Performance, Product advocate, Test designer. Read-only. |
+| `routing-boss` | Fable (newest) / xhigh | Routes uncertain or sensitive work. Reviews braintrust reports and makes the final design call. Read-only, never writes code. |
+| `braintrust-expert` | Opus (newest) / xhigh | Deep-risk seats: Architect, Skeptic, Database optimizer, Security auditor, Authenticity, Client state. Read-only; read-only probes such as `EXPLAIN` are expected. |
+| `braintrust-expert-sonnet` | Sonnet (newest) / xhigh | Practical seats: Pragmatist, Performance, Product advocate, Test designer. Read-only. |
 
 Every seat also loads the lines tagged for it in the stack's playbooks (`skills/braintrust/playbooks/`: .NET, React, Next.js, MySQL, SQL Server, PostgreSQL). The stack comes from `stack.mjs`, and no playbook line names a version without marking it.
-| `independent-reviewer` | Opus 5.5 / xhigh | Pass A: sensitive files and callers (auth, tenant, DB, money, files). Read-only. |
-| `routine-reviewer` | Sonnet 5.5 / xhigh | Pass B: whole-diff coverage and scoped re-checks. Reports `ESCALATE` for an uncovered sensitive boundary. Read-only. |
-| `sonnet-worker` | Sonnet 5.5 / medium | Mechanical edits (typo, rename, one obvious line) and evidence chores (run the named tests, read logs). |
+| `independent-reviewer` | Opus (newest) / xhigh | Pass A: sensitive files and callers (auth, tenant, DB, money, files). Read-only. |
+| `routine-reviewer` | Sonnet (newest) / xhigh | Pass B: whole-diff coverage and scoped re-checks. Reports `ESCALATE` for an uncovered sensitive boundary. Read-only. |
+| `sonnet-worker` | Sonnet (newest) / medium | Mechanical edits (typo, rename, one obvious line) and evidence chores (run the named tests, read logs). |
 
 The main session writes all behavior code. Agents advise or do chores; they never own a change. Haiku is not used.
 
