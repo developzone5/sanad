@@ -10,6 +10,11 @@ import { mark, readMarks, report } from '../scripts/sanad-timer.mjs';
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'sanad-timer.mjs');
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sanad-timer-'));
 const at = (hhmm) => new Date(`2026-11-09T${hhmm}:00Z`);
+// One session for the whole file (each test file runs in its own process): the timer script and the hooks
+// both name the active timer after it.
+const SID = 'test-session';
+process.env.CLAUDE_CODE_SESSION_ID = SID;
+const POINTER = 'sanad-timer-active-' + SID;
 
 test('each step lasts until the next mark, waits are counted apart, and the total adds up', () => {
   const dir = tmp();
@@ -53,7 +58,7 @@ test('the hooks mark idle time on the active timer: a stop starts a wait, the ne
   const before = process.env.SANAD_STATE_DIR;
   process.env.SANAD_STATE_DIR = state;
   try {
-    const real = { transcript_path: path.join(state, '.claude', 'projects', 'x', 'session.jsonl') };
+    const real = { session_id: SID, transcript_path: path.join(state, '.claude', 'projects', 'x', 'session.jsonl') };
     const testRun = { transcript_path: path.join(state, 'fake-transcript.jsonl') };
     execFileSync(process.execPath, [script, 'mark', notes, 'build'], { encoding: 'utf8', env: { ...process.env } });
     const now = new Date();
@@ -68,7 +73,7 @@ test('the hooks mark idle time on the active timer: a stop starts a wait, the ne
 
     execFileSync(process.execPath, [script, 'end', notes], { encoding: 'utf8', env: { ...process.env } });
     assert.equal(idle(real, new Date()), false, 'after end, no more marks');
-    assert.equal(fs.existsSync(path.join(state, 'sanad-timer-active')), false);
+    assert.equal(fs.existsSync(path.join(state, POINTER)), false);
   } finally {
     if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
     fs.rmSync(state, { recursive: true, force: true });
@@ -88,11 +93,11 @@ test('pause and resume: side work is a wait, the hooks leave it alone, and the l
     const env = { ...process.env };
     execFileSync(process.execPath, [script, 'mark', notes, 'build'], { encoding: 'utf8', env });
     assert.match(execFileSync(process.execPath, [script, 'pause', notes, 'Sanad fixes'], { encoding: 'utf8', env }), /TIMER paused: Sanad fixes/);
-    assert.equal(fs.existsSync(path.join(state, 'sanad-timer-active')), false, 'paused: no timer is active');
-    assert.equal(idle({ transcript_path: '/home/u/.claude/projects/p/s.jsonl' }), false, 'a stop during side work marks nothing');
+    assert.equal(fs.existsSync(path.join(state, POINTER)), false, 'paused: no timer is active');
+    assert.equal(idle({ session_id: SID, transcript_path: '/home/u/.claude/projects/p/s.jsonl' }), false, 'a stop during side work marks nothing');
     assert.match(execFileSync(process.execPath, [script, 'resume', notes], { encoding: 'utf8', env }), /TIMER resumed: build/);
     assert.deepEqual(readMarks(notes).map(m => [m.kind, m.text]), [['step', 'build'], ['wait', 'paused: Sanad fixes'], ['step', 'resumed: build']]);
-    assert.equal(path.resolve(fs.readFileSync(path.join(state, 'sanad-timer-active'), 'utf8')), path.resolve(notes));
+    assert.equal(path.resolve(fs.readFileSync(path.join(state, POINTER), 'utf8')), path.resolve(notes));
     pause(notes, '', at('07:00'));
     assert.equal(resume(notes, at('07:05')), 'build', 'a second pause goes back to the same step');
     assert.match(report(notes, at('07:10')), /WAIT paused: other work/);
@@ -119,6 +124,36 @@ test('only one task timer runs: marking another task pauses the one that ran, an
   }
 });
 
+// 2026-11-10: a session on another project held the one shared pointer; its marks paused this task, and
+// this session's stops were marked on its timer.
+test('two sessions keep their own timers: a mark in one pauses nothing in the other, and each stop marks its own', async () => {
+  const { createRequire } = await import('node:module');
+  const { idle, pointerName } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const { pointerName: scriptName } = await import('../scripts/sanad-timer.mjs');
+  const state = tmp(), taskA = tmp(), taskB = tmp();
+  const before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    execFileSync(process.execPath, [script, 'mark', taskA, 'proof'], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-a' } });
+    execFileSync(process.execPath, [script, 'mark', taskB, 'small fix'], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-b' } });
+    assert.deepEqual(readMarks(taskA).map(m => m.kind), ['step'], 'the other session paused nothing here');
+    const now = new Date();
+    assert.equal(idle({ session_id: 'sess-b', transcript_path: '/home/u/.claude/projects/p/sess-b.jsonl' }, now), true);
+    assert.deepEqual(readMarks(taskA).map(m => m.kind), ['step'], "B's stop marks only B's timer");
+    assert.deepEqual(readMarks(taskB).map(m => m.kind), ['step', 'wait']);
+    // Without session_id, the transcript's file name is the session.
+    assert.equal(idle({ transcript_path: 'C:\\Users\\u\\.claude\\projects\\p\\sess-a.jsonl' }, now), true);
+    assert.deepEqual(readMarks(taskA).map(m => m.kind), ['step', 'wait']);
+    // The script and the hooks name the file the same way; no id, the shared name.
+    assert.equal(scriptName('sess-a'), pointerName({ session_id: 'sess-a' }));
+    assert.equal(scriptName(''), 'sanad-timer-active');
+    assert.equal(scriptName('../x'), 'sanad-timer-active-x', 'an id cannot point outside the state folder');
+  } finally {
+    if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
+    for (const d of [state, taskA, taskB]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test('a timer last marked long ago is left alone', async () => {
   const { createRequire } = await import('node:module');
   const { idle } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
@@ -127,8 +162,8 @@ test('a timer last marked long ago is left alone', async () => {
   process.env.SANAD_STATE_DIR = state;
   try {
     mark(notes, 'step', 'old task', new Date('2026-01-01T00:00:00Z'));
-    fs.writeFileSync(path.join(state, 'sanad-timer-active'), notes);
-    assert.equal(idle({ transcript_path: '/home/u/.claude/projects/p/s.jsonl' }, new Date('2026-01-02T00:00:00Z')), false);
+    fs.writeFileSync(path.join(state, POINTER), notes);
+    assert.equal(idle({ session_id: SID, transcript_path: '/home/u/.claude/projects/p/s.jsonl' }, new Date('2026-01-02T00:00:00Z')), false);
   } finally {
     if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
     fs.rmSync(state, { recursive: true, force: true });

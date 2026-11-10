@@ -17,12 +17,17 @@
 // task's work. Only one task's timer runs: marking another task pauses the one that ran, and a mark on
 // it again goes on. Side work with no timer of its own uses pause and resume; the session runs them,
 // never the user.
+// Each session has its own active timer (2026-11-10: a session on another project held the one shared
+// pointer, so its marks paused this task, and this session's stops were marked on its timer). The session
+// is CLAUDE_CODE_SESSION_ID, the same id the hooks get; with none, the one shared name.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const FILE = 'timer.tsv';
-const pointer = () => path.join(process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state'), 'sanad-timer-active');
+/** The pointer file's name for a session id: sanad-timer-active-<id>, or sanad-timer-active with no id. */
+export const pointerName = (id) => { const key = String(id || '').replace(/[^A-Za-z0-9_-]/g, ''); return key ? `sanad-timer-active-${key}` : 'sanad-timer-active'; };
+const pointer = () => path.join(process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state'), pointerName(process.env.CLAUDE_CODE_SESSION_ID));
 const PAUSED = 'paused: ';
 
 /** Names the timer the hooks mark idle time on. A different timer that was running pauses. */
