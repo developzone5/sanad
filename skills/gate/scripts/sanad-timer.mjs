@@ -3,6 +3,8 @@
 //
 //   node sanad-timer.mjs mark <notes-dir> <step words…>   start a step now (ends the step before it)
 //   node sanad-timer.mjs wait <notes-dir> <why…>          start a wait (the user, a machine, a stuck run)
+//   node sanad-timer.mjs pause <notes-dir> <why…>         other work in the middle (the user's side request)
+//   node sanad-timer.mjs resume <notes-dir>               back to the task: its last step goes on
 //   node sanad-timer.mjs report <notes-dir>               print each step's minutes and the total
 //   node sanad-timer.mjs end <notes-dir>                  the task is done: stop the hooks' idle marks
 //
@@ -11,17 +13,44 @@
 // shown with the ship brief. Marks live in <notes-dir>/timer.tsv (ISO time, kind, words).
 // mark and wait also name this timer as the active one, so the hooks mark the session's idle time
 // themselves (hooks/lib/timer-idle.cjs): a stop starts a wait, the next tool call ends it.
+// 2026-11-10: side work in the middle of a task (a workflow fix the user asked for) was counted as the
+// task's work. Only one task's timer runs: marking another task pauses the one that ran, and a mark on
+// it again goes on. Side work with no timer of its own uses pause and resume; the session runs them,
+// never the user.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const FILE = 'timer.tsv';
 const pointer = () => path.join(process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state'), 'sanad-timer-active');
+const PAUSED = 'paused: ';
 
-/** Names the timer the hooks mark idle time on. */
-export function setActive(dir) {
+/** Names the timer the hooks mark idle time on. A different timer that was running pauses. */
+export function setActive(dir, now = new Date()) {
+  let before = '';
+  try { before = fs.readFileSync(pointer(), 'utf8').trim(); } catch { /* none */ }
+  if (before && path.resolve(before) !== path.resolve(dir)) {
+    const last = readMarks(before).pop();
+    // A timer last marked more than 8 hours ago is a finished or forgotten task: left as it is.
+    if (last && last.kind !== 'wait' && now - last.at < 8 * 3600000) mark(before, 'wait', `${PAUSED}other task (${path.basename(path.resolve(dir))})`, now);
+  }
   fs.mkdirSync(path.dirname(pointer()), { recursive: true });
   fs.writeFileSync(pointer(), path.resolve(dir));
+}
+
+/** Side work starts: this task waits, and the hooks stop marking it. */
+export function pause(dir, why, now = new Date()) {
+  mark(dir, 'wait', PAUSED + (String(why || '').trim() || 'other work'), now);
+  clearActive(dir);
+}
+
+/** Back to the task: the last step before the pause goes on, and the timer is the active one again. */
+export function resume(dir, now = new Date()) {
+  const steps = readMarks(dir).filter((m) => m.kind === 'step' && m.text !== 'resumed');
+  const last = steps.length ? steps[steps.length - 1].text.replace(/^resumed: /, '') : 'work';
+  setActive(dir, now);
+  mark(dir, 'step', `resumed: ${last}`, now);
+  return last;
 }
 
 /** The task is done: no more idle marks, for this timer only. */
@@ -64,14 +93,16 @@ export function report(dir, now = new Date()) {
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))) {
   const [cmd, dir, ...words] = process.argv.slice(2);
   if (!cmd || !dir) {
-    console.error('Usage: sanad-timer.mjs mark|wait|report|end <notes-dir> [step words…]');
+    console.error('Usage: sanad-timer.mjs mark|wait|pause|resume|report|end <notes-dir> [step words…]');
     process.exit(2);
   }
   if (cmd === 'mark' || cmd === 'wait') {
-    mark(dir, cmd === 'wait' ? 'wait' : 'step', words.join(' '));
     try { setActive(dir); } catch { /* idle marks are a help, never a failure */ }
+    mark(dir, cmd === 'wait' ? 'wait' : 'step', words.join(' '));
     console.log(`TIMER ${cmd}: ${words.join(' ')}`);
   }
+  else if (cmd === 'pause') { pause(dir, words.join(' ')); console.log(`TIMER paused: ${words.join(' ') || 'other work'}`); }
+  else if (cmd === 'resume') console.log(`TIMER resumed: ${resume(dir)}`);
   else if (cmd === 'report') console.log(report(dir));
   else if (cmd === 'end') { mark(dir, 'step', 'end'); clearActive(dir); console.log(report(dir)); }
   else { console.error(`Unknown command: ${cmd}`); process.exit(2); }

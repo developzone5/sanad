@@ -76,6 +76,49 @@ test('the hooks mark idle time on the active timer: a stop starts a wait, the ne
   }
 });
 
+// 2026-11-10: a workflow fix the user asked for in the middle of a task counted as the task's work.
+test('pause and resume: side work is a wait, the hooks leave it alone, and the last step goes on', async () => {
+  const { createRequire } = await import('node:module');
+  const { idle } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const { pause, resume } = await import('../scripts/sanad-timer.mjs');
+  const state = tmp(), notes = tmp();
+  const before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    const env = { ...process.env };
+    execFileSync(process.execPath, [script, 'mark', notes, 'build'], { encoding: 'utf8', env });
+    assert.match(execFileSync(process.execPath, [script, 'pause', notes, 'Sanad fixes'], { encoding: 'utf8', env }), /TIMER paused: Sanad fixes/);
+    assert.equal(fs.existsSync(path.join(state, 'sanad-timer-active')), false, 'paused: no timer is active');
+    assert.equal(idle({ transcript_path: '/home/u/.claude/projects/p/s.jsonl' }), false, 'a stop during side work marks nothing');
+    assert.match(execFileSync(process.execPath, [script, 'resume', notes], { encoding: 'utf8', env }), /TIMER resumed: build/);
+    assert.deepEqual(readMarks(notes).map(m => [m.kind, m.text]), [['step', 'build'], ['wait', 'paused: Sanad fixes'], ['step', 'resumed: build']]);
+    assert.equal(path.resolve(fs.readFileSync(path.join(state, 'sanad-timer-active'), 'utf8')), path.resolve(notes));
+    pause(notes, '', at('07:00'));
+    assert.equal(resume(notes, at('07:05')), 'build', 'a second pause goes back to the same step');
+    assert.match(report(notes, at('07:10')), /WAIT paused: other work/);
+  } finally {
+    if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
+    fs.rmSync(state, { recursive: true, force: true });
+    fs.rmSync(notes, { recursive: true, force: true });
+  }
+});
+
+test('only one task timer runs: marking another task pauses the one that ran, and marking it again goes on', () => {
+  const state = tmp(), taskA = tmp(), taskB = tmp();
+  const env = { ...process.env, SANAD_STATE_DIR: state };
+  try {
+    execFileSync(process.execPath, [script, 'mark', taskA, 'proof'], { encoding: 'utf8', env });
+    execFileSync(process.execPath, [script, 'mark', taskB, 'small fix'], { encoding: 'utf8', env });
+    assert.deepEqual(readMarks(taskA).map(m => [m.kind, m.text]), [['step', 'proof'], ['wait', `paused: other task (${path.basename(taskB)})`]]);
+    execFileSync(process.execPath, [script, 'mark', taskA, 'reviews'], { encoding: 'utf8', env });
+    assert.deepEqual(readMarks(taskB).map(m => m.kind), ['step', 'wait'], 'the other task waits now');
+    execFileSync(process.execPath, [script, 'mark', taskA, 'suites'], { encoding: 'utf8', env });
+    assert.equal(readMarks(taskB).length, 2, 'the same task again pauses nothing');
+  } finally {
+    for (const d of [state, taskA, taskB]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test('a timer last marked long ago is left alone', async () => {
   const { createRequire } = await import('node:module');
   const { idle } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');

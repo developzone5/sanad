@@ -493,6 +493,106 @@ test('--timeout-min: a run past the limit is stopped with its whole process tree
   assert.deepEqual(fs.readFileSync(path.join(repo, 'rule.cjs')), rule);
 });
 
+// 2026-11-10: xUnit printed each failing test by its DisplayName; mustFail named the methods, and four
+// breaks read "not seen failing" although their tests had failed.
+test('a mustFail part matches a test by its method or by its xUnit DisplayName, either way round', async () => {
+  const { survivors, displayNames } = await import('../scripts/red-proof.mjs');
+  const pairs = displayNames([
+    'public class FloorTests {',
+    '  [Fact(DisplayName = "[C1] lowering below used refuses")]',
+    '  public async Task AttemptsFloor_C1() { }',
+    '  [Fact]',
+    '  public void NoDisplayName() { }',
+    '  [Theory(DisplayName = "[C2] a \\"quoted\\" case")]',
+    '  [InlineData(1)]',
+    '  public void AttemptsFloor_C2(int n) { }',
+    '}'].join('\n'));
+  assert.deepEqual(pairs, [
+    { display: '[C1] lowering below used refuses', method: 'AttemptsFloor_C1' },
+    { display: '[C2] a "quoted" case', method: 'AttemptsFloor_C2' }]);
+  const byDisplay = [{ name: '[C1] lowering below used refuses', kind: 'assert' }, { name: '[C2] a "quoted" case(n: 1)', kind: 'assert' }];
+  assert.deepEqual(survivors(['AttemptsFloor_C1', 'AttemptsFloor_C2'], byDisplay, pairs), []);
+  assert.deepEqual(survivors(['AttemptsFloor_C1'], byDisplay), ['AttemptsFloor_C1'], 'without the pairs the method is not seen');
+  const byMethod = [{ name: 'Api.Tests.FloorTests.AttemptsFloor_C1', kind: 'assert' }];
+  assert.deepEqual(survivors(['[C1] lowering below'], byMethod, pairs), []);
+  assert.deepEqual(survivors(['AttemptsFloor_C2'], byMethod, pairs), ['AttemptsFloor_C2'], 'another test failing is not this one');
+});
+
+test('--breaks: a mustFail method name catches a test that dotnet printed by its DisplayName', () => {
+  const { repo, breaks } = breakFixture();
+  fs.mkdirSync(path.join(repo, 'Tests'));
+  fs.writeFileSync(path.join(repo, 'Tests', 'RuleTests.cs'), '[Fact(DisplayName = "[C1] the rule blocks the save")]\npublic void Rule_Blocks() { }\n');
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'if (!require("./rule.cjs").blocks) { console.log("  Failed [C1] the rule blocks the save [12 ms]\\n  Error Message:\\n   Assert.True() Failure"); process.exit(1); }',
+    'process.exit(0);', ''].join('\n'));
+  writeBreaks(breaks, ['Rule_Blocks']);
+  const result = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /BREAK ✓ the rule does not block: all 1 named test\(s\) fail/);
+});
+
+// 2026-11-10: a fix file that only added the new error message went back to the old code too; the old
+// code could not compile against the new tests (SETUP), and the whole proof ran again.
+test('a fix file that only adds names the tests use stays at the fix for the old-code run', async () => {
+  const { addedNames } = await import('../scripts/red-proof.mjs');
+  const decl = '+    public static readonly ApiMessage ExamAttemptsBelowUsed = new("EXAM_ATTEMPTS_BELOW_USED", "…");';
+  const tests = 'Assert.Equal(AttemptMessages.ExamAttemptsBelowUsed.Code, result.Code);';
+  assert.deepEqual(addedNames(['@@ -10,0 +11 @@', decl].join('\n'), 'class AttemptMessages { }', tests, 'AttemptMessages.cs'), ['ExamAttemptsBelowUsed']);
+  assert.deepEqual(addedNames(['@@ -10 +10 @@', '-    old line', decl].join('\n'), '', tests, 'AttemptMessages.cs'), [], 'a file that also changes a line may hold the fix');
+  assert.deepEqual(addedNames(['@@ -3,0 +4 @@', '+  if (code == AttemptMessages.ExamAttemptsBelowUsed.Code) return 409;'].join('\n'), '', tests, 'Controller.cs'), [], 'a use is not a declaration');
+  assert.deepEqual(addedNames(['@@ -10,0 +11 @@', decl].join('\n'), 'ExamAttemptsBelowUsed', tests, 'AttemptMessages.cs'), [], 'a name the old file had is not new');
+
+  const { repo, git } = fixture();
+  fs.writeFileSync(path.join(repo, 'names.cjs'), 'module.exports = {\n  OLD_NAME: 1,\n};\n');
+  git('add', 'names.cjs'); git('commit', '-qm', 'names');
+  fs.writeFileSync(path.join(repo, 'names.cjs'), 'module.exports = {\n  OLD_NAME: 1,\n  NEW_NAME: 2,\n};\n');
+  fs.mkdirSync(path.join(repo, 'src'));
+  fs.writeFileSync(path.join(repo, 'src', 'a.test.cjs'), '// expects NEW_NAME\n');
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'if (require("./names.cjs").NEW_NAME === undefined) { console.log("Build FAILED.\\nA.cs(3,1): error CS0117: \'Names\' does not contain a definition for \'NEW_NAME\'"); process.exit(1); }',
+    'if (require("./app.cjs") !== 2) { console.log(" FAIL  src/a.test.cjs > fix > is applied\\nAssertionError: expected 1 to be 2"); process.exit(1); }',
+    'process.exit(0);', ''].join('\n'));
+  const before = fs.readFileSync(path.join(repo, 'names.cjs'));
+  // HEAD has the bug in app.cjs and names.cjs without NEW_NAME.
+  const kept = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs,names.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(kept.status, 0, kept.stdout);
+  assert.match(kept.stdout, /names\.cjs stays at the fix for the old-code run: it only adds lines, and the tests use its new names \(NEW_NAME\)/);
+  assert.match(kept.stdout, /RED ✓ — the tests fail on HEAD for app\.cjs \(/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'names.cjs')), before);
+
+  // The same name declared in a file that also changes a line: no keep, and the SETUP names what is missing.
+  fs.writeFileSync(path.join(repo, 'names.cjs'), 'module.exports = {\n  OLD_NAME: 3,\n  NEW_NAME: 2,\n};\n');
+  const setup = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs,names.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(setup.status, 3, setup.stdout);
+  assert.doesNotMatch(setup.stdout, /stays at the fix/);
+  assert.match(setup.stdout, /the old code lacks names the tests use: NEW_NAME\./);
+
+  // On the test machine (a plan), a NOT RED still names the file that stayed at the fix.
+  fs.writeFileSync(path.join(repo, 'check.cjs'), 'process.exit(0);\n');
+  const planFile = path.join(repo, '..', path.basename(repo) + '-plan.json');
+  fs.writeFileSync(planFile, JSON.stringify({ oldLabel: 'HEAD', kept: ['names.cjs'], breaks: [], old: [{ file: 'app.cjs', content64: Buffer.from('module.exports = 1;\n').toString('base64') }] }));
+  const remote = run(['--repo', repo, '--local', '--plan', planFile, '--', process.execPath, 'check.cjs']);
+  assert.equal(remote.status, 1, remote.stdout);
+  assert.match(remote.stdout, /NOT RED ✗/);
+  assert.match(remote.stdout, /names\.cjs stayed at the fix \(see above\)/);
+});
+
+// 2026-11-10: the first proof of a task found its copies cold; each run built the whole solution.
+test('--warm: the kept copies are prepared once before the proof; with a proof it is refused', () => {
+  const { repo } = fixture();
+  const result = run(['--repo', repo, '--warm', '--parallel', '2', '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /warming 2 kept copies/);
+  assert.match(result.stdout, /copy 0: ready/);
+  assert.match(result.stdout, /WARM ✓ — 2 copies ready/);
+  const proof = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--parallel', '2', '--', process.execPath, 'check.cjs']);
+  assert.equal(proof.status, 0, proof.stdout);
+  assert.match(proof.stdout, /RED ✓/);
+  const refused = run(['--repo', repo, '--warm', '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(refused.status, 2, refused.stdout);
+  assert.match(refused.stdout, /--warm only prepares the kept copies/);
+});
+
 test('--timeout-min with one --break: the file in the working folder comes back after the stop', () => {
   const { repo, pidFile } = hangFixture();
   const before = fs.readFileSync(path.join(repo, 'app.cjs'));

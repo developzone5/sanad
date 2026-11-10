@@ -24,10 +24,15 @@
 //        [--timeout-min <n>] [--test-env <path>] [--local] [--show-remote] -- <executable> [args...]
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --break <file> --find <text> --put <text>
 //        [--cwd <dir>] [--log <file>] [--timeout-min <n>] [--test-env <path>] -- <executable> [args...]
+//   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --warm [--parallel <n>] [--cwd <dir>] -- <test command>
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --restore <backup-dir>
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --drop-copies
 // --breaks file: [{ "name": "...", "file": "<repo-relative>", "find": "<exact text, once>",
 //   "put": "<replacement>", "mustFail": ["<part of a test name>", ...] }, ...]
+//   A mustFail part may come from a test's method name or from its xUnit DisplayName.
+// --old with a fix file that only adds lines, and adds names the tests use (a new message, a new
+// constant): that file stays at the fix for the old-code run, so the old code compiles; the run says so.
+// --warm: at the task's start, the kept copies (below) are brought to the tree and built once.
 // A passing run records the test files it proved (see proof-record.mjs); pre-review's test check
 // reads that record. The test command runs without a shell and without typed input; pass the real
 // executable (node <entrypoint>, dotnet, ...), not a .cmd shim. cmd.exe without /c is refused
@@ -104,9 +109,58 @@ export function failureReasons(text) {
 // The mustFail names a break run did not see failing. Under a break, any failure of a named test
 // catches it, an error as well as an assertion (2026-11-07: a test that crashed because the break
 // removed its element was called a broken test, and the whole proof ran again, twice).
-export function survivors(mustFail, reasons) {
-  const failed = reasons.map(r => r.name.toLowerCase());
+// xUnit prints a test's DisplayName, not its method, in its Failed line (2026-11-10: four breaks read "not
+// seen failing" although their tests had failed: mustFail named the methods). `pairs` ({display, method},
+// from displayNames) let a mustFail part match either name.
+export function survivors(mustFail, reasons, pairs = []) {
+  const failed = [];
+  for (const r of reasons) {
+    const name = r.name.toLowerCase();
+    failed.push(name);
+    for (const p of pairs) {
+      const display = p.display.toLowerCase(), method = p.method.toLowerCase();
+      // A theory's display name is followed by its arguments; a method is printed with its class before it.
+      if (name === display || name.startsWith(display + '(') || name.startsWith(display + ' (')) failed.push(method);
+      else if (new RegExp(`(?:^|\\.)${method}(?:\\(|$)`).test(name)) failed.push(display);
+    }
+  }
   return mustFail.filter(part => !failed.some(name => name.includes(String(part).toLowerCase())));
+}
+
+// The DisplayName of each test method in a C# test file, with the method it names.
+export function displayNames(text) {
+  const src = String(text);
+  const names = [...src.matchAll(/DisplayName\s*=\s*"((?:[^"\\]|\\.)*)"/g)];
+  const methods = [...src.matchAll(/\b(?:public|internal|private|protected)\s+(?:static\s+)?(?:async\s+)?(?:void|Task|ValueTask)(?:<[^>]*>)?\s+(\w+)\s*\(/g)];
+  const pairs = [];
+  names.forEach((n, i) => {
+    const m = methods.find(x => x.index > n.index);
+    if (m && (i + 1 >= names.length || m.index < names[i + 1].index)) pairs.push({ display: n[1].replace(/\\(.)/g, '$1'), method: m[1] });
+  });
+  return pairs;
+}
+
+// The names a fix file adds that the tests use, when the file only adds lines (2026-11-10: a file in --files
+// only added the new error message; the old code could not compile against the new tests, SETUP, and the
+// whole proof ran again). Such a file stays at the fixed version for the old-code run: its new names exist,
+// and every line the old code had is the same. A name counts when it is declared in an added line (`Name =`,
+// `Name(`, `Name {`, or `Name:` in a script file), not in the old file, and a whole word in the test files.
+export function addedNames(diff, oldText, testText, file = '') {
+  const lines = String(diff).split(/\r?\n/);
+  if (lines.some(l => l.startsWith('-') && !l.startsWith('---'))) return []; // it changes or removes lines: it may hold the fix
+  const added = lines.filter(l => l.startsWith('+') && !l.startsWith('+++')).map(l => l.slice(1));
+  const colon = /\.(?:[cm]?[jt]sx?)$/i.test(file) ? '|:' : '';
+  const word = (n) => new RegExp(`(?<![\\w$])${n}(?![\\w$])`);
+  const names = new Set();
+  for (const line of added) {
+    for (const m of line.matchAll(/\b[A-Za-z_]\w*[A-Z_]\w*\b/g)) {
+      const n = m[0];
+      if (n.length < 6 || names.has(n)) continue;
+      const declared = new RegExp(`(?:^|[^.\\w$])${n}\\s*(?:=(?![=>])|=>|\\{|\\(${colon})`).test(line);
+      if (declared && !word(n).test(oldText) && word(n).test(testText)) names.add(n);
+    }
+  }
+  return [...names];
 }
 
 // The KEY=VALUE lines of an env file. `bad` holds the numbers of the lines that are not, never their
@@ -195,6 +249,7 @@ async function main() {
     say('usage: red-proof.mjs --repo <path> [--old <git-ref> --files <a,b>] [--breaks <json>] [--then-green] [--base <ref>] [--cwd <dir>] [--log <file>] -- <executable> [args...]');
     say('   or: red-proof.mjs --repo <path> --break <file> --find <text> --put <text> [--cwd <dir>] [--log <file>] -- <executable> [args...]');
     say('   options: [--parallel <n>] [--timeout-min <n>] [--test-env <path>] [--local] [--show-remote]; or --repo <path> --drop-copies');
+    say('   or: red-proof.mjs --repo <path> --warm [--parallel <n>] [--cwd <dir>] -- <executable> [args...]');
     process.exit(2);
   };
 
@@ -252,13 +307,15 @@ async function main() {
     }
   }
   const green = opts.includes('--then-green') || Boolean(plan?.green);
+  const warm = opts.includes('--warm') || Boolean(plan?.warm);
   // Each run tests a few files, so half the machine's cores run at once (8 on a 16-core machine).
   const parallel = Math.max(1, Number.parseInt(opt('--parallel') || '', 10) || Math.max(2, Math.floor(os.cpus().length / 2)));
   const oldPlan = Array.isArray(plan?.old) && plan.old.length ? plan.old : null;
   const oldLabel = oldPlan ? String(plan.oldLabel || 'the old code') : oldRef;
   const oldNames = oldPlan ? oldPlan.map(o => o.file) : oldFiles;
   const hasOld = Boolean(oldPlan || oldRef);
-  if (!repo || !command.length || (oldRef ? !oldFiles.length : false) || (!hasOld && !breaks.length)) usage();
+  if (!repo || !command.length || (oldRef ? !oldFiles.length : false) || (!hasOld && !breaks.length && !warm)) usage();
+  if (warm && (hasOld || breaks.length)) { say('RED-PROOF: --warm only prepares the kept copies; run it alone, before the proof.'); process.exit(2); }
   // The time each run (and the compile check) may take (2026-11-09: a run hung 25 minutes, unseen).
   const timeoutMin = opt('--timeout-min') === undefined ? 15 : Number(opt('--timeout-min'));
   if (!(timeoutMin > 0)) { say('RED-PROOF: --timeout-min needs a number of minutes above 0.'); process.exit(2); }
@@ -283,6 +340,24 @@ async function main() {
   const base = opt('--base') || defaultBase(repo);
   const testFiles = changedTestFiles(repo, base);
   const fileHashes = testFiles ? testFileHashes(repo, testFiles) : null;
+  // Fix files that only add names the tests use stay at the fixed version for the old-code run (addedNames).
+  const keptAtFix = [];
+  if (oldRef && !plan && testFiles?.length) {
+    const testText = testFiles.map(f => { try { return fs.readFileSync(path.join(repo, f), 'utf8'); } catch { return ''; } }).join('\n');
+    for (const f of oldFiles) {
+      let oldText = '', diff = '';
+      try { oldText = git('show', `${oldRef}:${f}`).toString('utf8'); } catch { /* a new file: every line is added */ }
+      try {
+        diff = oldText ? git('diff', '--no-color', '-U0', oldRef, '--', f).toString('utf8')
+          : fs.readFileSync(path.join(repo, f), 'utf8').split(/\r?\n/).map(l => '+' + l).join('\n');
+      } catch { continue; }
+      const names = addedNames(diff, oldText, testText, f);
+      if (names.length) keptAtFix.push({ file: f, names });
+    }
+    if (keptAtFix.length >= oldFiles.length) keptAtFix.length = 0; // no file would go back: nothing to prove
+  }
+  const oldRun = oldFiles.filter(f => !keptAtFix.some(k => k.file === f));
+  for (const k of keptAtFix) say(`RED-PROOF: ${k.file} stays at the fix for the old-code run: it only adds lines, and the tests use its new names (${k.names.slice(0, 4).join(', ')}).`);
 
   // On the test machine when there is one, by itself (2026-11-07: the rule "tests run on the test
   // machine" was written, but this script only ran here, so the proof ran on the busy desktop).
@@ -340,7 +415,8 @@ async function main() {
     const local = fs.mkdtempSync(path.join(os.tmpdir(), 'sanad-proof-'));
     fs.writeFileSync(path.join(local, 'plan.json'), JSON.stringify({
       oldLabel: oldRef, green, breaks,
-      old: hasOld ? oldFiles.map(f => { try { return { file: f, content64: git('show', `${oldRef}:${f}`).toString('base64') }; } catch { return { file: f, content64: null }; } }) : [],
+      warm, kept: keptAtFix.map(k => k.file),
+      old: hasOld ? oldRun.map(f => { try { return { file: f, content64: git('show', `${oldRef}:${f}`).toString('base64') }; } catch { return { file: f, content64: null }; } }) : [],
     }));
     const here = path.dirname(fileURLToPath(import.meta.url));
     for (const f of ['red-proof.mjs', 'proof-record.mjs', 'check-ticket-lines.mjs']) fs.copyFileSync(path.join(here, f), path.join(local, f));
@@ -352,7 +428,7 @@ async function main() {
     if (scp.status !== 0) { say('RED-PROOF: could not copy the proof to the test machine — ' + ((scp.stderr || '').trim().split(/\r?\n/).pop() || 'scp failed')); process.exit(2); }
     // Each line as it comes, so a long proof is never silent. The runs there stop at their own limit;
     // this wait is the backstop for a lost connection.
-    const runs = (hasOld ? 1 : 0) + breaks.length + (green ? 1 : 0);
+    const runs = (hasOld ? 1 : 0) + breaks.length + (green ? 1 : 0) + (warm ? 1 : 0);
     const waitMin = Math.ceil(timeoutMin * (runs + 2) + 10);
     const r = await new Promise((resolve) => {
       const child = spawn('ssh', ['-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6', ...sshOpts, remoteHost, remoteCmd], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -452,21 +528,63 @@ async function main() {
     if (opt('--log')) fs.writeFileSync(path.resolve(opt('--log')), said.join('\n') + '\n\n' + logs.join('\n'));
     process.exit(code);
   }
-  function setupStop(r) {
+  function setupStop(r, oldCode = false) {
     const setup = r.why.filter((w) => w.kind === 'setup');
     if (setup.length || (!r.why.length && r.code !== 0 && SETUP_OUTPUT.test(r.output))) {
       showWhy(r);
+      // The old code without names the new tests use: say which, and the way out.
+      const missing = oldCode ? [...new Set([...r.output.matchAll(/error CS\d+:.*?(?:definition for|The name|namespace name) '(\w+)'/g)].map(m => m[1]))] : [];
+      if (missing.length) say(`RED-PROOF: the old code lacks names the tests use: ${missing.slice(0, 6).join(', ')}. The fix file that declares them also changes lines, so it cannot stay at the fix: prove that file with --breaks alone, or move the new names into a file that only adds lines.`);
       say(`RED-PROOF: SETUP ✗ — ${setup.length || 'the run'} failed for a setup reason (element not found, type or build error, timeout), not because of the code. Fix the test or the machine, then run again; files restored.`);
       finish(3);
     }
   }
   function showWhy(r) { for (const w of r.why.slice(0, 12)) say(`  ${w.kind === 'assert' ? '✓ assert' : w.kind === 'setup' ? '✗ setup ' : '? other '}  ${w.name}${w.why ? ' — ' + w.why : ''}`); }
 
+  // The DisplayName ↔ method pairs of the C# files that hold a mustFail part (see survivors).
+  function namePairs() {
+    const parts = [...new Set(breaks.filter(b => !b.single).flatMap(b => b.mustFail.map(String)))];
+    if (!parts.length) return [];
+    let files = [];
+    try {
+      files = execFileSync('git', ['grep', '-l', '--untracked', '-F', ...parts.flatMap(p => ['-e', p]), '--', '*.cs'],
+        { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).split(/\r?\n/).filter(Boolean);
+    } catch { return []; } // no file holds one
+    return files.flatMap(f => { try { return displayNames(fs.readFileSync(path.join(repo, f), 'utf8')); } catch { return []; } });
+  }
+
+  // --warm (2026-11-10: a task's first proof found its copies cold; each run built the whole solution, 5 to
+  // 13 minutes): at the task's start, bring the kept copies to the tree and build each once, so the proof
+  // later rebuilds only the projects whose files changed. Run it alone, in the background, beside the
+  // test machine's ready check, with the same --parallel as the proof.
+  if (warm) {
+    const started = Date.now();
+    const tree = treeUnderTest();
+    const cwdRel = path.relative(repo, cwdHere);
+    const check = compileCheckCommand(command);
+    const slots = Array.from({ length: parallel }, takeSlot);
+    say(`RED-PROOF: warming ${slots.length} kept cop${slots.length === 1 ? 'y' : 'ies'}${check ? ', each built once' : ''}`);
+    const lines = await Promise.all(slots.map(async (copy, k) => {
+      const t0 = Date.now();
+      const secs = () => `${Math.round((Date.now() - t0) / 1000)} s`;
+      try { syncCopy(copy, tree.head, tree.dirty, tree.commonDir); }
+      catch (e) { return `  copy ${k}: could not prepare — ${e.message}`; }
+      if (!check) return `  copy ${k}: ready (${secs()})`;
+      const r = await runProcess(check, path.join(copy, cwdRel));
+      logs.push(`===== warm copy ${k} =====\n${hide((r.stdout || '') + (r.stderr || ''))}`);
+      if (r.timedOut || r.error) { try { dropCopy(copy); } catch { /* the next sync clones it again */ } }
+      return `  copy ${k}: ${r.timedOut ? 'stopped at the time limit' : r.error ? 'could not build' : r.status === 0 ? 'built' : `build failed (exit ${r.status}); the proof will show why`} (${secs()})`;
+    }));
+    lines.forEach(l => say(l));
+    say(`RED-PROOF: WARM ✓ — ${slots.length} cop${slots.length === 1 ? 'y' : 'ies'} ready in ${Math.round((Date.now() - started) / 1000)} s; the proof rebuilds only what changes.`);
+    finish(0);
+  }
+
   // The runs: the old code, each break, then green on the fixed tree.
   const jobs = [];
   if (hasOld) jobs.push({ kind: 'old', label: 'old code', changes: oldPlan
     ? oldPlan.map(o => ({ file: o.file, content: () => (o.content64 == null ? null : Buffer.from(o.content64, 'base64')) }))
-    : oldFiles.map(file => ({ file, content: () => { try { return git('show', `${oldRef}:${file}`); } catch { return null; } } })) });
+    : oldRun.map(file => ({ file, content: () => { try { return git('show', `${oldRef}:${file}`); } catch { return null; } } })) });
   for (const b of breaks) jobs.push({ kind: 'break', b, label: b.single ? 'break' : 'break ' + b.name, changes: [{ file: b.file, content: (target) => fs.readFileSync(target, 'utf8').replace(b.find, () => b.put) }] });
   if (green) jobs.push({ kind: 'green', label: 'green', changes: [] });
   let results;
@@ -500,11 +618,18 @@ async function main() {
   }
 
   // Each run in its own kept copy, `parallel` at a time; the working folder is never touched.
-  async function runParallel(list) {
+  // The tree under test: HEAD, the folder's uncommitted files, and the repository's object store.
+  function treeUnderTest() {
     const listed = (args) => { try { return execFileSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).split('\0').filter(Boolean); } catch { return []; } };
-    const dirty = [...new Set([...listed(['diff', '--name-only', '-z', 'HEAD']), ...listed(['ls-files', '--others', '--exclude-standard', '-z'])])];
-    const head = gitText(['rev-parse', 'HEAD']);
-    const commonDir = path.resolve(repo, gitText(['rev-parse', '--git-common-dir']));
+    return {
+      dirty: [...new Set([...listed(['diff', '--name-only', '-z', 'HEAD']), ...listed(['ls-files', '--others', '--exclude-standard', '-z'])])],
+      head: gitText(['rev-parse', 'HEAD']),
+      commonDir: path.resolve(repo, gitText(['rev-parse', '--git-common-dir'])),
+    };
+  }
+
+  async function runParallel(list) {
+    const { dirty, head, commonDir } = treeUnderTest();
     const modules = ['node_modules', ...fs.readdirSync(repo).map(d => d + '/node_modules')]
       .filter(m => { try { return fs.lstatSync(path.join(repo, m)).isDirectory(); } catch { return false; } });
     const cwdRel = path.relative(repo, cwdHere);
@@ -615,14 +740,17 @@ async function main() {
     const r = read(results[0], 'old code');
     if (results[0].timedOut) ok = false;
     else if (r.code !== 0) {
-      setupStop(r); showWhy(r);
+      setupStop(r, true); showWhy(r);
       const asserts = r.why.filter((w) => w.kind === 'assert').length;
-      say(`RED-PROOF: RED ✓ — the tests fail on ${oldLabel} for ${oldNames.join(', ')} (exit ${r.code}${r.why.length ? `; ${asserts} of ${r.why.length} failing test(s) by an assertion` : '; failure reasons not read from this runner'}); files restored.`);
+      say(`RED-PROOF: RED ✓ — the tests fail on ${oldLabel} for ${(oldPlan ? oldNames : oldRun).join(', ')} (exit ${r.code}${r.why.length ? `; ${asserts} of ${r.why.length} failing test(s) by an assertion` : '; failure reasons not read from this runner'}); files restored.`);
     } else {
       say(`RED-PROOF: NOT RED ✗ — the tests pass on ${oldLabel}, so they do not prove the fix; files restored.`); ok = false;
+      const kept = plan ? (Array.isArray(plan.kept) ? plan.kept : []) : keptAtFix.map(k => k.file);
+      if (kept.length) say(`RED-PROOF: ${kept.join(', ')} stayed at the fix (see above). If the fix itself is in there, prove it with --breaks alone.`);
     }
   }
-  // 2. Each break of the rule under test.
+  // 2. Each break of the rule under test. A mustFail part may name a test's method or its DisplayName.
+  const pairs = namePairs();
   for (let i = 0; i < breaks.length; i++) {
     const b = breaks[i];
     const r = read(results[(hasOld ? 1 : 0) + i], 'break ' + b.name);
@@ -632,7 +760,7 @@ async function main() {
       else { say(`RED-PROOF: NOT RED ✗ — the test passes with ${b.file} broken, so it does not check that code; files restored.`); ok = false; }
       continue;
     }
-    const left = survivors(b.mustFail, r.why);
+    const left = survivors(b.mustFail, r.why, pairs);
     if (r.code !== 0 && !left.length) say(`  BREAK ✓ ${b.name}: all ${b.mustFail.length} named test(s) fail`);
     else { say(`  BREAK ✗ ${b.name}: still pass (or not seen failing): ${left.join(' | ')}`); ok = false; }
   }
