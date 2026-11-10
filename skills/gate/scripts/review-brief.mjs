@@ -186,8 +186,9 @@ export function buildLaunch({ brief, fresh, repo, branch, focused = false }) {
     `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits.`, '',
     '## Whole diff (Claude) — Agent routine-reviewer, run_in_background', '',
     `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${focused ? WHOLE_DIFF_SMALL : WHOLE_DIFF_FULL} Read-only: no builds, no tests, no edits.`, '',
+    // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
     '## Fresh eyes (Codex) — Bash, run_in_background', '',
-    '```bash', `cd "${repo}" && codex exec -s read-only -m gpt-6-astra -c model_reasoning_effort="xhigh" -C "${repo}" -o "${path.join(path.dirname(brief), 'codex-review.md')}" "You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives." < /dev/null > "${path.join(path.dirname(brief), 'codex.log')}" 2>&1`, '```', '',
+    '```bash', `cd "${repo}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${repo}" -o "${path.join(path.dirname(brief), 'codex-review.md')}" "You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives." < /dev/null > "${path.join(path.dirname(brief), 'codex.log')}" 2>&1`, '```', '',
   ].join('\n');
 }
 

@@ -197,7 +197,7 @@
   "outputStyle": "Plain and short",
   "effortLevel": "medium",
   "modelSettings": {
-    "claude-fable-5-1": {
+    "claude-fable-5-2": {
       "effortLevel": "xhigh"
     },
     "claude-opus-5": {

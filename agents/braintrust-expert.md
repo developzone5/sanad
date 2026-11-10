@@ -1,6 +1,6 @@
 ---
 name: braintrust-expert
-description: One deep-risk braintrust specialist seat (Architect, Skeptic, Database optimizer, Security auditor, Authenticity reviewer, Client state, or an added domain specialist). Read-only Opus 5.5 at xhigh effort; the prompt names the seat and its question. Practical seats (Pragmatist, Performance, Product, Test designer) use braintrust-expert-sonnet.
+description: One deep-risk braintrust specialist seat (Architect, Skeptic, Database optimizer, Security auditor, Authenticity reviewer, Client state, or an added domain specialist). Read-only Opus (newest) at xhigh effort; the prompt names the seat and its question. Practical seats (Pragmatist, Performance, Product, Test designer) use braintrust-expert-sonnet.
 model: opus
 effort: xhigh
 disallowedTools: Write, Edit, NotebookEdit, Agent

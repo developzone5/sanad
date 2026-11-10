@@ -1,6 +1,6 @@
 ---
 name: routing-boss
-description: Sanad routing boss and braintrust final reviewer. Read-only Fable 5.1 at xhigh effort; routes uncertain or sensitive implementation work and later reviews specialist reports for the final design decision.
+description: Sanad routing boss and braintrust final reviewer. Read-only Fable (newest) at xhigh effort; routes uncertain or sensitive implementation work and later reviews specialist reports for the final design decision.
 model: fable
 effort: xhigh
 disallowedTools: Write, Edit, NotebookEdit, Agent
