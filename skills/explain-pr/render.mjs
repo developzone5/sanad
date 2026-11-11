@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const KINDS = ['feature', 'fix', 'cleanup'];
 const RESULTS = ['pass', 'fail', 'not run'];
-const LAYERS = ['frontend', 'api', 'service', 'database', 'test', 'other'];
+// middleware and filter (2026-11-11): the checks a request passes before the controller, in order.
+const LAYERS = ['frontend', 'middleware', 'filter', 'api', 'service', 'database', 'test', 'other'];
 const TONES = ['good', 'bad', 'warn', 'neutral'];
 const MARKER = '"__STORY_JSON__"';
 const THREE_MARKER = '/*__THREE_JS__*/';
@@ -22,7 +23,7 @@ export const LIMITS = {
   title: 9, summary: 24, chapters: 12, name: 5, short: 6, sentence: 26, mockRows: 5, mockText: 7, badge: 3, mockTitle: 6,
   stations: 5, station: 3, item: 4, snippets: 3, snippetTitle: 16, codeLines: 16, note: 16, inputs: 4, cases: 6, cell: 5,
   test: 12, gwt: 14, proof: 10, notes: 3, line: 12, takeaway: 14, why: 8, question: 22, options: 4, option: 8, explain: 22, labInputs: 4,
-  walkSteps: 7, walkLines: 12, does: 18, passes: 10,
+  walkSteps: 9, walkLines: 12, does: 18, passes: 10, checks: 20, checkDoes: 12, checkSkip: 8,
 };
 
 const words = (s) => String(s).trim().split(/\s+/).filter(Boolean).length;
@@ -257,7 +258,27 @@ export function validate(story) {
         // What this step hands to the next one: words ({ ar, en }) or code that reads the same in both.
         value(`${wat}.passes`, w.passes, LIMITS.passes, false);
         if (w.changed != null && typeof w.changed !== 'boolean') problems.push(`${wat}.changed: true or false`);
-        snippetOk(wat, w, LIMITS.walkLines);
+        // Middleware and filters (user 2026-11-11: "if there is steps before controller for example middleware its
+        // ok to tell me every step to understand the whole picture"): every check the request passes, in the
+        // real order, one plain line each with the line that adds it. A check the PR changed is marked; a check
+        // that does not act on this request says why in a few words. The code lines are optional here.
+        if (w.layer === 'middleware' || w.layer === 'filter' || w.checks != null) {
+          if (list(`${wat}.checks`, w.checks, 1, LIMITS.checks)) {
+            w.checks.forEach((ck, m) => {
+              const cat = `${wat}.checks[${m}]`;
+              if (!ck || typeof ck !== 'object') { problems.push(`${cat}: must be an object`); return; }
+              if (!str(ck.name)) problems.push(`${cat}.name: required (the middleware or filter as the code names it)`);
+              if (!(Number.isInteger(ck.line) && ck.line > 0)) problems.push(`${cat}.line: the line that adds it is required`);
+              text(`${cat}.does`, ck.does, LIMITS.checkDoes);
+              text(`${cat}.skip`, ck.skip, LIMITS.checkSkip, false);
+              if (ck.changed != null && typeof ck.changed !== 'boolean') problems.push(`${cat}.changed: true or false`);
+            });
+            if (w.checks.some((ck) => ck && ck.changed === true) && w.changed !== true) problems.push(`${wat}.changed: a step with a changed check is changed too`);
+          }
+          if (!str(w.file)) problems.push(`${wat}.file: required`);
+          if (!(Number.isInteger(w.line) && w.line > 0)) problems.push(`${wat}.line: the first line number is required`);
+          if (w.lines != null) snippetOk(wat, w, LIMITS.walkLines);
+        } else snippetOk(wat, w, LIMITS.walkLines);
       });
       if (!c.walk.some((w) => w && w.changed === true)) problems.push(`${at}.walk: mark the step the PR changes with "changed": true`);
     }

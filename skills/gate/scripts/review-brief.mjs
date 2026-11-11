@@ -6,7 +6,8 @@
 //   <out>-fresh.md the unframed brief for the fresh-eyes reviewers (Claude and Codex): the ticket,
 //                  the pinned diff, the project's missed-bug classes, the known items and the rules,
 //                  and nothing the author wrote (no Check lines, no callers, no proof result).
-//   launch.md      the exact launch lines for the designer and the three reviewers, next to <out>.
+//   launch.md      the exact launch lines for the designer and the reviewers, next to <out>: three
+//                  reviewers, or on a tiny or small change only the Claude fresh eyes (2026-11-11).
 //
 // 2026-11-07: a brief copied by hand from the last round lacked the newest rule; the designer got
 // other lines than the reviewers; launch prompts drifted between rounds; the diff named a moving
@@ -172,9 +173,9 @@ export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside
   ]);
 }
 
-// On a tiny or small change the whole-diff reviewer gets one narrow job (2026-11-07: with all ten
-// Check lines, a checklist and caller searches it was the slowest reviewer every round).
-const WHOLE_DIFF_SMALL = 'For this small change do only this: check each Check line against its tagged test and the code, and both locales of every changed text. No coverage checklist and no caller search; the fresh-eyes reviewers cover those.';
+// A tiny or small change gets ONE review, the Claude fresh eyes (user rule 2026-11-11: "yes skip codex on
+// small fixes"; TUW-242, a one-method fix, was heading to ~25 minutes, half of it three reviews). pre-review
+// checks each Check line's test mechanically, the job the small whole-diff pass had.
 const WHOLE_DIFF_FULL = 'Fill the coverage checklist lines that apply (CLIENT STATE, NEW BLOCKS, FAILURES / LOCALES, USERS FOUND BY SEARCH, TESTS CAN FAIL).';
 
 export function buildLaunch({ brief, fresh, repo, branch, focused = false }) {
@@ -184,11 +185,13 @@ export function buildLaunch({ brief, fresh, repo, branch, focused = false }) {
     `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. Area: <the files and the field or endpoint — author fills>. Deliver per your guide.`, '',
     '## Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', '',
     `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits.`, '',
-    '## Whole diff (Claude) — Agent routine-reviewer, run_in_background', '',
-    `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${focused ? WHOLE_DIFF_SMALL : WHOLE_DIFF_FULL} Read-only: no builds, no tests, no edits.`, '',
-    // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
-    '## Fresh eyes (Codex) — Bash, run_in_background', '',
-    '```bash', `cd "${repo}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${repo}" -o "${path.join(path.dirname(brief), 'codex-review.md')}" "You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives." < /dev/null > "${path.join(path.dirname(brief), 'codex.log')}" 2>&1`, '```', '',
+    ...(focused ? ['(A tiny or small change: only this one review, user rule 2026-11-11.)', ''] : [
+      '## Whole diff (Claude) — Agent routine-reviewer, run_in_background', '',
+      `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${WHOLE_DIFF_FULL} Read-only: no builds, no tests, no edits.`, '',
+      // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
+      '## Fresh eyes (Codex) — Bash, run_in_background', '',
+      '```bash', `cd "${repo}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${repo}" -o "${path.join(path.dirname(brief), 'codex-review.md')}" "You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives." < /dev/null > "${path.join(path.dirname(brief), 'codex.log')}" 2>&1`, '```', '',
+    ]),
   ].join('\n');
 }
 

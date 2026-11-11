@@ -49,8 +49,10 @@ function activeTimer(input, now) {
 const append = (file, kind, text, now) => fs.appendFileSync(file, `${now.toISOString()}\t${kind}\t${text}\n`);
 
 /** At an allowed stop: a wait starts, unless one is already open. */
-function idle(input, now = new Date()) {
-  if (!realSession(input)) return false;
+// busy: a check or helper of this work still runs (2026-11-11: a proof running on the test machine counted as
+// waiting, so TUW-242 showed 11 work minutes of 18). The machine is working, so the task is too.
+function idle(input, now = new Date(), { busy = false } = {}) {
+  if (!realSession(input) || busy) return false;
   const t = activeTimer(input, now);
   if (!t || t.last.kind === 'wait') return false;
   append(t.file, 'wait', IDLE, now);
@@ -66,4 +68,108 @@ function resume(input, now = new Date()) {
   return true;
 }
 
-module.exports = { idle, resume, pointerName, IDLE, STALE_HOURS };
+// ---------------------------------------------------------------------------------------------------------
+// The timer starts and ends by itself (2026-11-11, TUW-242: a small task's timer was started by hand 10
+// minutes late, and small and medium timers were never ended).
+//   start  the first code edit in a git repository while this session has no active timer starts one in
+//          <state>/timers/<time>-<repo>. Its first mark is the time of the user's message the work answers
+//          (the last real prompt in the transcript, at most START_BACK_MIN before), else now.
+//   end    a stop after a `GATE: PASS` line that came after the last code edit (the ship brief follows the
+//          gate) ends the active timer, if the gate is newer than the timer's start.
+// A timer paused by hand is not active, so a code edit starts a new one: resume a paused task first.
+const START_BACK_MIN = 60;
+
+function readTail(file, bytes) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, bytes);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    return buf.toString('utf8');
+  } finally { fs.closeSync(fd); }
+}
+
+/** The time of the last message the user typed (not a hook note, a tool result or a system notice), or null. */
+function lastPromptAt(transcriptPath) {
+  let lines;
+  try { lines = readTail(transcriptPath, 4 * 1024 * 1024).split(/\r?\n/); } catch (e) { return null; }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let e;
+    try { e = JSON.parse(lines[i]); } catch (err) { continue; }
+    if (!e || e.type !== 'user' || e.isMeta || !e.message) continue;
+    const c = e.message.content;
+    const blocks = Array.isArray(c) ? c : [{ type: 'text', text: String(c || '') }];
+    if (blocks.some((b) => b && b.type === 'tool_result')) continue;
+    const text = blocks.filter((b) => b && b.type === 'text').map((b) => b.text || '').join(' ').trim();
+    if (!text || text.startsWith('<')) continue;
+    const at = new Date(e.timestamp);
+    if (!Number.isNaN(at.getTime())) return at;
+  }
+  return null;
+}
+
+// The code files a tool call writes: a file tool's path, or the files a shell command writes.
+function editedCodeFiles(input, isCode) {
+  const tool = String(input.tool_name || '');
+  const toolInput = input.tool_input || {};
+  const cwd = input.cwd ? path.resolve(String(input.cwd)) : process.cwd();
+  const scan = require('./transcript-scan.js');
+  const files = [];
+  if (scan.EDIT_TOOLS.has(tool)) {
+    const p = toolInput.file_path || toolInput.notebook_path;
+    if (p) files.push(path.resolve(cwd, String(p)));
+  } else if (tool === 'Bash' || tool === 'PowerShell') {
+    const shell = require('./shell-command.cjs');
+    const opts = { tool, home: os.homedir(), tmp: os.tmpdir() };
+    for (const p of scan.shellEditPaths(String(toolInput.command || ''))) {
+      if (p.startsWith('<')) continue;
+      const resolved = shell.shellPath(p, cwd, opts);
+      if (resolved) files.push(resolved);
+    }
+  }
+  return files.filter((f) => (isCode || scan.isCodePath)(f));
+}
+
+function repoTop(file) {
+  let dir = path.dirname(file);
+  while (dir && !fs.existsSync(dir)) { const up = path.dirname(dir); if (up === dir) return ''; dir = up; }
+  try {
+    return require('child_process').execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, windowsHide: true }).trim();
+  } catch (e) { return ''; }
+}
+
+/** At a tool call (check-lock-guard): a code edit with no active timer starts one. Returns its folder, or null. */
+// isCode: tests only (their files live in the temp folder, which never counts as code).
+function autoStart(input, now = new Date(), { isCode } = {}) {
+  if (!realSession(input) || activeTimer(input, now)) return null;
+  const file = editedCodeFiles(input, isCode)[0];
+  const top = file && repoTop(file);
+  if (!top) return null;
+  const repo = path.basename(top).replace(/[^A-Za-z0-9_.-]/g, '_');
+  const dir = path.join(stateDir(), 'timers', now.toISOString().replace(/[:.]/g, '').slice(0, 15) + '-' + repo);
+  const asked = lastPromptAt(input.transcript_path);
+  const start = asked && asked <= now && now - asked <= START_BACK_MIN * 60000 ? asked : now;
+  fs.mkdirSync(dir, { recursive: true });
+  append(path.join(dir, 'timer.tsv'), 'step', `start (auto): ${start === now ? 'first code edit' : "the user's message"} — ${repo}`, start);
+  if (start !== now) append(path.join(dir, 'timer.tsv'), 'step', 'first code edit', now);
+  fs.mkdirSync(stateDir(), { recursive: true });
+  fs.writeFileSync(path.join(stateDir(), pointerName(input)), dir);
+  return dir;
+}
+
+/** At an allowed stop (stop-gate): a GATE: PASS after the last code edit ends the active timer. */
+function autoEnd(input, scan, now = new Date()) {
+  if (!realSession(input) || !scan || !(scan.lastGate > scan.lastEdit) || !/^PASS$/i.test(String(scan.lastGateVerdict || ''))) return false;
+  const gateAt = new Date(scan.lastGateAt || '');
+  const t = activeTimer(input, now);
+  if (!t || Number.isNaN(gateAt.getTime())) return false;
+  const [first] = fs.readFileSync(t.file, 'utf8').split(/\r?\n/);
+  const started = new Date(String(first || '').split('\t')[0]);
+  if (Number.isNaN(started.getTime()) || gateAt < started) return false;
+  append(t.file, 'step', 'end (auto: the gate passed; the ship brief)', now);
+  try { fs.rmSync(path.join(stateDir(), pointerName(input))); } catch (e) { /* already gone */ }
+  return true;
+}
+
+module.exports = { idle, resume, autoStart, autoEnd, lastPromptAt, pointerName, IDLE, STALE_HOURS };

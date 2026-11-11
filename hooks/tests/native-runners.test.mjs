@@ -78,3 +78,17 @@ test('installed native TypeScript and npm runners produce usable source-bound re
     fs.rmSync(scratch, { recursive: true, force: true });
   }
 });
+
+// 2026-11-11 (TUW-242): a proof that ended GREEN left the stop asking for tests on every turn; a NOT PROVED
+// proof behind `| tail` (exit 0) must still read as failed.
+test('a red-proof run with --then-green is a test run; its other modes are not; its own NOT PROVED is a failure', () => {
+  const proof = 'node C:/u/.claude/skills/gate/scripts/red-proof.mjs --repo C:/r --old origin/staging --files a.cs';
+  assert.equal(scan.segmentIsVerify(proof + ' --then-green --parallel 4 -- dotnet test x.csproj'), true);
+  assert.equal(scan.segmentIsVerify(quote([process.execPath, 'C:/u/red-proof.mjs', '--repo', 'C:/r', '--then-green', '--', 'dotnet', 'test'])), true);
+  assert.equal(scan.segmentIsVerify(proof + ' -- dotnet test x.csproj'), false, 'no green run: the fixed tree is not tested');
+  assert.equal(scan.segmentIsVerify('node C:/u/red-proof.mjs --repo C:/r --warm -- dotnet test --then-green'), false, 'a flag after -- belongs to the test command');
+  assert.equal(scan.segmentIsVerify('node C:/u/red-proof.mjs --repo C:/r --drop-copies --then-green'), false);
+  assert.equal(scan.verifyFailed('  GREEN ✗ the tests fail on the fixed tree\nRED-PROOF: NOT PROVED ✗ — see the lines above'), true);
+  assert.equal(scan.verifyFailed('RED-PROOF: SETUP ✗ — the fixed tree does not compile'), true);
+  assert.equal(scan.verifyFailed('  ran old code: exit 1 (161 s)\nRED-PROOF: RED ✓ — the tests fail on origin/staging (exit 1; 3 of 3 failing test(s) by an assertion)\n  GREEN ✓ the tests pass on the fixed tree\nRED-PROOF: PROVED ✓ — red on the old code'), false);
+});

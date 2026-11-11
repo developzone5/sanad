@@ -41,6 +41,8 @@ try {
 
 // The first tool call after a stop ends the task timer's idle wait (lib/timer-idle.cjs).
 try { require('./lib/timer-idle.cjs').resume(input); } catch (e) { /* the timer never blocks a tool call */ }
+// A code edit while no task timer runs starts one (lib/timer-idle.cjs autoStart, 2026-11-11).
+try { require('./lib/timer-idle.cjs').autoStart(input); } catch (e) { /* the timer never blocks a tool call */ }
 
 // Same folder as checkLockDir() in evidence.mjs.
 const LOCK_DIR = process.env.SANAD_CHECK_LOCK_DIR || path.join(os.homedir(), '.claude', 'state', 'check-locks');

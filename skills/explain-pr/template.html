@@ -223,6 +223,17 @@ html[dir="rtl"] .wbtn { padding: 4px 6px 4px 12px; }
 .wstep-h b { font-size: 17px; }
 .wstep-h .layer { font-size: 12px; font-weight: 600; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }
 .wstep-h .tag.hot { color: var(--accent-ink); background: var(--accent); }
+/* Middleware and filters: every check the request passes, in order */
+.wchecks { margin: 10px 0 0; padding-inline-start: 22px; display: grid; gap: 8px; }
+.wchecks li { padding: 6px 10px; border-radius: 10px; background: var(--panel-2); }
+.wchecks li.hot { box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
+.wchecks li.skip { opacity: .78; }
+.wchecks .ck-h { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.wchecks .ck-h code { font-weight: 650; }
+.wchecks .ck-at { font-size: 12px; color: var(--muted); }
+.wchecks .ck-h .tag.hot { color: var(--accent-ink); background: var(--accent); }
+.wchecks p { margin: 2px 0 0; font-size: 15px; }
+.wchecks .ck-skip { font-size: 13px; color: var(--muted); font-style: italic; }
 .wstep-h .tag.same { color: var(--muted); background: var(--panel-2); font-weight: 600; }
 .wstep .does { margin: 8px 0 0; font-size: 17px; line-height: 1.6; }
 .wfoot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px; margin-top: 10px; }
@@ -327,7 +338,7 @@ details.files li code { font-size: 13px; color: var(--muted); direction: ltr; un
       summary: 'الملخص', risks: 'المخاطر', notDone: 'لم يُنجز بعد', none: 'لا شيء', allFiles: 'كل الملفات المتغيرة', other: 'English', lessons: 'الدروس',
       walkTitle: 'اتبع الكود: من الصفحة إلى قاعدة البيانات', walkHint: 'اقرأ الخطوات بالترتيب. كل خطوة تعرض الملف والأسطر التي يمر بها الطلب.', step: 'الخطوة',
       passes: 'ينتقل إلى الخطوة التالية:', nextStep: 'الخطوة التالية', unchanged: 'بدون تغيير، يمر الطلب من هنا', changedStep: 'هنا التغيير', provesIt: 'يثبت أنه يعمل', goCode: 'اضغط على محطة لترى الكود الخاص بها.',
-      L_frontend: 'الصفحة', L_api: 'API', L_service: 'الخدمة', L_database: 'قاعدة البيانات', L_test: 'الاختبار', L_other: 'أخرى' },
+      L_frontend: 'الصفحة', L_middleware: 'الوسيط', L_filter: 'المرشّح', L_api: 'API', L_service: 'الخدمة', L_database: 'قاعدة البيانات', L_test: 'الاختبار', L_other: 'أخرى' },
     en: { fix: 'Fix', feature: 'Feature', cleanup: 'Cleanup', overview: 'Overview', start: 'Start the first lesson →', back: '← Back', next: 'Next →', finish: 'Summary →', lesson: 'Lesson', of: '/', changes: 'changes', files: 'files', explained: 'all explained', missing: 'not explained', checks: 'checks',
       problem: 'What was the problem?', cause: 'Why did it happen?', fix_: 'What is the fix?', code: 'Where is the change in the code?', cases: 'Try it: the same case, before and after', proof: 'How do we know it works?', before: 'Before', after: 'After',
       watch: 'Watch the example travel through the app and stop where the change is.', whereChange: 'the change is here', playing: 'playing',
@@ -338,7 +349,7 @@ details.files li code { font-size: 13px; color: var(--muted); direction: ltr; un
       summary: 'Summary', risks: 'Risks', notDone: 'Not done', none: 'Nothing listed', allFiles: 'Every changed file', other: 'العربية', lessons: 'Lessons',
       walkTitle: 'Follow the code, from the page to the database', walkHint: 'Read the steps in order. Each one shows the file and the lines the request passes through.', step: 'Step',
       passes: 'Passed to the next step:', nextStep: 'Next step', unchanged: 'unchanged, the request passes here', changedStep: 'the change is here', provesIt: 'proves it works', goCode: 'Press a station to see its code.',
-      L_frontend: 'Page', L_api: 'API', L_service: 'Service', L_database: 'Database', L_test: 'Test', L_other: 'Other' }
+      L_frontend: 'Page', L_middleware: 'Middleware', L_filter: 'Filters', L_api: 'API', L_service: 'Service', L_database: 'Database', L_test: 'Test', L_other: 'Other' }
   };
   var STORE = 'explain-pr-lang';
   var lang = story.defaultLang === 'en' ? 'en' : 'ar';
@@ -418,6 +429,8 @@ details.files li code { font-size: 13px; color: var(--muted); direction: ltr; un
   function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
   var ICON = {
     frontend: 'M3 5h18v11H3z M8 20h8 M12 16v4',
+    middleware: 'M12 3l7 3v5c0 4.5-3 8-7 10c-4-2-7-5.5-7-10V6z',
+    filter: 'M4 5h16l-6 7v6l-4 2v-8z',
     api: 'M4 9h13l-3-3 M20 15H7l3 3',
     service: 'M12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7z M12 2v3 M12 19v3 M2 12h3 M19 12h3 M4.9 4.9l2.1 2.1 M17 17l2.1 2.1 M4.9 19.1L7 17 M17 7l2.1-2.1',
     database: 'M5 6c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3z M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6 M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3',
@@ -425,7 +438,7 @@ details.files li code { font-size: 13px; color: var(--muted); direction: ltr; un
     other: 'M12 5a7 7 0 1 0 0 14a7 7 0 1 0 0-14z'
   };
   // Each layer's colour, shared by the 3D stations and the code walk.
-  var LAYER = { frontend: '--accent', api: '--t-typ', service: '--warn', database: '--good', test: '--t-kw', other: '--muted' };
+  var LAYER = { frontend: '--accent', middleware: '--t-str', filter: '--t-num', api: '--t-typ', service: '--warn', database: '--good', test: '--t-kw', other: '--muted' };
   function icon(layer) {
     var NS = 'http://www.w3.org/2000/svg', s = document.createElementNS(NS, 'svg'), p = document.createElementNS(NS, 'path');
     s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('aria-hidden', 'true'); p.setAttribute('d', ICON[layer] || ICON.other); s.appendChild(p); return s;
@@ -771,7 +784,22 @@ details.files li code { font-size: 13px; color: var(--muted); direction: ltr; un
       hd.appendChild(el('span', 'tag ' + (isTest ? 'pass' : w.changed ? 'hot' : 'same'), isTest ? T.provesIt : w.changed ? T.changedStep : T.unchanged));
       card.appendChild(hd);
       card.appendChild(el('p', 'does', tx(w.does)));
-      card.appendChild(snippet(w));
+      // Middleware and filters: every check the request passes, in order, one plain line each; the changed one
+      // marked, one that does not act on this request with its short reason.
+      if (arr(w.checks).length) {
+        var ol = el('ol', 'wchecks');
+        w.checks.forEach(function (ck) {
+          var it = el('li', ck.changed ? 'hot' : ck.skip ? 'skip' : null), top = el('div', 'ck-h');
+          top.appendChild(el('code', null, ck.name));
+          top.appendChild(el('span', 'ck-at', String(w.file).split('/').pop() + ':' + ck.line));
+          if (ck.changed) top.appendChild(el('span', 'tag hot', T.changedStep));
+          it.appendChild(top); it.appendChild(el('p', null, tx(ck.does)));
+          if (ck.skip) it.appendChild(el('p', 'ck-skip', tx(ck.skip)));
+          ol.appendChild(it);
+        });
+        card.appendChild(ol);
+      }
+      if (arr(w.lines).length) card.appendChild(snippet(w));
       if (k < steps.length - 1) {
         var foot = el('div', 'wfoot');
         if (w.passes) { var ps = el('p', 'wpass'); ps.appendChild(el('span', 'arrow', '↓')); ps.appendChild(el('span', null, T.passes)); ps.appendChild(el('span', 'v', tx(w.passes))); foot.appendChild(ps); }

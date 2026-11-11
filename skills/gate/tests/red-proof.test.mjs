@@ -241,6 +241,36 @@ test('--parallel: every run in its own copy; the folder is untouched and no work
   assert.equal(worktrees.length, 1, 'every temporary copy is removed: ' + worktrees.join(' | '));
 });
 
+// 2026-11-11 (TUW-242): an older test still expected the old behavior; the proof said so only after its
+// four red runs, 7 minutes in. Green now runs first and alone; the red runs start only when it passes.
+test('--parallel: green runs first, then the red runs; a passing proof reads as before', () => {
+  const { repo, breaks } = breakFixture();
+  writeBreaks(breaks, ['saves nothing']);
+  const result = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD~1', '--files', 'app.cjs', '--breaks', breaks, '--then-green', '--parallel', '3', '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 0, result.stdout);
+  const ran = result.stdout.split(/\r?\n/).filter(l => /^ {2}ran /.test(l)).map(l => l.replace(/:.*/, '').trim());
+  assert.deepEqual(ran.slice(0, 1), ['ran green'], 'green ran before the others: ' + ran.join(' | '));
+  assert.equal(ran.length, 3);
+  assert.match(result.stdout, /3 run\(s\), 3 at a time, each in its own copy; green first/);
+  assert.match(result.stdout, /RED-PROOF: PROVED ✓ — red on the old code, 1 break\(s\) caught, green on the fix/);
+});
+
+test('--then-green: when the fixed tree fails, the red runs are skipped and the proof ends at once', () => {
+  for (const parallel of [[], ['--parallel', '3']]) {
+    const { repo, breaks } = breakFixture();
+    writeBreaks(breaks, ['saves nothing']);
+    fs.writeFileSync(path.join(repo, 'app.cjs'), 'module.exports = 3;\n');
+    const rule = fs.readFileSync(path.join(repo, 'rule.cjs'));
+    const result = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD~1', '--files', 'app.cjs', '--breaks', breaks, '--then-green', ...parallel, '--', process.execPath, 'check.cjs']);
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stdout, /GREEN ✗ the tests fail on the fixed tree/);
+    assert.match(result.stdout, /✓ assert {2}src\/a\.test\.cjs > form > shows it once/, 'the failing test is named');
+    assert.match(result.stdout, /RED-PROOF: NOT PROVED ✗ — the fixed tree fails its own tests, so the red runs were skipped/);
+    assert.doesNotMatch(result.stdout, /ran (?:old code|break)|RED ✓|BREAK [✓✗]/, 'no red run started: ' + parallel.join(' '));
+    assert.deepEqual(fs.readFileSync(path.join(repo, 'rule.cjs')), rule);
+  }
+});
+
 test('a test machine in git config sends the run there; --local keeps it here', () => {
   const { repo, breaks } = breakFixture();
   writeBreaks(breaks, ['saves nothing']);

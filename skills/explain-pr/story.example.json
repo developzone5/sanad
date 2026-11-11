@@ -300,6 +300,120 @@
           ]
         },
         {
+          "layer": "middleware",
+          "label": {
+            "ar": "طريق الطلب",
+            "en": "Request pipeline"
+          },
+          "file": "Api/Program.cs",
+          "line": 140,
+          "does": {
+            "ar": "يمر الطلب على هذه الفحوص بالترتيب قبل أن يصل إلى المتحكم.",
+            "en": "The request passes these checks in order before it reaches the controller."
+          },
+          "passes": {
+            "ar": "طلب موثوق بعنوانه الحقيقي",
+            "en": "A trusted request with its real address"
+          },
+          "checks": [
+            {
+              "name": "UseForwardedHeaders",
+              "line": 140,
+              "does": {
+                "ar": "يأخذ عنوان المستخدم الحقيقي من الوكيل.",
+                "en": "Takes the user's real address from the proxy."
+              }
+            },
+            {
+              "name": "UseExceptionHandler",
+              "line": 143,
+              "does": {
+                "ar": "يحوّل أي خطأ إلى رد آمن.",
+                "en": "Turns any error into a safe reply."
+              }
+            },
+            {
+              "name": "UseSwagger",
+              "line": 146,
+              "does": {
+                "ar": "يعرض صفحة توثيق الـ API.",
+                "en": "Shows the API documentation page."
+              },
+              "skip": {
+                "ar": "في بيئة التطوير فقط",
+                "en": "Development only"
+              }
+            },
+            {
+              "name": "UseCors",
+              "line": 149,
+              "does": {
+                "ar": "يسمح لموقع الواجهة فقط.",
+                "en": "Allows only the site's own front end."
+              }
+            },
+            {
+              "name": "UseRateLimiter",
+              "line": 151,
+              "does": {
+                "ar": "يحد عدد محاولات الدخول لكل عنوان.",
+                "en": "Limits sign-in tries per address."
+              }
+            },
+            {
+              "name": "UseAuthentication",
+              "line": 153,
+              "does": {
+                "ar": "يقرأ هوية المستخدم من الكوكي.",
+                "en": "Reads the user's identity from the cookie."
+              },
+              "skip": {
+                "ar": "الدخول بلا هوية بعد",
+                "en": "No identity yet at sign-in"
+              }
+            },
+            {
+              "name": "UseAuthorization",
+              "line": 154,
+              "does": {
+                "ar": "يتحقق من الصلاحية المطلوبة للمسار.",
+                "en": "Checks the role the route needs."
+              },
+              "skip": {
+                "ar": "المسار مفتوح للجميع",
+                "en": "The route is open to all"
+              }
+            }
+          ]
+        },
+        {
+          "layer": "filter",
+          "label": {
+            "ar": "فلاتر الطلب",
+            "en": "Action filters"
+          },
+          "file": "Api/Program.cs",
+          "line": 88,
+          "does": {
+            "ar": "تعمل هذه الفلاتر قبل دالة المتحكم مباشرة.",
+            "en": "These filters run right before the controller action."
+          },
+          "passes": {
+            "ar": "بيانات دخول صالحة",
+            "en": "Valid sign-in data"
+          },
+          "checks": [
+            {
+              "name": "ValidationFilter",
+              "line": 88,
+              "does": {
+                "ar": "يرفض بريدًا فارغًا أو كلمة مرور فارغة برد 400.",
+                "en": "Rejects an empty email or password with 400."
+              }
+            }
+          ]
+        },
+        {
           "layer": "api",
           "label": "POST /login",
           "file": "Api/Controllers/AuthController.cs",
