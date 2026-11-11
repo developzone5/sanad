@@ -138,7 +138,8 @@ test('code is explained line by line', () => {
 
 test('a code walk follows the request layer by layer, each step explained, one step changed', () => {
   const s = copy(), walk = s.chapters[0].walk;
-  assert.deepEqual(walk.map((x) => x.layer), ['frontend', 'api', 'service', 'database', 'test']);
+  assert.deepEqual(walk.map((x) => x.layer), ['frontend', 'middleware', 'filter', 'api', 'service', 'database', 'test']);
+  walk.splice(1, 2);
   walk[0].layer = 'browser';
   walk[1].lines = walk[1].lines.map((l) => (typeof l === 'string' ? l : l.c));
   delete walk[2].does;
@@ -153,10 +154,29 @@ test('a code walk follows the request layer by layer, each step explained, one s
   assert.ok(has(validate(t), 'chapters[0].walk: mark the step the PR changes'));
   const u = copy();
   u.chapters[0].walk = u.chapters[0].walk.concat(u.chapters[0].walk);
-  assert.ok(has(validate(u), 'chapters[0].walk: 10 items, 2–7 allowed'));
+  assert.ok(has(validate(u), 'chapters[0].walk: 14 items, 2–9 allowed'));
   const v = copy();
-  v.chapters[0].walk[2].lines = v.chapters[0].walk[2].lines.concat(Array(LIMITS.walkLines).fill(' x'));
-  assert.ok(has(validate(v), 'chapters[0].walk[2].lines:'));
+  v.chapters[0].walk[4].lines = v.chapters[0].walk[4].lines.concat(Array(LIMITS.walkLines).fill(' x'));
+  assert.ok(has(validate(v), 'chapters[0].walk[4].lines:'));
+});
+
+// 2026-11-11 (user: "if there is steps before controller for example middleware its ok to tell me every step"):
+// the walk starts where the request enters the server, every check in order, the changed one marked.
+test('middleware and filter steps list every check in order, one plain line each, from the real code', () => {
+  const s = copy(), [mw, filter] = s.chapters[0].walk.slice(1, 3);
+  assert.deepEqual([mw.layer, filter.layer], ['middleware', 'filter']);
+  assert.ok(mw.checks.some((ck) => ck.skip), 'a check that does not act on this request says why');
+  assert.equal(mw.lines, undefined, 'a checks step needs no code lines');
+  delete filter.checks;
+  mw.checks[0].line = 0;
+  mw.checks[1].does = { ar: long(LIMITS.checkDoes + 1), en: 'ok' };
+  mw.checks[2].skip = { ar: 'x', en: long(LIMITS.checkSkip + 1) };
+  mw.checks[3].changed = true;
+  delete mw.checks[4].name;
+  const problems = validate(s);
+  for (const p of ['chapters[0].walk[2].checks:', 'chapters[0].walk[1].checks[0].line: the line that adds it', 'chapters[0].walk[1].checks[1].does.ar:',
+    'chapters[0].walk[1].checks[2].skip.en:', 'chapters[0].walk[1].changed: a step with a changed check is changed too', 'chapters[0].walk[1].checks[4].name: required']) assert.ok(has(problems, p), p);
+  for (const needle of ["'wchecks'", 'ck.skip', "L_middleware:", "L_filter:", 'middleware:', 'filter:']) assert.ok(template.includes(needle), needle);
 });
 
 test('the page draws the code walk and lets a station open its step', () => {

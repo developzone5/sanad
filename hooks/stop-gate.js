@@ -25,7 +25,12 @@ const fs = require('fs');
 const path = require('path');
 
 // A stop that goes through starts the task timer's idle wait (lib/timer-idle.cjs); a blocked stop does not.
-function markIdle() { try { require('./lib/timer-idle.cjs').idle(input); } catch (e) { /* the timer never blocks a stop */ } }
+// A GATE: PASS after the last code edit ends the task timer first (lib/timer-idle.cjs autoEnd, 2026-11-11).
+var lastScan = null, stopBusy = false; // stopBusy: a check or helper of this work still runs (not idle time)
+function markIdle() {
+  try { if (lastScan) require('./lib/timer-idle.cjs').autoEnd(input, lastScan); } catch (e) { /* the timer never blocks a stop */ }
+  try { require('./lib/timer-idle.cjs').idle(input, undefined, { busy: stopBusy }); } catch (e) { /* the timer never blocks a stop */ }
+}
 function out(obj) { if (!obj || obj.decision !== 'block') markIdle(); process.stdout.write(JSON.stringify(obj)); process.exit(0); }
 function allow() { markIdle(); process.exit(0); }
 
@@ -52,6 +57,7 @@ try { scan = require(path.join(__dirname, 'lib', 'transcript-scan.js')); } catch
 let r;
 try { r = scan.scanTranscript(transcriptPath); } catch (e) { allow(); }
 if (!r) allow();
+lastScan = r;
 
 /* ---------------------------------------------------------------------------
  * Verdict — exactly one of six exits:
@@ -125,6 +131,7 @@ if (!failedAfterEdit && !pendingAfterEdit && r.lastProbeFailure > lastEdit) {
 // it instead of asking for a check that cannot run yet (2026-11-06). Its finish brings the next stop
 // back to this gate. A helper launched before a later passing check belongs to older work.
 if (!failedAfterEdit && !pendingAfterEdit && (r.lastRunningHelper ?? -1) > r.lastVerify) {
+  stopBusy = true;
   out({ systemMessage: 'A helper for this work is still running; the build/test check follows when its result is in.' });
 }
 
@@ -138,6 +145,7 @@ const file = /^<git(?:-remote)?>$/.test(r.lastEditPath) ? ' (last change: a git 
 // A run no notice can bring back (finished without an exit code, or no task id) still blocks.
 const stuckAfterEdit = (r.lastStuckVerifyStop ?? -1) > lastEdit;
 if (!failedAfterEdit && pendingAfterEdit && !stuckAfterEdit) {
+  stopBusy = true;
   out({ systemMessage: 'A build/test for this work is still running in the background: `' + shown(r.lastPendingVerifyStopCommand) + '`. Not verified yet; this check runs again when it finishes.' });
 }
 

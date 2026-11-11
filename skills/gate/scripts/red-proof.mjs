@@ -7,7 +7,8 @@
 //              one product file), the named tests must fail. 2026-11-07: three rounds in a row a
 //              "nothing happens" check passed review that no run had ever seen fail; the old code
 //              proves only the first failing line of each test. A break proves the rest.
-//   green      (--then-green): the same command on the fixed tree passes, before any reviewer reads.
+//   green      (--then-green): the same command on the fixed tree passes, before any reviewer reads. It runs
+//              FIRST and alone; when it fails, no red run starts (2026-11-11).
 //   one break  (--break <file> --find <text> --put <text>): a test of code that already works.
 //
 // Why a script: a red run typed as a plain test command is kept as a failed check by the push
@@ -580,19 +581,27 @@ async function main() {
     finish(0);
   }
 
-  // The runs: the old code, each break, then green on the fixed tree.
+  // The runs: the old code, each break, then green on the fixed tree (the order the report reads them in).
+  // Green RUNS first (2026-11-11, TUW-242: an older test still expected the old behavior, and the proof
+  // said so only after its four red runs, 7 minutes in). It takes about a minute in the copy the compile
+  // check warmed; when the fixed tree fails, the red runs are skipped and the proof ends at once.
   const jobs = [];
   if (hasOld) jobs.push({ kind: 'old', label: 'old code', changes: oldPlan
     ? oldPlan.map(o => ({ file: o.file, content: () => (o.content64 == null ? null : Buffer.from(o.content64, 'base64')) }))
     : oldRun.map(file => ({ file, content: () => { try { return git('show', `${oldRef}:${file}`); } catch { return null; } } })) });
   for (const b of breaks) jobs.push({ kind: 'break', b, label: b.single ? 'break' : 'break ' + b.name, changes: [{ file: b.file, content: (target) => fs.readFileSync(target, 'utf8').replace(b.find, () => b.put) }] });
   if (green) jobs.push({ kind: 'green', label: 'green', changes: [] });
+  const greenAt = green ? jobs.length - 1 : -1;
+  const runFailed = (r) => !r || r.timedOut || r.error || r.status !== 0;
   let results;
   if (parallel > 1 && !breaks.some(b => b.single)) results = await runParallel(jobs);
   else {
     await compileCheck(cwdHere);
-    results = [];
-    for (const j of jobs) results.push(j.kind === 'green' ? await runProcess(command, cwdHere) : await swapRun(j.changes));
+    results = new Array(jobs.length);
+    if (green) results[greenAt] = await runProcess(command, cwdHere);
+    if (!green || !runFailed(results[greenAt])) {
+      for (let i = 0; i < jobs.length; i++) if (i !== greenAt) results[i] = await swapRun(jobs[i].changes);
+    }
   }
 
   // A `dotnet test` command builds the fixed tree once before any run (2026-11-09: a missing `using`
@@ -642,10 +651,16 @@ async function main() {
     }
     const out = new Array(list.length);
     let next = 0;
-    say(`RED-PROOF: ${list.length} run(s), ${width} at a time, each in its own copy`);
+    // Green first, in the first copy (the one the compile check warmed); the other runs start when it
+    // passes, and none starts when it fails.
+    const order = [...list.keys()].sort((a, b) => Number(list[b].kind === 'green') - Number(list[a].kind === 'green'));
+    let releaseGreen = () => {}, stopped = false;
+    const greenGate = list.some(j => j.kind === 'green') ? new Promise(r => { releaseGreen = r; }) : null;
+    say(`RED-PROOF: ${list.length} run(s), ${width} at a time, each in its own copy${greenGate ? '; green first' : ''}`);
     async function worker(copy) {
       while (next < list.length) {
-        const i = next++;
+        const i = order[next++];
+        if (greenGate && list[i].kind !== 'green') { await greenGate; if (stopped) return; }
         const started = Date.now();
         const links = [], saved = [];
         let unsure = false;
@@ -670,6 +685,7 @@ async function main() {
           if (unsure || out[i].timedOut || out[i].error) { try { dropCopy(copy); } catch { /* the next sync clones it again */ } }
         }
         say(`  ran ${list[i].label}: ${out[i].timedOut ? 'stopped at the time limit' : out[i].error ? 'could not run' : 'exit ' + out[i].status} (${Math.round((Date.now() - started) / 1000)} s)`);
+        if (list[i].kind === 'green') { stopped = runFailed(out[i]); releaseGreen(); }
       }
     }
     await Promise.all(slots.map(worker));
@@ -731,6 +747,16 @@ async function main() {
     }
   }
 
+  // Green ran first and failed: the fixed tree fails its own tests, so no red run started.
+  if (green && runFailed(results[greenAt])) {
+    const g = results[greenAt];
+    if (g.timedOut) { say(`RED-PROOF: TIMEOUT ✗ — green ran past ${timeoutMin} min; it and every process it started were stopped; no red run started; files restored.`); finish(5); }
+    const r = read(g, 'green');
+    setupStop(r); showWhy(r);
+    say('  GREEN ✗ the tests fail on the fixed tree');
+    say('RED-PROOF: NOT PROVED ✗ — the fixed tree fails its own tests, so the red runs were skipped. An older test may still expect the old behavior: fix the tests or the code, then run again; files restored.');
+    finish(1);
+  }
   let ok = true;
   // 0. A run past the time limit proves nothing: named first, the others still read.
   const late = jobs.filter((j, i) => results[i]?.timedOut);

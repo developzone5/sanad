@@ -32,7 +32,7 @@ test('every ticket line needs a Check line, and every Check line names its sourc
 });
 
 // 2026-11-07: a reviewer re-asked a question the user had closed; the slowest reviewer had the widest job.
-test('decided questions go into both briefs; a small change gives the whole-diff reviewer one narrow job', () => {
+test('decided questions go into both briefs; a small change gets one review, the Claude fresh eyes', () => {
   const list = '- 2026-11-06 · Twin · F.tsx:1 · open\n- 2026-11-06 · Wording question — CLOSED: the ticket decides (user: "is qa not mention")\n';
   const decided = decidedItems(list);
   assert.deepEqual(decided, ['Wording question — CLOSED: the ticket decides (user: "is qa not mention")']);
@@ -40,8 +40,10 @@ test('decided questions go into both briefs; a small change gives the whole-diff
   const args = { repo: 'C:/r', branch: 'b', base: 'origin/staging', mergeBase: 'a'.repeat(40), ticket: 't', checks: ['x'], outside: withDecided, facts: { stack: '', size: 'SIZE: small (diff)', callers: '' } };
   for (const brief of [buildBrief(args), buildFreshBrief({ ...args, missed: [] })]) assert.match(brief, /## Decided by the user — do not ask again\n\n- Wording question — CLOSED/);
   const small = buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b', focused: true });
-  assert.match(small, /whole-diff pass[^\n]*For this small change do only this: check each Check line against its tagged test/);
-  assert.doesNotMatch(small, /Fill the coverage checklist/);
+  // A tiny or small change gets one review (user rule 2026-11-11): the Claude fresh eyes, no whole-diff pass, no Codex.
+  assert.match(small, /FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
+  assert.doesNotMatch(small, /whole-diff pass|codex exec|Fill the coverage checklist/);
+  assert.match(small, /Test designer/, 'the designer keeps its line');
   assert.match(buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b' }), /Fill the coverage checklist/);
 });
 

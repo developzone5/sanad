@@ -145,6 +145,14 @@ function segmentIsVerify(seg) {
   if (/(?:^|\s)(?:--list-tests|--collect-only|--collectonly|--passWithNoTests|--help|--version)(?:\s|=|$)/i.test(command)) return false;
   // TypeScript inventory/help commands can exit 0 without checking any source.
   if (/^(?:npx\s+)?tsc\b/i.test(command) && /(?:^|\s)(?:--listFilesOnly|--showConfig|--help|--version|-h|-v)(?:\s|=|$)/i.test(command)) return false;
+  // A red-proof run that ends with green on the fixed tree runs the tests on the code as it is: a test run
+  // (2026-11-11, TUW-242: a proved tree left the stop asking for tests on every turn of a paused task). Its
+  // other modes (warm, drop copies, restore, show the remote command) and a run without --then-green test
+  // no fixed tree.
+  if (/^node(?:\.exe)?\s+\S*red-proof\.mjs(?:\s|$)/i.test(command)) {
+    const own = command.split(/\s--\s/)[0];
+    return /(?:^|\s)--then-green(?:\s|$)/.test(own) && !/(?:^|\s)--(?:warm|drop-copies|restore|show-remote)(?:\s|$)/.test(own);
+  }
   return VERIFY_ANCHORED.test(command);
 }
 
@@ -369,6 +377,9 @@ const FAIL_MARKERS = [
   /FAILED \(failures=/,
   /(?:BUILD|TEST|TSC|ESLINT|LINT|TYPECHECK|SETUP|CLEANUP)_EXIT=(?:[1-9]|-\d)/,
   /The build failed\./i,
+  // red-proof.mjs proved nothing. Its exit code is lost behind a pipe (`… | tail`), so its own verdict counts.
+  /RED-PROOF: (?:NOT PROVED|NOT RED|SETUP|TIMEOUT|REMOTE-DOWN)\b/,
+  /^\s*GREEN ✗/m,
 ];
 
 function resultText(block, entry) {
@@ -520,7 +531,7 @@ function taskNotifications(entry) {
 }
 
 function scanTranscript(transcriptPath) {
-  const res = { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastGitRepo: '', passedTrees: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
+  const res = { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastGitRepo: '', passedTrees: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
   let lines;
   try { lines = readTranscript(transcriptPath).split('\n'); } catch (e) { return res; }
 
@@ -584,7 +595,7 @@ function scanTranscript(transcriptPath) {
       if (blk.type === 'text' && typeof blk.text === 'string' && msg && msg.role === 'assistant') {
         const plain = blk.text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, '');
         const g = [...plain.matchAll(GATE_RE)].pop();
-        if (g) { res.lastGate = seq + (g.index + 1) / (plain.length + 1); res.lastGateVerdict = g[1]; }
+        if (g) { res.lastGate = seq + (g.index + 1) / (plain.length + 1); res.lastGateVerdict = g[1]; res.lastGateAt = String(entry.timestamp || ''); }
         const rv = [...plain.matchAll(REVIEW_RE)].pop();
         if (rv) {
           res.lastReview = seq + (rv.index + 1) / (plain.length + 1); res.lastReviewVerdict = rv[1];

@@ -63,6 +63,8 @@ test('the hooks mark idle time on the active timer: a stop starts a wait, the ne
     execFileSync(process.execPath, [script, 'mark', notes, 'build'], { encoding: 'utf8', env: { ...process.env } });
     const now = new Date();
     assert.equal(idle(testRun, now), false, 'a hook test run never marks');
+    // 2026-11-11: a proof running on the test machine counted as waiting (TUW-242: 11 work minutes of 18).
+    assert.equal(idle(real, now, { busy: true }), false, 'a stop while a check of this work runs is work, not waiting');
     assert.equal(idle(real, now), true);
     assert.equal(idle(real, now), false, 'one wait at a time');
     assert.equal(resume(real, new Date(now.getTime() + 60000)), true);
@@ -168,5 +170,59 @@ test('a timer last marked long ago is left alone', async () => {
     if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
     fs.rmSync(state, { recursive: true, force: true });
     fs.rmSync(notes, { recursive: true, force: true });
+  }
+});
+
+// 2026-11-11 (TUW-242): a small task's timer was started by hand 10 minutes late, and small and medium timers
+// were never ended. The hooks now start one at the first code edit and end it at a passing gate.
+test('the timer starts by itself at the first code edit, from the user message, and ends at GATE: PASS', async () => {
+  const { createRequire } = await import('node:module');
+  const { autoStart, autoEnd, lastPromptAt } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const state = tmp(), repo = tmp();
+  const before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    fs.writeFileSync(path.join(repo, 'a.cs'), 'class A {}\n');
+    const now = new Date();
+    const asked = new Date(now.getTime() - 5 * 60000);
+    const transcript = path.join(state, '.claude', 'projects', 'p', 'session.jsonl');
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(transcript, [
+      { type: 'user', timestamp: asked.toISOString(), message: { role: 'user', content: 'ok fix it now' } },
+      { type: 'user', isMeta: true, timestamp: now.toISOString(), message: { role: 'user', content: 'Stop hook feedback: …' } },
+      { type: 'user', timestamp: now.toISOString(), message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } },
+    ].map(e => JSON.stringify(e)).join('\n') + '\n');
+    assert.equal(lastPromptAt(transcript).toISOString(), asked.toISOString(), 'hook notes and tool results are not the user');
+    // The temp folder never counts as code in a real session, so the test names what does.
+    const isCode = (f) => f.endsWith('.cs');
+    const edit = (file, tool = 'Edit') => ({ session_id: SID, transcript_path: transcript, cwd: repo, tool_name: tool, tool_input: { file_path: path.join(repo, file) } });
+
+    assert.equal(autoStart(edit('README.md'), now, { isCode }), null, 'not a code file: no timer');
+    assert.equal(autoStart({ ...edit('a.cs'), transcript_path: path.join(state, 'fake.jsonl') }, now), null, 'a hook test run never starts one');
+    const dir = autoStart(edit('a.cs'), now, { isCode });
+    assert.ok(dir && dir.startsWith(path.join(state, 'timers')), String(dir));
+    assert.deepEqual(readMarks(dir).map(m => [m.at.toISOString(), m.text]), [
+      [asked.toISOString(), `start (auto): the user's message — ${path.basename(repo)}`],
+      [now.toISOString(), 'first code edit'],
+    ]);
+    assert.equal(fs.readFileSync(path.join(state, POINTER), 'utf8'), dir);
+    assert.equal(autoStart(edit('a.cs'), now, { isCode }), null, 'one timer at a time');
+
+    const later = new Date(now.getTime() + 10 * 60000);
+    const old = { lastEdit: 5, lastGate: 9, lastGateVerdict: 'PASS', lastGateAt: new Date(asked.getTime() - 60000).toISOString() };
+    assert.equal(autoEnd(edit('a.cs'), old, later), false, 'a gate from before this timer does not end it');
+    assert.equal(autoEnd(edit('a.cs'), { ...old, lastGateAt: later.toISOString(), lastGate: 4 }, later), false, 'a gate before the last edit does not end it');
+    assert.equal(autoEnd(edit('a.cs'), { ...old, lastGateAt: later.toISOString(), lastGateVerdict: 'FAIL' }, later), false);
+    assert.equal(autoEnd(edit('a.cs'), { ...old, lastGateAt: later.toISOString() }, later), true);
+    assert.equal(readMarks(dir).pop().text, 'end (auto: the gate passed; the ship brief)');
+    assert.equal(fs.existsSync(path.join(state, POINTER)), false, 'ended: no active timer');
+
+    const next = autoStart(edit('a.cs', 'Write'), new Date(later.getTime() + 60000), { isCode });
+    assert.ok(next && next !== dir, 'the next code edit after the end starts the next task timer');
+  } finally {
+    if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
+    fs.rmSync(state, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 });
