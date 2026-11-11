@@ -108,3 +108,91 @@ test('it checks the repository it is given, not another one, and refuses a non-r
   assert.ok(inside.stdout.split(/\r?\n/)[0].endsWith(path.basename(repo)), 'the current folder is the default: ' + inside.stdout);
   assert.equal(spawnSync(process.execPath, [script, '--repo', root], { encoding: 'utf8', env }).status, 2);
 });
+
+// 2026-11-11 (TUW-242, TUW-243): a task's own folder (a new git worktree) has no node_modules. Lint and types
+// were left out without a word, and the summary still read "6 of 6 checks passed".
+function noModulesFixture() {
+  const f = fixture();
+  f.write('app/package.json', '{"name":"app","devDependencies":{"eslint":"^9.0.0","typescript":"~5.9.0"}}\n');
+  f.write('app/tsconfig.json', '{}\n');
+  f.write('app/src/b.ts', 'export const b = 1;\n');
+  f.git('add', '-A'); f.git('commit', '-qm', 'base with app'); f.git('branch', '-f', 'base');
+  f.write('app/src/b.ts', 'export const b = 2;\n');
+  f.write('web/src/a.ts', 'export const a = 6;\n');
+  return f;
+}
+
+test('a package with no node_modules here: lint and types run in the clone on the test machine', async () => {
+  const { planChecks, preReview } = await import('../scripts/pre-review.mjs');
+  const { repo } = noModulesFixture();
+  const remote = { host: 'pc2', repo: 'C:/r/My App', node: 'C:/n/node.exe' };
+  const { checks } = planChecks({ repo, base: 'base', node: process.execPath, remote });
+  const named = (start) => checks.filter(c => c.name.startsWith(start));
+  assert.deepEqual(named('lint').map(c => c.name).sort(), ['lint app (1 file, on pc2)', 'lint web (1 file)'], 'the package with node_modules stays here');
+  const [lint] = named('lint app'), [types] = named('types app');
+  assert.equal(lint.cmd, 'ssh'); assert.equal(lint.remote, true);
+  const there = String.raw`cd /d "C:\r\My App\app" && C:/n/node.exe `;
+  assert.deepEqual(lint.args.slice(-2), ['pc2', there + 'node_modules/eslint/bin/eslint.js src/b.ts']);
+  assert.equal(types.name, 'types app (on pc2)');
+  assert.ok(types.args.at(-1).startsWith(there + String.raw`node_modules/typescript/bin/tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile %TEMP%\sanad-tsc-`), types.args.at(-1));
+  assert.match(types.args.at(-1), /sanad-tsc-[0-9a-f]{12}\.tsbuildinfo$/);
+  assert.equal(named('types web')[0].cmd, process.execPath, 'types of the package with node_modules stay here');
+  // A clone on a machine that is not Windows.
+  const posix = planChecks({ repo, base: 'base', node: process.execPath, remote: { host: 'box', repo: '/srv/app', node: 'node' } }).checks.find(c => c.name.startsWith('lint app'));
+  assert.equal(posix.args.at(-1), "cd '/srv/app/app' && node node_modules/eslint/bin/eslint.js src/b.ts");
+
+  // The sync fails (the machine is down, or another task's check runs there): the two checks fail by name.
+  const down = await preReview({ repo, base: 'base', node: process.execPath, remote, sync: () => ({ ok: false, text: 'REMOTE-DOWN: pc2 does not answer' }) });
+  assert.equal(down.ok, false);
+  assert.match(down.text, /✗ lint app \(1 file, on pc2\) — NOT RUN\n\s+not run on pc2: REMOTE-DOWN: pc2 does not answer/);
+  assert.match(down.text, /✗ types app \(on pc2\) — NOT RUN/);
+  assert.match(down.text, /✓ lint web \(1 file\)/, 'the other checks still run');
+});
+
+test('no node_modules and no test machine: lint and types show as NOT RUN and fail the run', () => {
+  const { repo } = noModulesFixture();
+  const r = run(repo);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /✗ lint app \(1 file\) — NOT RUN\n\s+no node_modules in app, and no test machine is set/);
+  assert.match(r.stdout, /✗ types app — NOT RUN/);
+  assert.doesNotMatch(r.stdout, /PRE-REVIEW: (\d+) of \1 checks passed/, 'never "all passed" with a check left out');
+});
+
+test('a package that lists no lint or type tool owes none', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, git, write } = fixture();
+  write('docs/package.json', '{"name":"docs"}\n');
+  write('docs/tsconfig.json', '{}\n');
+  write('docs/x.ts', 'export const x = 1;\n');
+  git('add', '-A'); git('commit', '-qm', 'docs'); git('branch', '-f', 'base');
+  write('docs/x.ts', 'export const x = 2;\n');
+  const { checks } = planChecks({ repo, base: 'base', node: process.execPath, remote: null });
+  assert.deepEqual(checks.filter(c => / docs/.test(c.name)), []);
+});
+
+// The clone on the test machine is one folder: a sync while another task's check runs there would change
+// the code under that check.
+test('another task whose check runs on the test machine now is seen; this task, a finished or a dead one is not', async () => {
+  const { otherTaskOnRemote } = await import('../scripts/pre-review.mjs');
+  const dir = fs.mkdtempSync(path.join(root, 'locks-'));
+  const before = process.env.SANAD_CHECK_LOCK_DIR;
+  process.env.SANAD_CHECK_LOCK_DIR = dir;
+  try {
+    const remote = { host: 'pc2', repo: 'C:/r/App', node: 'node' };
+    const mine = path.join(root, 'mine'), other = path.join(root, 'other');
+    const lock = (name, over) => fs.writeFileSync(path.join(dir, name + '.json'), JSON.stringify({ toplevel: other, pid: process.pid,
+      expiresAt: new Date(Date.now() + 600000).toISOString(), command: 'C:/Windows/System32/OpenSSH/ssh.exe -o BatchMode=yes pc2 cd /d C:\r\App && dotnet test', ...over }));
+    assert.equal(otherTaskOnRemote(mine, remote), '', 'no lock, no other task');
+    lock('same', { toplevel: mine });
+    lock('expired', { expiresAt: new Date(Date.now() - 1000).toISOString() });
+    lock('dead', { pid: 2147483646 });
+    lock('local', { command: 'dotnet test App.sln' });
+    lock('other-host', { command: 'ssh pc20 dotnet test' });
+    fs.writeFileSync(path.join(dir, 'half-written.json'), '{"toplevel":');
+    assert.equal(otherTaskOnRemote(mine, remote), '');
+    lock('running');
+    assert.equal(otherTaskOnRemote(mine, remote), other);
+  } finally {
+    if (before === undefined) delete process.env.SANAD_CHECK_LOCK_DIR; else process.env.SANAD_CHECK_LOCK_DIR = before;
+  }
+});

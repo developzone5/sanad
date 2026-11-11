@@ -92,3 +92,85 @@ test('a red-proof run with --then-green is a test run; its other modes are not; 
   assert.equal(scan.verifyFailed('RED-PROOF: SETUP ✗ — the fixed tree does not compile'), true);
   assert.equal(scan.verifyFailed('  ran old code: exit 1 (161 s)\nRED-PROOF: RED ✓ — the tests fail on origin/staging (exit 1; 3 of 3 failing test(s) by an assertion)\n  GREEN ✓ the tests pass on the fixed tree\nRED-PROOF: PROVED ✓ — red on the old code'), false);
 });
+
+// 2026-11-11: every backend run on the test machine read as FAILED. Its remote command has quotes of its own
+// (the database settings: `(for /f "usebackq …" %a in (…) do @set "%a=%b")`), and the receipt's words were
+// rebuilt as one quoted line and split again, which never split at `&&`.
+test('a passing receipt of a run on the test machine counts, with quotes inside its remote command; the timer sees a run still working', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'receipt-remote-'));
+  try {
+    const remote = 'cd /d C:\repos\App\Api && (for /f "usebackq tokens=1,* delims==" %a in (C:\Users\t\test.env) do @set "%a=%b") && dotnet test App.sln --artifacts-path bin/hosttest -v q --nologo';
+    const record = (status) => ({ runId: '2a5a1133-7fbb-4602-844d-0da4d416fb10', executable: 'C:/Windows/System32/OpenSSH/ssh.exe', args: ['-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=30', 'pc2', remote],
+      cwd: 'C:\repos\App\Api', source: { toplevel: 'C:\repos\App', treeBefore: 'a'.repeat(40), treeAfter: 'a'.repeat(40) }, status, nativeExitCode: status === 'passed' ? 0 : 1, signal: null, reason: null });
+    const evidence = 'node C:/Users/Asus/.claude/skills/gate/scripts/evidence.mjs --spec backend-full.json';
+    const edit = [message('assistant', [{ type: 'tool_use', name: 'Edit', id: 'e1', input: { file_path: 'C:/repos/App/Api/Service.cs' } }]), message('user', [{ type: 'tool_result', tool_use_id: 'e1', content: 'ok', is_error: false }])];
+    const scanOf = (name, entries) => { const file = path.join(scratch, name + '.jsonl'); fs.writeFileSync(file, entries.map(JSON.stringify).join('\n')); return scan.scanTranscript(file); };
+
+    // In the foreground: the receipt is the tool result.
+    const front = scanOf('front', [...edit,
+      message('assistant', [{ type: 'tool_use', name: 'Bash', id: 'v1', input: { command: evidence } }]),
+      message('user', [{ type: 'tool_result', tool_use_id: 'v1', content: 'CHECK_COMPLETED ' + JSON.stringify(record('passed')), is_error: false }])]);
+    assert.equal(front.lastFailedVerify, -1, 'a passing remote run is not a failure');
+    assert.ok(front.lastVerify > front.lastEdit, 'it verifies the edit before it');
+    assert.equal(front.completedCheck?.runId, record('passed').runId);
+    assert.equal(front.workRunning, false);
+
+    // In the background: running until its finish notice, then judged from its saved output.
+    const output = path.join(scratch, 'task.output');
+    fs.writeFileSync(output, 'CHECK_COMPLETED ' + JSON.stringify(record('passed')) + '\n\n[exited with code 0]\n');
+    const launch = [...edit,
+      message('assistant', [{ type: 'tool_use', name: 'Bash', id: 'v2', input: { command: evidence, run_in_background: true } }]),
+      { ...message('user', [{ type: 'tool_result', tool_use_id: 'v2', content: 'Command running in background with ID: b1a2c3. Output is being written to: ' + output, is_error: false }]), toolUseResult: { backgroundTaskId: 'b1a2c3' } }];
+    const running = scanOf('running', launch);
+    assert.equal(running.workRunning, true, 'the timer sees a check still working');
+    assert.ok(running.lastPendingVerifyStop > running.lastEdit);
+    const note = { type: 'user', message: { role: 'user', content: `<task-notification>\n<task-id>b1a2c3</task-id>\n<output-file>${output}</output-file>\n<status>completed</status>\n<summary>Background command "x" completed (exit code 0)</summary>\n</task-notification>` } };
+    const done = scanOf('done', [...launch, note]);
+    assert.equal(done.lastFailedVerify, -1, 'a passing background run on the test machine is not a failure');
+    assert.ok(done.lastVerify > done.lastEdit);
+    assert.equal(done.workRunning, false);
+
+    // A failed run still fails, and a remote command that runs no test is no receipt.
+    assert.ok(scanOf('failed', [...edit,
+      message('assistant', [{ type: 'tool_use', name: 'Bash', id: 'v3', input: { command: evidence } }]),
+      message('user', [{ type: 'tool_result', tool_use_id: 'v3', content: 'CHECK_COMPLETED ' + JSON.stringify(record('failed')), is_error: true }])]).lastFailedVerify > -1);
+    const noTest = { ...record('passed'), args: ['pc2', 'cd /d C:\repos\App && echo "a && dotnet test"'] };
+    assert.equal(scanOf('no-test', [...edit,
+      message('assistant', [{ type: 'tool_use', name: 'Bash', id: 'v4', input: { command: evidence } }]),
+      message('user', [{ type: 'tool_result', tool_use_id: 'v4', content: 'CHECK_COMPLETED ' + JSON.stringify(noTest), is_error: false }])]).completedCheck, null, 'quoted words are not a test run');
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
+
+// 2026-11-11 (TUW-243): a stop after a passing check, while the full suite still ran on the test machine,
+// started a wait on the task timer: ten minutes of machine work read as "waiting for the user".
+test('the stop hook starts no wait on the task timer while a background check of the work still runs', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'stop-timer-'));
+  try {
+    const state = path.join(root, 'state'), notes = path.join(root, 'notes');
+    const transcript = path.join(root, '.claude', 'projects', 'p', 'sid-1.jsonl');
+    for (const d of [state, notes, path.dirname(transcript)]) fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(notes, 'timer.tsv'), `${new Date(Date.now() - 60000).toISOString()}\tstep\ttests\n`);
+    fs.writeFileSync(path.join(state, 'sanad-timer-active-sid-1'), notes);
+    const record = { runId: '2a5a1133-7fbb-4602-844d-0da4d416fb11', executable: 'C:/Windows/System32/OpenSSH/ssh.exe', args: ['pc2', 'cd /d C:\repos\App\web && node node_modules/typescript/bin/tsc -b --noEmit'],
+      cwd: 'C:\repos\App\web', source: { toplevel: 'C:\repos\App', treeBefore: 'b'.repeat(40), treeAfter: 'b'.repeat(40) }, status: 'passed', nativeExitCode: 0, signal: null, reason: null };
+    const evidence = (spec) => `node C:/Users/Asus/.claude/skills/gate/scripts/evidence.mjs --spec ${spec}`;
+    const output = path.join(root, 'suite.output');
+    const entries = [
+      message('assistant', [{ type: 'tool_use', name: 'Edit', id: 'e1', input: { file_path: 'C:/repos/App/web/src/a.ts' } }]), message('user', [{ type: 'tool_result', tool_use_id: 'e1', content: 'ok', is_error: false }]),
+      message('assistant', [{ type: 'tool_use', name: 'Bash', id: 'bg', input: { command: evidence('full-suite.json'), run_in_background: true } }]),
+      { ...message('user', [{ type: 'tool_result', tool_use_id: 'bg', content: 'Command running in background with ID: suite1. Output is being written to: ' + output, is_error: false }]), toolUseResult: { backgroundTaskId: 'suite1' } },
+      message('assistant', [{ type: 'tool_use', name: 'Bash', id: 'fg', input: { command: evidence('types.json') } }]),
+      message('user', [{ type: 'tool_result', tool_use_id: 'fg', content: 'CHECK_COMPLETED ' + JSON.stringify(record), is_error: false }]),
+    ];
+    const stop = () => {
+      fs.writeFileSync(transcript, entries.map(JSON.stringify).join('\n'));
+      execFileSync(process.execPath, [path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', 'stop-gate.js')],
+        { input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'sid-1', transcript_path: transcript, cwd: root }), encoding: 'utf8', windowsHide: true, timeout: 20000, env: { ...process.env, SANAD_STATE_DIR: state } });
+      return fs.readFileSync(path.join(notes, 'timer.tsv'), 'utf8').trim().split('\n').map(l => l.split('\t')[1]);
+    };
+    assert.deepEqual(stop(), ['step'], 'the suite still runs: the stop is work time, not a wait');
+    fs.writeFileSync(output, 'CHECK_COMPLETED ' + JSON.stringify({ ...record, runId: '2a5a1133-7fbb-4602-844d-0da4d416fb12', args: ['pc2', 'cd /d C:\repos\App\web && node node_modules/vitest/vitest.mjs run'] }) + '\n');
+    entries.push({ type: 'user', message: { role: 'user', content: `<task-notification>\n<task-id>suite1</task-id>\n<output-file>${output}</output-file>\n<status>completed</status>\n<summary>Background command "x" completed (exit code 0)</summary>\n</task-notification>` } });
+    assert.deepEqual(stop(), ['step', 'wait'], 'the suite finished: the next stop is a wait');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

@@ -64,8 +64,22 @@ function resume(input, now = new Date()) {
   if (!realSession(input)) return false;
   const t = activeTimer(input, now);
   if (!t || t.last.kind !== 'wait' || t.last.text !== IDLE) return false;
-  append(t.file, 'step', 'resumed', now);
+  // The step that goes on is named, so the report can add a stage's parts together.
+  const stage = lastStage(t.file);
+  append(t.file, 'step', stage ? `resumed: ${stage}` : 'resumed', now);
   return true;
+}
+
+// The stage a timer is in: its last step, without the "resumed: " of a step that went on.
+const stageName = (text) => String(text || '').replace(/^resumed: /, '');
+function lastStage(file) {
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const [, kind, ...rest] = lines[i].split('\t');
+    const name = stageName(rest.join(' '));
+    if (kind === 'step' && name && name !== 'resumed') return name;
+  }
+  return '';
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -122,10 +136,17 @@ function editedCodeFiles(input, isCode) {
   } else if (tool === 'Bash' || tool === 'PowerShell') {
     const shell = require('./shell-command.cjs');
     const opts = { tool, home: os.homedir(), tmp: os.tmpdir() };
-    for (const p of scan.shellEditPaths(String(toolInput.command || ''))) {
-      if (p.startsWith('<')) continue;
-      const resolved = shell.shellPath(p, cwd, opts);
-      if (resolved) files.push(resolved);
+    // A name written after `cd <dir> &&` lands in that folder, not in the session's (2026-11-11: an edit in
+    // another repository started a timer named after the session's project).
+    let dir = cwd;
+    for (const seg of scan.splitSegments(String(toolInput.command || ''))) {
+      const cd = /^\s*(?:cd|Set-Location|pushd)\s+(?:\/d\s+)?("[^"]+"|'[^']+'|[^\s;&|]+)\s*$/i.exec(seg);
+      if (cd) { dir = shell.shellPath(cd[1].replace(/^["']|["']$/g, ''), dir, opts) || dir; continue; }
+      for (const p of scan.shellEditPaths(seg)) {
+        if (p.startsWith('<')) continue;
+        const resolved = shell.shellPath(p, dir, opts);
+        if (resolved) files.push(resolved);
+      }
     }
   }
   return files.filter((f) => (isCode || scan.isCodePath)(f));
@@ -172,4 +193,44 @@ function autoEnd(input, scan, now = new Date()) {
   return true;
 }
 
-module.exports = { idle, resume, autoStart, autoEnd, lastPromptAt, pointerName, IDLE, STALE_HOURS };
+// ---------------------------------------------------------------------------------------------------------
+// Stages mark themselves (2026-11-11, TUW-243: the automatic timer showed one step, "first code edit: 35
+// min", so the slow part could not be seen). A tool call that starts another stage adds a step:
+//   code                    an edit of a code file
+//   proof                   red-proof.mjs
+//   checks before review    pre-review.mjs
+//   tests                   evidence.mjs (a build or test run with a receipt)
+//   review                  an independent reviewer is launched
+// The same stage twice in a row adds nothing. sanad-timer.mjs report adds a stage's parts together.
+function stageOf(input, isCode) {
+  const tool = String(input.tool_name || '');
+  const toolInput = input.tool_input || {};
+  if (tool === 'Agent') return /^\s*You are the independent reviewer\b/i.test(String(toolInput.prompt || '')) ? 'review' : '';
+  if (tool === 'Bash' || tool === 'PowerShell') {
+    const command = String(toolInput.command || '');
+    // The script is RUN by node. Its name in other words (`git add …/red-proof.mjs`, a `sed` on it) is no
+    // stage (2026-11-11: work on these scripts themselves read as a 23-minute proof).
+    const runs = (name) => new RegExp(`(?:^|[\\s;&|(])["']?(?:\\S*[\\\\/])?node(?:\\.exe)?["']?\\s+["']?[^\\s"']*[\\\\/]${name}\\.mjs(?:["'\\s]|$)`).test(command);
+    if (runs('red-proof')) return 'proof';
+    if (runs('pre-review')) return 'checks before review';
+    if (runs('evidence')) return 'tests';
+  }
+  return editedCodeFiles(input, isCode).length ? 'code' : '';
+}
+
+/** At a tool call (check-lock-guard): a new stage of the task marks itself. Returns the stage marked, or ''. */
+function autoStage(input, now = new Date(), { isCode } = {}) {
+  if (!realSession(input)) return '';
+  const t = activeTimer(input, now);
+  if (!t) return '';
+  const stage = stageOf(input, isCode);
+  if (!stage) return '';
+  const current = lastStage(t.file);
+  // The timer's own first marks are the code stage already. A wait someone marked by hand ends here.
+  const same = current === stage || (stage === 'code' && /^(?:first code edit|start \(auto\))/.test(current));
+  if (same && t.last.kind !== 'wait') return '';
+  append(t.file, 'step', stage, now);
+  return stage;
+}
+
+module.exports = { idle, resume, autoStart, autoEnd, autoStage, lastPromptAt, pointerName, IDLE, STALE_HOURS };
