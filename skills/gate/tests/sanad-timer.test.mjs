@@ -314,3 +314,48 @@ test('a shell edit after `cd <dir> &&` starts the timer of that folder\'s reposi
     for (const d of [state, session, other]) fs.rmSync(d, { recursive: true, force: true });
   }
 });
+
+// 2026-11-11: the report of a task showed no review time. A review runs beside the other stages, so it is
+// listed apart and never added to the total.
+test('a finished review goes on the timer once, beside the stages, and the report lists it apart', async () => {
+  const { createRequire } = await import('node:module');
+  const { sideReviews, idle, resume, autoStage } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const state = tmp(), notes = tmp();
+  const before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    const real = { session_id: SID, transcript_path: path.join(state, '.claude', 'projects', 'p', 'session.jsonl') };
+    const t0 = new Date();
+    const at = (min) => new Date(t0.getTime() + min * 60000);
+    mark(notes, 'step', 'proof', at(0));
+    mark(notes, 'step', 'tests', at(4));
+    fs.writeFileSync(path.join(state, POINTER), notes);
+    const scan = { reviews: [
+      { launchAt: at(-30).toISOString(), doneAt: at(-20).toISOString() },   // an older task's review
+      { launchAt: at(3).toISOString(), doneAt: at(6.5).toISOString() },
+      { launchAt: at(3).toISOString(), doneAt: '' },                         // no end: not finished
+    ] };
+
+    assert.equal(sideReviews({ transcript_path: path.join(state, 'fake.jsonl') }, scan, at(7)), 0, 'a hook test run never marks');
+    assert.equal(sideReviews(real, scan, at(7)), 1, 'only the review of this task');
+    assert.equal(sideReviews(real, scan, at(8)), 0, 'once');
+    scan.reviews.push({ launchAt: at(9).toISOString(), doneAt: at(10).toISOString() });
+    assert.equal(sideReviews(real, scan, at(11)), 1, 'a re-check after the fix is a second review');
+
+    // The side lines are not moments of the timeline: a stop after them still starts a wait, and the stage goes on.
+    assert.equal(idle(real, at(12)), true);
+    assert.equal(resume(real, at(14)), true);
+    assert.equal(readMarks(notes).filter(m => m.kind !== 'side').pop().text, 'resumed: tests');
+    assert.equal(autoStage({ ...real, tool_name: 'Bash', tool_input: { command: 'node C:/u/.claude/skills/gate/scripts/evidence.mjs --spec x.json' } }, at(15)), '', 'still the tests stage');
+
+    const text = report(notes, at(16));
+    assert.match(text, /^ {2}3\.5 min {2}BESIDE review \(it ran beside the stages above; not added to the total\)$/m);
+    assert.match(text, /^ {2}1\.0 min {2}BESIDE review /m);
+    assert.match(text, /^ {3}16 min {2}total \(work 14, waiting 2\.0\)$/m, 'the reviews add nothing to the total');
+    assert.match(text, /^by stage \(min\): tests 10 · proof 4\.0 · waiting 2\.0 · review 4\.5 \(beside\)$/m);
+  } finally {
+    if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
+    fs.rmSync(state, { recursive: true, force: true });
+    fs.rmSync(notes, { recursive: true, force: true });
+  }
+});

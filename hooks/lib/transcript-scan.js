@@ -555,7 +555,12 @@ function scanTranscript(transcriptPath) {
   const verificationStates = new Map(); // retries clear only the same command's failure
   const providerStates = new Map();
   const reviewerCalls = new Map();  // Agent tool_use id -> launch seq (reviewer prompt)
-  const reviewerAgents = new Map(); // agent id -> { launch } (latest run, incl. SendMessage follow-ups)
+  const reviewerAgents = new Map(); // agent id -> { launch, at } (latest run, incl. SendMessage follow-ups)
+  // For the task timer: each finished reviewer run, { launchAt, doneAt } (the entries' own times). A review
+  // runs beside the other stages, so the timer lists it apart (2026-11-11: the report showed no review time).
+  const reviewerAt = new Map();     // Agent tool_use id -> the launch entry's time
+  const reviews = [];
+  const reviewDone = (launchAt, doneAt) => { if (launchAt && doneAt && !reviews.some((r) => r.launchAt === launchAt)) reviews.push({ launchAt, doneAt }); };
   // Every helper agent still working: launched in the background and not yet reported done. While one
   // launched after the last change works, the stop waits for it instead of asking for a check (2026-11-06).
   const helperCalls = new Map();    // tool_use id -> seq
@@ -593,6 +598,7 @@ function scanTranscript(transcriptPath) {
         if (helpersRunning.has(note.id) && /^(?:completed|failed|killed|cancelled|canceled|stopped)$/.test(note.status)) helpersRunning.delete(note.id);
         // An independent reviewer agent finished: credit the run it completed.
         const agent = reviewerAgents.get(note.id);
+        if (agent && note.status === 'completed') reviewDone(agent.at, String(entry.timestamp || ''));
         if (agent && note.status === 'completed' && agent.launch > res.lastReviewerRun) { res.lastReviewerRun = agent.launch; res.lastReviewerResult = seq; }
       }
       // A bundled notice shares the entry with the user's own words; nothing else there is scanned.
@@ -680,8 +686,10 @@ function scanTranscript(transcriptPath) {
           stopCalls.set(blk.id, String(blk.input.task_id || blk.input.shell_id));   // judged when its result arrives
         } else if (blk.name === 'Agent' && REVIEWER_PROMPT.test(String(blk.input.prompt || ''))) {
           reviewerCalls.set(blk.id, seq);                  // agent id arrives with the result
+          reviewerAt.set(blk.id, String(entry.timestamp || ''));
         } else if (blk.name === 'SendMessage' && reviewerAgents.has(String(blk.input.to || ''))) {
           reviewerAgents.get(String(blk.input.to)).launch = seq;   // a follow-up review run
+          reviewerAgents.get(String(blk.input.to)).at = String(entry.timestamp || '');
         } else if (blk.name === 'TaskOutput' && background.has(blk.input.task_id)) {
           Object.assign(rec, background.get(blk.input.task_id), { editSeq: -1, taskId: blk.input.task_id });
         }
@@ -703,7 +711,10 @@ function scanTranscript(transcriptPath) {
         reviewerCalls.delete(blk.tool_use_id);
         const t = entry.toolUseResult || {};
         const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
-        if (id && blk.is_error !== true) reviewerAgents.set(id, { launch });
+        const at = reviewerAt.get(blk.tool_use_id) || '';
+        reviewerAt.delete(blk.tool_use_id);
+        if (id && blk.is_error !== true) reviewerAgents.set(id, { launch, at });
+        if (id && t.status === 'completed') reviewDone(at, String(entry.timestamp || ''));
         // A synchronous reviewer returns its finished report in this result.
         if (id && t.status === 'completed' && launch > res.lastReviewerRun) { res.lastReviewerRun = launch; res.lastReviewerResult = seq; }
         continue;
@@ -825,6 +836,7 @@ function scanTranscript(transcriptPath) {
   // background command can still be running (2026-11-05: lost results held the
   // stop at "still running" for hours). The push guard keeps the strict count.
   res.lastRunningHelper = helpersRunning.size ? Math.max(...helpersRunning.values()) : -1;
+  res.reviews = reviews;
   // For the task timer: a background check with a finish notice still to come, or a helper, works on at
   // this stop, whatever the stop verdict is (2026-11-11: a stop after a later passing check counted ten
   // minutes of a full suite on the test machine as waiting).
