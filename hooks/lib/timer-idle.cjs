@@ -29,8 +29,10 @@ function pointerName(input) {
   return key ? `sanad-timer-active-${key}` : 'sanad-timer-active';
 }
 
+// A "side" line (a review that ran beside the stages) is not a moment of the timeline: the last mark is
+// the last step or wait.
 function lastMark(file) {
-  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l && l.split('\t')[1] !== 'side');
   const [at, kind, ...rest] = (lines.pop() || '').split('\t');
   return { at: new Date(at), kind, text: rest.join(' ') };
 }
@@ -233,4 +235,27 @@ function autoStage(input, now = new Date(), { isCode } = {}) {
   return stage;
 }
 
-module.exports = { idle, resume, autoStart, autoEnd, autoStage, lastPromptAt, pointerName, IDLE, STALE_HOURS };
+// ---------------------------------------------------------------------------------------------------------
+// A review runs beside the other stages (the checks and the suite go on while it reads), so it is no step
+// of the timeline. Each finished reviewer run is written once as a "side" line, "review <start> <end>", and
+// sanad-timer.mjs report lists it apart (2026-11-11: the report of a task showed no review time at all; the
+// hook that marks stages does not see the launch of a helper).
+/** At an allowed stop (stop-gate), before the timer can end: the reviews that finished since the timer began. */
+function sideReviews(input, scan, now = new Date()) {
+  if (!realSession(input) || !scan || !Array.isArray(scan.reviews) || !scan.reviews.length) return 0;
+  const t = activeTimer(input, now);
+  if (!t) return 0;
+  const text = fs.readFileSync(t.file, 'utf8');
+  const started = new Date(text.split('\t')[0]);
+  let added = 0;
+  for (const r of scan.reviews) {
+    const from = new Date(r.launchAt), to = new Date(r.doneAt);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to < from || from < started) continue;
+    if (text.includes(`\tside\treview ${from.toISOString()} `)) continue;
+    append(t.file, 'side', `review ${from.toISOString()} ${to.toISOString()}`, now);
+    added++;
+  }
+  return added;
+}
+
+module.exports = { idle, resume, autoStart, autoEnd, autoStage, sideReviews, lastPromptAt, pointerName, IDLE, STALE_HOURS };

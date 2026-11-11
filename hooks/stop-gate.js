@@ -28,6 +28,7 @@ const path = require('path');
 // A GATE: PASS after the last code edit ends the task timer first (lib/timer-idle.cjs autoEnd, 2026-11-11).
 var lastScan = null, stopBusy = false; // stopBusy: a check or helper of this work still runs (not idle time)
 function markIdle() {
+  try { if (lastScan) require('./lib/timer-idle.cjs').sideReviews(input, lastScan); } catch (e) { /* the timer never blocks a stop */ }
   try { if (lastScan) require('./lib/timer-idle.cjs').autoEnd(input, lastScan); } catch (e) { /* the timer never blocks a stop */ }
   // Busy: a check or helper of the work still runs, whichever verdict this stop gets (lastScan.workRunning).
   try { require('./lib/timer-idle.cjs').idle(input, undefined, { busy: stopBusy || !!(lastScan && lastScan.workRunning) }); } catch (e) { /* the timer never blocks a stop */ }

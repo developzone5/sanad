@@ -174,3 +174,30 @@ test('the stop hook starts no wait on the task timer while a background check of
     assert.deepEqual(stop(), ['step', 'wait'], 'the suite finished: the next stop is a wait');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+// 2026-11-11: the task timer showed no review time. The hook that marks stages does not see a helper's
+// launch, and a review runs beside the other stages. The scan names each finished reviewer run with the
+// times of its own entries; the timer lists it apart.
+test('each finished reviewer run is named with its start and end, once; a run still reading is not', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-reviews-'));
+  try {
+    const at = (min) => new Date(Date.UTC(2026, 10, 11, 9, min, 0)).toISOString();
+    const stamped = (minute, entry) => ({ ...entry, timestamp: at(minute) });
+    const launch = (id, minute, prompt) => stamped(minute, message('assistant', [{ type: 'tool_use', name: 'Agent', id, input: { prompt, run_in_background: true } }]));
+    const launched = (id, minute, agentId) => stamped(minute, { ...message('user', [{ type: 'tool_result', tool_use_id: id, content: `Async agent launched successfully.\nagentId: ${agentId}`, is_error: false }]) });
+    const done = (agentId, minute) => stamped(minute, { type: 'user', message: { role: 'user', content: `<task-notification>\n<task-id>${agentId}</task-id>\n<status>completed</status>\n<summary>Agent finished</summary>\n</task-notification>` } });
+    const scanOf = (name, entries) => { const file = path.join(scratch, name + '.jsonl'); fs.writeFileSync(file, entries.map(JSON.stringify).join('\n')); return scan.scanTranscript(file); };
+
+    const entries = [
+      launch('r1', 1, 'You are the independent reviewer — FRESH EYES whole-PR review.'), launched('r1', 1, 'agentfresh1'),
+      launch('h1', 1, 'Seat: Test designer. Read your role guide.'), launched('h1', 1, 'agentdesigner'),
+      launch('r2', 2, 'You are the independent reviewer — whole-diff pass.'), launched('r2', 2, 'agentwhole2'),
+      done('agentdesigner', 3),
+      done('agentfresh1', 5),
+    ];
+    assert.deepEqual(scanOf('one', entries).reviews, [{ launchAt: at(1), doneAt: at(5) }], 'the designer is no review; the second reviewer still reads');
+    entries.push(done('agentwhole2', 6), done('agentfresh1', 7));
+    assert.deepEqual(scanOf('two', entries).reviews, [{ launchAt: at(1), doneAt: at(5) }, { launchAt: at(2), doneAt: at(6) }], 'a second notice of one run adds nothing');
+    assert.deepEqual(scanOf('none', [launch('r1', 1, 'You are the independent reviewer')]).reviews, []);
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});

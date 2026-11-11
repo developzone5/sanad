@@ -81,7 +81,13 @@ export function readMarks(dir) {
 // Each mark lasts until the next one; the last lasts until `now`. Waits are listed apart so the user sees
 // what was work and what was waiting.
 export function report(dir, now = new Date()) {
-  const marks = readMarks(dir);
+  const all = readMarks(dir);
+  // A "side" line is a review that ran beside the stages ("review <start> <end>"): not a step of the timeline.
+  const marks = all.filter((m) => m.kind !== 'side');
+  const beside = all.filter((m) => m.kind === 'side').map((m) => {
+    const [name, from, to] = m.text.split(' ');
+    return { name, minutes: Math.max(0, (new Date(to) - new Date(from)) / 60000) };
+  }).filter((s) => s.name && Number.isFinite(s.minutes));
   if (!marks.length) return 'TIMER: no marks yet';
   // An end mark is the task's last moment: it takes no time, however much later the report is read.
   const isEnd = (m) => m.kind === 'step' && /^end(?: \(|$)/.test(m.text);
@@ -93,6 +99,7 @@ export function report(dir, now = new Date()) {
   const total = rows.reduce((s, r) => s + r.minutes, 0);
   const waited = rows.filter((r) => r.kind === 'wait').reduce((s, r) => s + r.minutes, 0);
   const lines = rows.map((r) => `${fmt(r.minutes)} min  ${r.kind === 'wait' ? 'WAIT ' : ''}${r.text}`);
+  for (const s of beside) lines.push(`${fmt(s.minutes)} min  BESIDE ${s.name} (it ran beside the stages above; not added to the total)`);
   lines.push(`${fmt(total)} min  total (work ${fmt(total - waited).trim()}, waiting ${fmt(waited).trim()})`);
   // A stage that stopped and went on ("resumed: proof") is one stage: its parts added together, the
   // longest first (2026-11-11: the slow part of a task was spread over a dozen lines).
@@ -106,8 +113,11 @@ export function report(dir, now = new Date()) {
     if (isEnd(r)) continue;
     byStage.set(stage || name, (byStage.get(stage || name) || 0) + r.minutes);
   }
-  if (byStage.size < rows.filter((r) => !isEnd(r)).length) {
+  if (byStage.size < rows.filter((r) => !isEnd(r)).length || beside.length) {
     const parts = [...byStage].filter(([, n]) => n >= 0.05).sort((a, b) => b[1] - a[1]).map(([name, n]) => `${name} ${fmt(n).trim()}`);
+    const sideSum = new Map();
+    for (const s of beside) sideSum.set(s.name, (sideSum.get(s.name) || 0) + s.minutes);
+    for (const [name, n] of sideSum) parts.push(`${name} ${fmt(n).trim()} (beside)`);
     lines.push(`by stage (min): ${parts.join(' · ')}`);
   }
   return lines.join('\n');
