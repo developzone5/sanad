@@ -486,14 +486,28 @@ function isEvidenceCommand(segment) {
     /(?:^|\/)\.claude\/skills\/gate\/scripts\/evidence\.mjs$/i.test((words[1] || '').replace(/\\/g, '/')) && words[2] === '--spec';
 }
 
+// A receipt's command is a list of words, not a shell line. A run on the test machine is judged from
+// those words as they are: `ssh <host> "<remote command>"`, the remote command its last word. Rebuilt as
+// one quoted line and split into words again, a remote command with quotes of its own
+// (`… && (for /f "usebackq …" %a in (…) do @set "%a=%b") && dotnet test …`) kept a backslash before each
+// quote, was never split at `&&`, and every passing run of it had no receipt, so it read as FAILED
+// (2026-11-11: each backend run on the test machine, since its database settings came in that way).
+function receiptIsVerify(executable, args) {
+  const words = [executable, ...args];
+  if (isSsh(words)) {
+    const inner = remoteCommand(words);
+    return !!inner && splitSegments(inner).some(segmentIsVerify);
+  }
+  return segmentIsVerify(words.map(word => '"' + word.replace(/"/g, '\\"') + '"').join(' '));
+}
+
 function checkReceipt(block, entry) {
   for (const line of resultText(block, entry).split('\n')) {
     if (!line.startsWith('CHECK_COMPLETED ')) continue;
     try {
       const record = JSON.parse(line.slice('CHECK_COMPLETED '.length));
       if (!/^[a-f0-9-]{36}$/i.test(record.runId || '') || typeof record.cwd !== 'string' || typeof record.executable !== 'string' || !Array.isArray(record.args) || record.args.some(arg => typeof arg !== 'string') || !['passed', 'failed'].includes(record.status)) continue;
-      const command = [record.executable, ...record.args].map(word => '"' + word.replace(/"/g, '\\"') + '"').join(' ');
-      if (!segmentIsVerify(command)) continue;
+      if (!receiptIsVerify(record.executable, record.args)) continue;
       const invalidTarget = invalidVerificationTarget(record.executable, record.args, record.cwd);
       const passed = !invalidTarget && record.status === 'passed' && record.nativeExitCode === 0 && !record.reason && !record.signal && verificationResult(block, entry) === 'passed';
       return { key: record.cwd.replace(/\\/g, '/').toLowerCase() + '\n' + JSON.stringify([record.executable, ...record.args]), outcome: passed ? 'passed' : 'failed', record };
@@ -811,6 +825,10 @@ function scanTranscript(transcriptPath) {
   // background command can still be running (2026-11-05: lost results held the
   // stop at "still running" for hours). The push guard keeps the strict count.
   res.lastRunningHelper = helpersRunning.size ? Math.max(...helpersRunning.values()) : -1;
+  // For the task timer: a background check with a finish notice still to come, or a helper, works on at
+  // this stop, whatever the stop verdict is (2026-11-11: a stop after a later passing check counted ten
+  // minutes of a full suite on the test machine as waiting).
+  res.workRunning = helpersRunning.size > 0 || [...background].some(([id, rec]) => rec.verifySeq !== -1 && !finishedUncollected.has(id));
   const holdStop = (rec) => { if (rec.verifySeq > res.lastPendingVerifyStop) { res.lastPendingVerifyStop = rec.verifySeq; res.lastPendingVerifyStopCommand = rec.command || ''; } };
   // A held run that no finish notice can bring back (its notice came without an exit code, or the
   // launch has no task id) is "stuck": the stop gate blocks on it instead of waiting (2026-11-07).

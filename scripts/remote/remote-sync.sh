@@ -38,7 +38,22 @@ if ! reach; then
 fi
 ssh_q() { ssh -o BatchMode=yes -o ConnectTimeout=12 ${via[@]+"${via[@]}"} "$host" "$@"; }
 
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# One sync at a time from this machine (2026-11-11: two proofs started together, the server's and the page's,
+# shared the bundle's file name and the run ref; one deleted the bundle the other was fetching: "FAILED: fetch
+# the bundle"). The second waits for the first. A lock whose process is gone is taken over.
+lock="${SANAD_STATE_DIR:-$HOME/.claude/state}/remote-sync.lock"
+mkdir -p "$(dirname "$lock")"
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+  owner=$(cat "$lock/pid" 2>/dev/null || true)
+  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then rm -rf "$lock"; continue; fi
+  # No owner written yet: its sync is starting. One left that way for a minute was killed there.
+  if [ -z "$owner" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rm -rf "$lock"; continue; fi
+  [ "$waited" -lt 600 ] || { echo "FAILED: another sync from this machine has run for 10 minutes ($lock)"; exit 1; }
+  sleep 2; waited=$((waited + 2))
+done
+echo $$ > "$lock/pid"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp" "$lock"' EXIT
 # The working tree as a commit, through a temporary index (the real index is never touched).
 export GIT_INDEX_FILE="$tmp/index"
 git -C "$top" read-tree HEAD || { echo "FAILED: read-tree"; exit 1; }

@@ -68,7 +68,7 @@ test('the hooks mark idle time on the active timer: a stop starts a wait, the ne
     assert.equal(idle(real, now), true);
     assert.equal(idle(real, now), false, 'one wait at a time');
     assert.equal(resume(real, new Date(now.getTime() + 60000)), true);
-    assert.deepEqual(readMarks(notes).map(m => [m.kind, m.text]), [['step', 'build'], ['wait', IDLE], ['step', 'resumed']]);
+    assert.deepEqual(readMarks(notes).map(m => [m.kind, m.text]), [['step', 'build'], ['wait', IDLE], ['step', 'resumed: build']]);
 
     mark(notes, 'wait', 'the user is checking', now);
     assert.equal(resume(real, now), false, 'a wait marked by hand stays open');
@@ -224,5 +224,93 @@ test('the timer starts by itself at the first code edit, from the user message, 
     if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
     fs.rmSync(state, { recursive: true, force: true });
     fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// 2026-11-11 (TUW-243): the automatic timer showed one step ("first code edit: 35 min"), ten minutes of a
+// full suite on the test machine counted as waiting, and a report read long after the end kept growing.
+test('stages mark themselves, a stage that goes on is named, and the report adds a stage together', async () => {
+  const { createRequire } = await import('node:module');
+  const { autoStart, autoStage, idle, resume } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const state = tmp(), repo = tmp();
+  const before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    const transcript = path.join(state, '.claude', 'projects', 'p', 'session.jsonl');
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(transcript, '');
+    const isCode = (f) => f.endsWith('.cs');
+    const call = (tool_name, tool_input) => ({ session_id: SID, transcript_path: transcript, cwd: repo, tool_name, tool_input });
+    const code = call('Edit', { file_path: path.join(repo, 'a.cs') });
+    const run = (command) => call('Bash', { command });
+    const t0 = new Date();
+    const at = (min) => new Date(t0.getTime() + min * 60000);
+
+    assert.equal(autoStage(code, at(0), { isCode }), '', 'no timer yet: nothing to mark');
+    const dir = autoStart(code, at(0), { isCode });
+    assert.equal(autoStage(code, at(1), { isCode }), '', 'the first code edit is the code stage already');
+    assert.equal(autoStage(run('node C:/u/.claude/skills/gate/scripts/red-proof.mjs --repo C:/r --then-green -- dotnet test'), at(5)), 'proof');
+    assert.equal(autoStage(run('node C:/u/.claude/skills/gate/scripts/red-proof.mjs --repo C:/r --then-green -- dotnet test'), at(6)), '', 'the same stage twice adds nothing');
+    assert.equal(autoStage(run('ls C:/u/red-proof.mjs.bak; echo evidence.mjs'), at(6)), '', 'a name in other text is not a stage');
+    // 2026-11-11: work on the scripts themselves (git add, cmp, a grep) read as a 23-minute proof.
+    assert.equal(autoStage(run('git add skills/gate/scripts/pre-review.mjs skills/gate/scripts/evidence.mjs x.md && grep -n a skills/gate/scripts/pre-review.mjs'), at(6)), '', 'a script that is only named is not run');
+    assert.equal(autoStage(run('cd C:/r && "C:/Program Files/nodejs/node.exe" "C:/u/.claude/skills/gate/scripts/red-proof.mjs" --repo C:/r'), at(6)), '', 'the same stage, by the full path of node');
+    assert.equal(autoStage(code, at(8), { isCode }), 'code', 'a fix after the proof is the code stage again');
+    assert.equal(autoStage(run('node ~/.claude/skills/gate/scripts/pre-review.mjs --was small'), at(10)), 'checks before review');
+    assert.equal(autoStage(run('node C:/u/.claude/skills/gate/scripts/evidence.mjs --spec full.json'), at(11)), 'tests');
+    assert.equal(idle(call('Bash', {}), at(12), { busy: true }), false, 'a stop while the suite runs is not waiting');
+    assert.equal(autoStage(call('Agent', { prompt: 'You are the independent reviewer — FRESH EYES' }), at(21)), 'review');
+    assert.equal(autoStage(call('Agent', { prompt: 'Seat: Test designer.' }), at(21)), '', 'another helper is no stage');
+    assert.equal(idle(call('Bash', {}), at(25)), true);
+    assert.equal(resume(call('Bash', {}), at(30)), true);
+    assert.equal(readMarks(dir).pop().text, 'resumed: review');
+    mark(dir, 'wait', 'the user is checking', at(32));
+    assert.equal(autoStage(run('node C:/u/.claude/skills/gate/scripts/evidence.mjs --spec full.json'), at(40)), 'tests', 'work after a wait marked by hand ends it');
+    mark(dir, 'step', 'end (auto: the gate passed; the ship brief)', at(50));
+
+    const text = report(dir, at(500));
+    assert.match(text, /0\.0 min {2}end \(auto/, 'the end mark takes no time, however late the report is read');
+    assert.match(text, /50 min {2}total \(work 37, waiting 13\)/);
+    // code 0-5 and 8-10 · proof 5-8 · checks 10-11 · tests 11-21 and 40-50 · review 21-25 and 30-32 · waiting 25-30 and 32-40
+    assert.match(text, /^by stage \(min\): tests 20 · waiting 13 · code 7\.0 · review 6\.0 · proof 3\.0 · checks before review 1\.0$/m, 'the first code edit is the code stage');
+    // The reading before the first edit is its own stage.
+    const planned = tmp();
+    mark(planned, 'step', "start (auto): the user's message — repo", at(0));
+    mark(planned, 'step', 'first code edit', at(3));
+    mark(planned, 'step', 'proof', at(10));
+    mark(planned, 'step', 'code', at(12));
+    assert.match(report(planned, at(15)), /^by stage \(min\): code 10 · read and plan 3\.0 · proof 2\.0$/m);
+    fs.rmSync(planned, { recursive: true, force: true });
+  } finally {
+    if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
+    fs.rmSync(state, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// 2026-11-11: an edit in another repository (`cd <dir> && sed -i …`) started a timer named after the
+// session's own project.
+test('a shell edit after `cd <dir> &&` starts the timer of that folder\'s repository', async () => {
+  const { createRequire } = await import('node:module');
+  const { autoStart } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const state = tmp(), session = tmp(), other = tmp();
+  const before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    for (const r of [session, other]) execFileSync('git', ['init', '-q'], { cwd: r });
+    fs.mkdirSync(path.join(other, 'src'));
+    fs.writeFileSync(path.join(other, 'src', 'a.cs'), 'class A {}\n');
+    const transcript = path.join(state, '.claude', 'projects', 'p', 'session.jsonl');
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(transcript, '');
+    const there = other.split(path.sep).join('/');
+    const dir = autoStart({ session_id: SID, transcript_path: transcript, cwd: session, tool_name: 'Bash', tool_input: { command: `cd ${there} && sed -i 's/A/B/' src/a.cs` } },
+      new Date(), { isCode: (f) => f.endsWith('.cs') });
+    assert.ok(dir, 'the edit starts a timer');
+    assert.ok(path.basename(dir).endsWith('-' + path.basename(other)), `${path.basename(dir)} is named after ${path.basename(other)}, not ${path.basename(session)}`);
+  } finally {
+    if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
+    for (const d of [state, session, other]) fs.rmSync(d, { recursive: true, force: true });
   }
 });

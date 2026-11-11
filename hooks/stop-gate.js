@@ -29,7 +29,8 @@ const path = require('path');
 var lastScan = null, stopBusy = false; // stopBusy: a check or helper of this work still runs (not idle time)
 function markIdle() {
   try { if (lastScan) require('./lib/timer-idle.cjs').autoEnd(input, lastScan); } catch (e) { /* the timer never blocks a stop */ }
-  try { require('./lib/timer-idle.cjs').idle(input, undefined, { busy: stopBusy }); } catch (e) { /* the timer never blocks a stop */ }
+  // Busy: a check or helper of the work still runs, whichever verdict this stop gets (lastScan.workRunning).
+  try { require('./lib/timer-idle.cjs').idle(input, undefined, { busy: stopBusy || !!(lastScan && lastScan.workRunning) }); } catch (e) { /* the timer never blocks a stop */ }
 }
 function out(obj) { if (!obj || obj.decision !== 'block') markIdle(); process.stdout.write(JSON.stringify(obj)); process.exit(0); }
 function allow() { markIdle(); process.exit(0); }

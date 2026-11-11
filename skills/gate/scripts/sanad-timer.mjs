@@ -83,8 +83,10 @@ export function readMarks(dir) {
 export function report(dir, now = new Date()) {
   const marks = readMarks(dir);
   if (!marks.length) return 'TIMER: no marks yet';
+  // An end mark is the task's last moment: it takes no time, however much later the report is read.
+  const isEnd = (m) => m.kind === 'step' && /^end(?: \(|$)/.test(m.text);
   const rows = marks.map((m, i) => {
-    const end = i + 1 < marks.length ? marks[i + 1].at : now;
+    const end = i + 1 < marks.length ? marks[i + 1].at : isEnd(m) ? m.at : now;
     return { ...m, minutes: Math.max(0, (end - m.at) / 60000) };
   });
   const fmt = (n) => (n < 10 ? n.toFixed(1) : String(Math.round(n))).padStart(5);
@@ -92,6 +94,22 @@ export function report(dir, now = new Date()) {
   const waited = rows.filter((r) => r.kind === 'wait').reduce((s, r) => s + r.minutes, 0);
   const lines = rows.map((r) => `${fmt(r.minutes)} min  ${r.kind === 'wait' ? 'WAIT ' : ''}${r.text}`);
   lines.push(`${fmt(total)} min  total (work ${fmt(total - waited).trim()}, waiting ${fmt(waited).trim()})`);
+  // A stage that stopped and went on ("resumed: proof") is one stage: its parts added together, the
+  // longest first (2026-11-11: the slow part of a task was spread over a dozen lines).
+  const byStage = new Map();
+  let stage = '';
+  for (const r of rows) {
+    if (r.kind === 'wait') { byStage.set('waiting', (byStage.get('waiting') || 0) + r.minutes); continue; }
+    // The automatic timer's first marks, by what happens in them: reading and planning, then code.
+    const name = r.text.replace(/^resumed: /, '').replace(/^start \(auto\): the user's message.*$/, 'read and plan').replace(/^(?:start \(auto\): )?first code edit.*$/, 'code');
+    if (name !== 'resumed') stage = name;
+    if (isEnd(r)) continue;
+    byStage.set(stage || name, (byStage.get(stage || name) || 0) + r.minutes);
+  }
+  if (byStage.size < rows.filter((r) => !isEnd(r)).length) {
+    const parts = [...byStage].filter(([, n]) => n >= 0.05).sort((a, b) => b[1] - a[1]).map(([name, n]) => `${name} ${fmt(n).trim()}`);
+    lines.push(`by stage (min): ${parts.join(' · ')}`);
+  }
   return lines.join('\n');
 }
 

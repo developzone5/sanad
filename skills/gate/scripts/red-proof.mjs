@@ -392,6 +392,10 @@ async function main() {
     const remoteNode = gitText(['config', '--get', 'sanad.remoteNode']) || 'node';
     const windows = /^[A-Za-z]:\//.test(remoteRepo);
     const dir = remoteRepo + '/.git/sanad-proof';
+    // Each proof has its own plan and log there (2026-11-11: two proofs started together, the server's and
+    // the page's, shared one plan.json and one proof.log). Both are removed when the proof ends.
+    const runId = `${process.pid}-${Date.now().toString(36)}`;
+    const planName = `plan-${runId}.json`, logName = `proof-${runId}.log`;
     const q = (a) => (/[\s"&|<>^()]/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a);
     const exe = /^node(?:\.exe)?$/i.test(path.basename(command[0])) ? remoteNode : command[0];
     const rel = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
@@ -399,9 +403,9 @@ async function main() {
     // (sanad.remoteTestEnv, a database connection) goes only to `dotnet` runs; --test-env always applies.
     const dotnetRun = /^dotnet(?:\.exe)?$/i.test(path.basename(command[0]));
     const envFile = (opt('--test-env') || (dotnetRun ? gitText(['config', '--get', 'sanad.remoteTestEnv']) : '')).replace(/\\/g, '/');
-    const remoteCmd = [q(remoteNode), q(dir + '/red-proof.mjs'), '--repo', q(remoteRepo), '--local', '--plan', q(dir + '/plan.json'),
+    const remoteCmd = [q(remoteNode), q(dir + '/red-proof.mjs'), '--repo', q(remoteRepo), '--local', '--plan', q(dir + '/' + planName),
       ...(opt('--parallel') ? ['--parallel', String(parallel)] : []), '--timeout-min', String(timeoutMin), ...(envFile ? ['--test-env', q(envFile)] : []),
-      '--base', 'HEAD', '--cwd', q(rel ? remoteRepo + '/' + rel : remoteRepo), '--log', q(dir + '/proof.log'),
+      '--base', 'HEAD', '--cwd', q(rel ? remoteRepo + '/' + rel : remoteRepo), '--log', q(dir + '/' + logName),
       '--', q(exe), ...command.slice(1).map(q)].join(' ');
     if (opts.includes('--show-remote')) { say(`RED-PROOF: on ${remoteHost} this runs: ${remoteCmd}`); process.exit(0); }
     const sync = spawnSync('bash', [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000 });
@@ -414,7 +418,7 @@ async function main() {
     const viaOpt = via ? ['-o', 'HostName=' + via[1]] : [];
     say(`RED-PROOF: on ${remoteHost}${via ? ' at ' + via[1] : ''} (${synced[1].slice(0, 12)})`);
     const local = fs.mkdtempSync(path.join(os.tmpdir(), 'sanad-proof-'));
-    fs.writeFileSync(path.join(local, 'plan.json'), JSON.stringify({
+    fs.writeFileSync(path.join(local, planName), JSON.stringify({
       oldLabel: oldRef, green, breaks,
       warm, kept: keptAtFix.map(k => k.file),
       old: hasOld ? oldRun.map(f => { try { return { file: f, content64: git('show', `${oldRef}:${f}`).toString('base64') }; } catch { return { file: f, content64: null }; } }) : [],
@@ -425,7 +429,7 @@ async function main() {
     const sshOpts = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', ...viaOpt];
     spawnSync('ssh', [...sshOpts, remoteHost, windows ? `if not exist "${dir.replace(/\//g, '\\')}" mkdir "${dir.replace(/\//g, '\\')}"` : `mkdir -p '${dir}'`], { encoding: 'utf8', windowsHide: true, timeout: 120000 });
     // scp reads "C:/..." as a host name, so it copies by file name from inside the folder.
-    const scp = spawnSync('scp', ['-q', ...sshOpts, 'plan.json', 'red-proof.mjs', 'proof-record.mjs', 'check-ticket-lines.mjs', `${remoteHost}:${dir}/`], { cwd: local, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+    const scp = spawnSync('scp', ['-q', ...sshOpts, planName, 'red-proof.mjs', 'proof-record.mjs', 'check-ticket-lines.mjs', `${remoteHost}:${dir}/`], { cwd: local, encoding: 'utf8', windowsHide: true, timeout: 120000 });
     if (scp.status !== 0) { say('RED-PROOF: could not copy the proof to the test machine — ' + ((scp.stderr || '').trim().split(/\r?\n/).pop() || 'scp failed')); process.exit(2); }
     // Each line as it comes, so a long proof is never silent. The runs there stop at their own limit;
     // this wait is the backstop for a lost connection.
@@ -448,8 +452,11 @@ async function main() {
     if (r.timedOut) say(`RED-PROOF: TIMEOUT ✗ — ${remoteHost} sent no result within ${waitMin} min; each run there stops at its own ${timeoutMin} min limit.`);
     if (opt('--log')) {
       const logPath = path.resolve(opt('--log'));
-      spawnSync('scp', ['-q', ...sshOpts, `${remoteHost}:${dir}/proof.log`, path.basename(logPath)], { cwd: path.dirname(logPath), windowsHide: true, timeout: 120000 });
+      spawnSync('scp', ['-q', ...sshOpts, `${remoteHost}:${dir}/${logName}`, path.basename(logPath)], { cwd: path.dirname(logPath), windowsHide: true, timeout: 120000 });
     }
+    const there = windows ? dir.split('/').join('\\') + '\\' : dir + '/';
+    const mine = [planName, logName].map(n => `"${there}${n}"`).join(' ');
+    spawnSync('ssh', [...sshOpts, remoteHost, windows ? `del /q ${mine} 2>nul` : `rm -f ${mine}`], { stdio: 'ignore', windowsHide: true, timeout: 60000 });
     fs.rmSync(local, { recursive: true, force: true });
     // The record is this machine's: the test files proved are the ones here, unchanged since the sync.
     const unchanged = fileHashes && JSON.stringify(testFileHashes(repo, Object.keys(fileHashes))) === JSON.stringify(fileHashes);
