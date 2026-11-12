@@ -9,10 +9,11 @@
 //
 // Two more checks on the same new test lines (2026-11-07):
 //   proof  a new "nothing happens" check (not called, null, empty, zero, never) needs a passing
-//          `red-proof.mjs --breaks` run on the test files as they are now: three rounds in a row
-//          such a check passed review that no run had ever seen fail.
+//          `red-proof.mjs --breaks` run that named a test in the check's own test file, with that
+//          file and the broken product files as they are now: three rounds in a row such a check
+//          passed review that no run had ever seen fail.
 //   tags   with --check <file>, every check line Cn (numbered in order, as review-brief.mjs prints
-//          them) has a test that carries `[Cn]` in its name or a comment.
+//          them) has a test that carries `[Cn]` in its name or a comment; not a skipped one.
 //
 // Usage: node check-test-asserts.mjs --repo <path> [--base <ref>] [--check <file>]
 // Exit 0: all clear. 1: found (each printed). 2: usage error.
@@ -21,13 +22,15 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { TEST_FILE } from './check-ticket-lines.mjs';
-import { changedTestFiles, testFileHashes, readRecord, provesCurrent } from './proof-record.mjs';
+import { provenTestFiles, skippedLines } from './proof-record.mjs';
 import { checkLines } from './review-brief.mjs';
 
-const RANGE = /\.(?:toBeLessThan|toBeLessThanOrEqual|toBeGreaterThan|toBeGreaterThanOrEqual)\s*\(|\bAssert\.InRange\s*\(/;
+// FluentAssertions forms too (2026-11-12: the backend asserts with .Should(); 36 of its range checks
+// were never flagged).
+const RANGE = /\.(?:toBeLessThan|toBeLessThanOrEqual|toBeGreaterThan|toBeGreaterThanOrEqual)\s*\(|\bAssert\.InRange\s*\(|\bShould\(\)[^;]*?\.(?:Be(?:Greater|Less)Than(?:OrEqualTo)?|Be(?:Greater|Less)OrEqualTo|BeInRange)\s*\(/;
 const REASON = /(?:\/\/|#)\s*range:\s*\S/;
 // "Nothing happens" checks: a call that did not happen, an element or value that is absent, zero.
-const NOTHING = /\.not\.toHaveBeenCalled|\.toHaveBeenCalledTimes\(\s*0\s*\)|\.not\.toBeInTheDocument\(|\.toBeNull\(\)|\.toBeUndefined\(\)|\.toHaveLength\(\s*0\s*\)|\.toBe\(\s*0\s*\)|\.toEqual\(\s*\[\s*\]\s*\)|\bTimes\.Never\b|\bAssert\.(?:Null|Empty)\s*\(|\.Should\(\)\.(?:BeNull|BeEmpty)\s*\(|\.DidNotReceive\(/;
+const NOTHING = /\.not\.toHaveBeenCalled|\.toHaveBeenCalledTimes\(\s*0\s*\)|\.not\.toBeInTheDocument\(|\.toBeNull\(\)|\.toBeUndefined\(\)|\.toHaveLength\(\s*0\s*\)|\.toBe\(\s*0\s*\)|\.toEqual\(\s*\[\s*\]\s*\)|\bTimes\.Never\b|\bAssert\.(?:Null|Empty)\s*\(|\.Should\(\)\.(?:BeNull|BeEmpty|BeFalse|NotContain)\s*\(|\.Should\(\)\.(?:Be|HaveCount)\(\s*0[mMdDfFlLuU]?\s*\)|\.DidNotReceive\(/;
 
 export function nothingChecks(lines) {
   return lines.filter(l => TEST_FILE.test(l.file) && NOTHING.test(l.text));
@@ -41,11 +44,12 @@ export function nonNullReads(lines) {
   return lines.filter(l => TEST_FILE.test(l.file) && NON_NULL.test(l.text));
 }
 
-// The check line numbers (1-based) that no added test line tags as [Cn] (or [C2, C5]).
-export function untagged(count, lines) {
+// The check line numbers (1-based) that no added test line tags as [Cn] (or [C2, C5]). `skipped(line)`
+// says whether a line belongs to a skipped test (skippedLines): a tag there does not count (2026-11-12).
+export function untagged(count, lines, skipped = () => false) {
   const seen = new Set();
   for (const l of lines) {
-    if (!TEST_FILE.test(l.file)) continue;
+    if (!TEST_FILE.test(l.file) || skipped(l)) continue;
     for (const tag of l.text.matchAll(/\[(C\d+(?:\s*,\s*C?\d+)*)\]/g)) for (const n of tag[1].match(/\d+/g)) seen.add(Number(n));
   }
   return Array.from({ length: count }, (_, i) => i + 1).filter(n => !seen.has(n));
@@ -89,12 +93,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   const found = rangeAsserts(lines);
   for (const f of found) console.log(`RANGE ASSERT: ${f.file}:${f.line} — ${f.text.trim()} → assert the exact value, or say why on the line: // range: <why>`);
-  // Proof: new "nothing happens" checks need a passing break run on the test files as they are now.
+  // Proof: a new "nothing happens" check needs a passing break run that named a test in its own file,
+  // with that file as it is now (2026-11-12: one proof of the page cleared every server check too).
   const nothing = nothingChecks(lines);
   let unproven = [];
   if (nothing.length) {
-    const files = changedTestFiles(top, base) || [];
-    if (!provesCurrent(readRecord(top), testFileHashes(top, files))) unproven = nothing;
+    const proven = provenTestFiles(top);
+    unproven = nothing.filter(l => !proven.has(l.file));
   }
   for (const f of unproven.slice(0, 8)) console.log(`UNPROVEN: ${f.file}:${f.line} — ${f.text.trim()}`);
   if (unproven.length) console.log(`  → ${unproven.length} new "nothing happens" check(s) never seen failing on these test files: run red-proof.mjs --breaks (a break of the rule under test) after the last test edit`);
@@ -102,7 +107,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   let missing = [];
   if (opt('--check')) {
     const count = checkLines(fs.readFileSync(opt('--check'), 'utf8')).length;
-    missing = untagged(count, lines);
+    const skips = new Map();
+    const skipped = (l) => {
+      if (!skips.has(l.file)) { let text = ''; try { text = fs.readFileSync(path.join(top, l.file), 'utf8'); } catch { /* a deleted file */ } skips.set(l.file, skippedLines(text, l.file)); }
+      return skips.get(l.file).has(l.line);
+    };
+    missing = untagged(count, lines, skipped);
     for (const n of missing) console.log(`UNTAGGED: check line C${n} has no new test tagged [C${n}]`);
   }
   const nonNull = nonNullReads(lines);

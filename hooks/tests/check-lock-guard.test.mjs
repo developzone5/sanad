@@ -100,6 +100,24 @@ test('shell commands: writes, git content changes and generated files in the rep
   assert.equal(decide('Bash', { command: 'git checkout -b other' }, sibling).decision, 'allow', 'a switch in another repository');
 });
 
+// 2026-11-12 (audit H14): the check records every file git does not ignore, so any shell write or delete
+// there voids it, not only a code file; formatters rewrite code. Reads, ignored paths and null sinks stay open.
+test('shell commands: any write or delete of a non-ignored file in the repository is refused', () => {
+  clearLocks();
+  writeLock();
+  for (const [tool, command] of [['Bash', 'echo note >> notes.md'], ['Bash', 'rm README.md'], ['Bash', 'rm -rf src'], ['PowerShell', 'Remove-Item -Path docs/old.md'],
+    ['Bash', "sed -i 's/a/b/' notes.md"], ['Bash', 'touch new.txt'], ['Bash', 'mv README.md docs.md'], ['Bash', 'git rm -q README.md'],
+    ['PowerShell', '"x" | Out-File -FilePath notes.md'], ['Bash', 'npx prettier --write .'], ['Bash', 'dotnet format'], ['Bash', 'cd src && echo x > notes.txt'],
+    ['Bash', `echo x > "${repo.replace(/\\/g, '/')}/specs/a.md"`]]) {
+    assert.equal(decide(tool, { command }).decision, 'deny', command);
+  }
+  for (const [tool, command] of [['Bash', 'cat README.md && grep -n x notes.md'], ['Bash', 'echo x > /dev/null'], ['PowerShell', 'dotnet test 2>$null'], ['Bash', 'rm -rf ignored/tmp'],
+    ['Bash', "sed -n '1,5p' README.md"], ['Bash', 'cp README.md ignored/copy.md'], ['Bash', `echo x > "${path.join(os.tmpdir(), 'outside.md').replace(/\\/g, '/')}"`],
+    ['Bash', 'git commit -m "rm notes.md > x"'], ['Bash', 'dotnet format --verify-no-changes']]) {
+    assert.equal(decide(tool, { command }).decision, 'allow', command);
+  }
+});
+
 test('a lock on another repository leaves this one open', () => {
   clearLocks();
   writeLock({ toplevel: sibling });

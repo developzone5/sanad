@@ -104,7 +104,13 @@ if (!shell) {
   allow();
 }
 
-const records = shell.parseCommand(cmd, { cwd, tool: data.tool_name === 'Bash' ? 'Bash' : 'PowerShell', home: os.homedir(), tmp: os.tmpdir() });
+// 2026-11-12: a saved alias (`git pub` = `push origin staging`) is expanded before
+// judging; the lookup runs in the command's folder, inside the scan deadline.
+function resolveAlias(word, dir) {
+  const r = git(['config', '--get', 'alias.' + word], dir, { okStatus: [0, 1] });
+  return r.ok ? r.out.trim() : '';
+}
+const records = shell.parseCommand(cmd, { cwd, tool: data.tool_name === 'Bash' ? 'Bash' : 'PowerShell', home: os.homedir(), tmp: os.tmpdir(), resolveAlias });
 const actions = records.filter((r) => r.git && (r.git.sub === 'commit' || r.git.sub === 'push'));
 if (!actions.length) {
   const hits = shell.tripwire(cmd);
@@ -373,6 +379,15 @@ let pendingAsk = '';
 for (const action of actions) {
   const g = action.git;
   const verb = g.sub;
+  // 2026-11-12: a commit/push inside `ssh host "…"` runs on another machine; nothing
+  // there can be scanned from here. Ask instead of letting it through unseen.
+  if (action.remote) {
+    check(verb, { added: '', entries: [], messages: '' });   // the command text itself is still scanned
+    pendingAsk = pendingAsk || (verb === 'push'
+      ? 'precommit-guard: this runs a push on another machine; the local checks cannot cover it. Confirm only if you know the outgoing commits hold no secrets.'
+      : 'precommit-guard: this commit runs on another machine and cannot be scanned for secrets from here. Confirm only if you know the changes hold none.');
+    continue;
+  }
   if (!g.certain) {
     if (verb === 'push') deny('Blocked: this push cannot be scanned for secrets (' + g.why + '). Run plain `git push` from the repository directory, as its own command.');
     pendingAsk = pendingAsk || 'precommit-guard: this commit cannot be scanned for secrets (' + g.why + '). Run plain `git commit` from the repository directory, or confirm you know the changes hold no secrets.';

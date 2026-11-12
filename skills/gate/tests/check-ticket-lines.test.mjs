@@ -101,6 +101,75 @@ test('with --base, the covering test is labelled changed or unchanged, and the c
   assert.match(old.out, /\(changed\)|\(unchanged\)/);
 });
 
+// 2026-11-12 (audit C11): any test file that quoted a line covered it, also an old test of an earlier
+// ticket that the branch never touched.
+test('with --base, a line quoted only in an unchanged test fails and names that test; with no base it passes', () => {
+  const { repo, git } = fixture({});
+  fs.mkdirSync(path.join(repo, 'old'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'old', 'x.test.ts'), "it('the counts follow the subject filter', () => {});\n");
+  git('add', '-A'); git('commit', '-qm', 'old test'); git('branch', '-f', 'base');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'changed\n'); git('commit', '-qam', 'work');
+  const r = run(repo, 'The counts follow the subject filter\n', ['--base', 'base']);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /0 of 1 covered/);
+  assert.match(r.out, /✗ L1 "The counts follow the subject filter" — quoted only in an older test \(unchanged\): old\/x\.test\.ts:1/);
+  assert.equal(run(repo, 'The counts follow the subject filter\n').code, 0, 'no base: any test file counts, as before');
+});
+
+test('with --base, a line quoted in a test file the branch changed is covered', () => {
+  const { repo, git } = fixture({});
+  fs.mkdirSync(path.join(repo, 'old'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'old', 'x.test.ts'), "it('an older case', () => {});\n");
+  git('add', '-A'); git('commit', '-qm', 'old test'); git('branch', '-f', 'base');
+  fs.appendFileSync(path.join(repo, 'old', 'x.test.ts'), "it('drafts are not published yet', () => {});\n");
+  git('commit', '-qam', 'work');
+  const r = run(repo, 'Drafts are not published yet\n', ['--base', 'base']);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /✓ L1 .*old\/x\.test\.ts:2 \(changed\)/);
+});
+
+// 2026-11-12 (audit C21): the 12 lines to the test were counted from the quote's first line, so a long
+// quote wrapped over many comment lines never reached its test.
+test('the window to the test declaration is counted from the last line of the quote', () => {
+  const src = [
+    '// "When the teacher opens the list',
+    '// the counts follow',
+    '// the subject filter',
+    '// and the section filter',
+    '// and the search box',
+    '// and the date range."',
+    ...Array(8).fill('// setup notes'),
+    "it('[C1] counts', () => {});",
+  ].join('\n');
+  const line = 'When the teacher opens the list the counts follow the subject filter and the section filter and the search box and the date range.';
+  assert.equal(findQuote(flatten(src), normalize(line).replace(/[.]+$/, '')), 1);
+  const { repo } = fixture({ 'src/long.test.ts': src });
+  const r = run(repo, line + '\n');
+  assert.equal(r.code, 0, r.out);
+});
+
+test('a lines file written as "T1. text" reads like "T1: text"', () => {
+  assert.deepEqual(readLines('T1. The list shows every subject\nT2: Drafts stay hidden\n'), ['T1: The list shows every subject', 'T2: Drafts stay hidden']);
+  const { repo } = fixture({ 'src/t.test.ts': "// \"The counts follow the subject filter\"\nit('[C1] counts', () => {});\n" });
+  const r = run(repo, 'T1. The counts follow the subject filter\n');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /✓ L1 "T1: The counts follow the subject filter"/);
+});
+
+// 2026-11-12 (audit C10): a ticket line quoted above a skipped test read as tested, though the test never runs.
+test('a quote above a skipped or todo test does not count; the same quote above a running test does', () => {
+  const quote = '// "The message should appear once."';
+  const needle = normalize('The message should appear once');
+  for (const decl of ["it.skip('shows it once', () => {});", "it.todo('shows it once');", "test.skip('shows it once', () => {});",
+    "describe.skip('message', () => {});", "xit('shows it once', () => {});", '[Fact(Skip = "later")]', '[Theory(Skip = "later")]']) {
+    assert.equal(findQuote(flatten(`${quote}\n${decl}`), needle), 0, decl);
+  }
+  assert.equal(findQuote(flatten(`${quote}\nit('shows it once', () => {});`), needle), 1);
+  assert.equal(findQuote(flatten(`${quote}\n[Fact]\npublic void ShowsItOnce() {}`), needle), 1);
+  // A skipped copy first, then a real test that quotes it again: the real one counts.
+  assert.equal(findQuote(flatten(`${quote}\nit.skip('old', () => {});\n\n\n\n\n\n\n\n\n\n\n\n\n\n${quote}\nit('new', () => {});`), needle), 16);
+});
+
 test('C# and Python test shapes count as tests', () => {
   const { repo } = fixture({
     'Api.Tests/HomeworkTests.cs': '// A teacher sees only own sections\n[Fact]\npublic void Sections() {}\n',

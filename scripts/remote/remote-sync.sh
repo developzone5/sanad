@@ -11,7 +11,8 @@
 #   (detached). Then run builds and tests there as a plain command, judged by its output:
 #     ssh <alias> "cd /d <path-on-remote>\<subfolder> && <command>"
 # Prints SYNCED <alias>:<path> <commit> tree <tree> (exit 0), or NO-REMOTE (3: run locally),
-# REMOTE-DOWN (4: ask the user before running locally), REMOTE-DIRTY (5), FAILED (1).
+# REMOTE-DOWN (4: ask the user before running locally), REMOTE-DIRTY (5), FAILED (1),
+# REMOTE-BUSY (11: another task's check or browser-check app uses the clone now; wait or stop it).
 # 2026-11-06: the user's desktop ran a full suite at a third of its speed with timeouts; the user's
 # rule is "the remote machine first, ask before using this one".
 set -uo pipefail
@@ -37,6 +38,14 @@ if ! reach; then
   via=(-o "HostName=$found")
 fi
 ssh_q() { ssh -o BatchMode=yes -o ConnectTimeout=12 ${via[@]+"${via[@]}"} "$host" "$@"; }
+
+# 2026-11-12: the clone on the test machine is ONE folder for every worktree of this repository. A sync
+# while another task's check runs in it, or while another task's browser-check app is served from it,
+# changes the code under that task: its tests then ran on mixed code and still "passed". Refuse, and say
+# who holds the clone (remote-busy.mjs). This folder's own check or app does not block.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+busy=$(node "$here/remote-busy.mjs" "$top" "$host" "$rrepo" 2>/dev/null || true)
+[ -z "$busy" ] || { echo "REMOTE-BUSY: $busy"; exit 11; }
 
 # One sync at a time from this machine (2026-11-11: two proofs started together, the server's and the page's,
 # shared the bundle's file name and the run ref; one deleted the bundle the other was fetching: "FAILED: fetch
@@ -65,8 +74,10 @@ if [ "$tree" = "$(git -C "$top" rev-parse 'HEAD^{tree}')" ]; then commit=$head
 else commit=$(git -C "$top" commit-tree "$tree" -p "$head" -m "sanad remote run (uncommitted work)") || { echo "FAILED: commit-tree"; exit 1; }; fi
 
 # The remote fetches the integration branch itself; the bundle carries only what it lacks.
-dirty=$(ssh_q "cd /d \"$rrepo\" && git status --porcelain --untracked-files=no" 2>/dev/null | tr -d '\r')
-[ -z "$dirty" ] || { echo "REMOTE-DIRTY: $host:$rrepo has uncommitted changes:"; echo "$dirty" | head -5; exit 5; }
+# Files there that are not in git count too (2026-11-12): the checkout below keeps them, and a leftover
+# source or test file is compiled into the run, so the result is not for this folder's code alone.
+dirty=$(ssh_q "cd /d \"$rrepo\" && git status --porcelain" 2>/dev/null | tr -d '\r')
+[ -z "$dirty" ] || { echo "REMOTE-DIRTY: $host:$rrepo has uncommitted changes or files that are not in git:"; echo "$dirty" | head -5; exit 5; }
 ssh_q "cd /d \"$rrepo\" && git fetch -q origin" >/dev/null 2>&1 || { echo "FAILED: git fetch on $host"; exit 1; }
 base=$(git -C "$top" merge-base "origin/$integ" "$commit" 2>/dev/null || true)
 ref="refs/sanad/remote-run"

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // review-brief.mjs — the task's briefs, from a fixed template, so nothing is copied by hand.
 //
-//   <out>          the framed brief: the Test designer and the whole-diff reviewer read it (ticket,
-//                  numbered Check lines, callers, known items, the proof run's result, the rules).
+//   <out>          the framed brief: the Test designer and the whole-diff reviewer read it (changed
+//                  files, ticket, numbered Check lines, callers, known items, the proof run's result, the rules).
 //   <out>-fresh.md the unframed brief for the fresh-eyes reviewers (Claude and Codex): the ticket,
-//                  the pinned diff, the project's missed-bug classes, the known items and the rules,
-//                  and nothing the author wrote (no Check lines, no callers, no proof result).
+//                  the pinned diff and the changed files (new untracked ones marked), the project's
+//                  missed-bug classes, the known items and the rules, and nothing the author wrote
+//                  (no Check lines, no callers, no proof result).
 //   launch.md      the exact launch lines for the designer and the reviewers, next to <out>: three
 //                  reviewers, or on a tiny or small change only the Claude fresh eyes (2026-11-11).
 //
@@ -29,8 +30,10 @@
 //                here, and each needs a test tagged [Cn]
 //   --outside    the project's outside list (default: `git config sanad.outsideList`)
 //   --missed     the project's missed-bugs list (default: `git config sanad.missedBugs`)
-//   --size       tiny or small adds the focused budget (default: the size check's answer)
-//   --proof-log  a red-proof.mjs output; its RED/BREAK/GREEN lines go into the framed brief
+//   --size       the routed size (tiny, small, medium or big); the larger of it and the size check's
+//                answer is used, and tiny or small adds the focused budget and the one-review launch
+//   --proof-log  a red-proof.mjs --log file; give it once per proof (server, page); the result lines of
+//                each go into the framed brief, with a note when the code changed after that proof ran
 // Run it before the Test designer starts, and again after the proof run, before the reviewers:
 // the second run adds the callers and the proof. Exit 0: written. 2: usage error.
 import fs from 'node:fs';
@@ -38,6 +41,10 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readLines } from './check-ticket-lines.mjs';
+import { treeId } from './red-proof.mjs';
+
+// The sizes in order, as size-check.mjs names them (kept here: that script runs as a child process).
+const SIZES = ['tiny', 'small', 'medium', 'big'];
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -74,26 +81,45 @@ function git(cwd, args) {
   catch { return ''; }
 }
 
-// The open items of a project's outside list: "- date · what happens · where · status".
+// The outside list: "- date · what happens · where · status", one bullet line each. Each line is kept whole,
+// less a leading date part (2026-11-12, audit C9: items were read by position, so a line with two parts lost
+// its place, and a line joining five items lost its first one, which sat in the date part).
+const bulletText = l => {
+  const parts = l.replace(/^\s*[-*]\s+/, '').split(' · ');
+  return (/^\d{4}-\d{2}-\d{2}$/.test(parts[0].trim()) ? parts.slice(1) : parts).join(' · ').trim();
+};
+const bullets = text => String(text).split(/\r?\n/).filter(l => /^\s*[-*]\s+/.test(l));
+// Done items: a CLOSED, FIXED or MERGED status word (upper case: "the exam is closed" in an item's text is
+// no status), or "fixed in PR" / "merged in #12" in any case (2026-11-12: "FIXED in PR #765" stayed listed).
+const DECIDED = /\bCLOSED\b/;
+const isDone = l => /\b(?:CLOSED|FIXED|MERGED)\b/.test(l) || /\b(?:fixed|merged) in (?:PR\b|#\d)/i.test(l);
+
+// The open items of a project's outside list.
 export function outsideItems(text) {
-  return String(text).split(/\r?\n/).filter(l => /^\s*[-*]\s+/.test(l) && !/\bCLOSED\b/.test(l)).map(l => {
-    const parts = l.replace(/^\s*[-*]\s+/, '').split(' · ').map(p => p.trim());
-    return parts.length >= 3 ? { what: parts[1], where: parts[2] } : { what: parts.join(' · '), where: '' };
-  });
+  return bullets(text).filter(l => !isDone(l)).map(l => ({ what: bulletText(l), where: '' })).filter(i => i.what);
 }
 
 // The questions the user already decided (CLOSED lines), so no reviewer asks them again (2026-11-07:
 // a reviewer re-asked a QA question the user had closed the day before; the brief had dropped it).
 export function decidedItems(text) {
-  return String(text).split(/\r?\n/).filter(l => /^\s*[-*]\s+/.test(l) && /\bCLOSED\b/.test(l))
-    .map(l => l.replace(/^\s*[-*]\s+/, '').split(' · ').slice(1).join(' · ').trim()).filter(Boolean);
+  return bullets(text).filter(l => DECIDED.test(l)).map(bulletText).filter(Boolean);
 }
 
-// Items whose place names a file this change touches: this change may alter or worsen them.
+// Items that name a file this change touches, anywhere in their text: its path, its base name, or, for a
+// file named like a class or a kebab-case module (AttemptService.cs, exam-form-schema.ts), that name without
+// the extension, as C# items name the class ("AttemptService.CreateAsync"). A longer name that only ends the
+// same (HomeworkForm.tsx for Form.tsx) is another file. This change may alter or worsen these items.
 export function splitOutside(items, changedFiles) {
-  const names = changedFiles.map(f => path.basename(f)).filter(Boolean);
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const names = new Set();
+  for (const f of changedFiles.map(n => String(n).replace(/\\/g, '/')).filter(Boolean)) {
+    names.add(f); names.add(path.posix.basename(f));
+    const stem = path.posix.basename(f).replace(/\.[^.]+$/, '');
+    if (stem.length >= 6 && /[a-z][A-Z]|[-_]/.test(stem)) names.add(stem);
+  }
+  const res = [...names].map(n => new RegExp(`(?<![\\w-])${esc(n)}(?![\\w-])`));
   const touched = [], other = [];
-  for (const item of items) (names.some(n => item.where.includes(n)) ? touched : other).push(item);
+  for (const item of items) (res.some(re => re.test(`${item.what} ${item.where || ''}`)) ? touched : other).push(item);
   return { touched, other };
 }
 
@@ -101,10 +127,12 @@ export function checkLines(text) {
   return String(text).split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => l.replace(/^(?:[-*•]|\d+[.)])\s+/, '').replace(/^C\d+\.\s+/, ''));
 }
 
-// "CLASS: x · ... · CATCH: y" from each missed-bug line, short.
+// "CLASS: x · ... · CATCH: y" from each missed-bug line, short. The file's own "Format:" line is the
+// template, not a bug (2026-11-12: "<short class>" was listed as a class the project missed).
 export function missedClasses(text) {
   const out = [];
   for (const line of String(text).split(/\r?\n/)) {
+    if (/^\s*(?:[-*]\s+)?Format:/i.test(line)) continue;
     const cls = /CLASS:\s*([^·]+)/.exec(line), catcher = /CATCH:\s*([^·]+)/.exec(line);
     if (!cls) continue;
     const item = (cls[1].trim() + (catcher ? ' — catch: ' + catcher[1].trim() : '')).slice(0, 180);
@@ -113,13 +141,31 @@ export function missedClasses(text) {
   return out;
 }
 
-// The size check's lines that the brief carries: stack, size and callers.
-function sizeFacts(repo, base) {
-  let out = '';
-  try { out = execFileSync(process.execPath, [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 }); }
-  catch (e) { out = String(e.stdout || ''); }
+// The size check's lines that the brief carries: stack, size and callers. A crash or a timeout is `failed`
+// (its first error line), so the brief says SIZE CHECK FAILED (2026-11-12: it said "Callers: none yet").
+export function sizeFacts(repo, base, { script = path.join(here, 'size-check.mjs'), timeout = 60000 } = {}) {
+  let out = '', failed = '';
+  try { out = execFileSync(process.execPath, [script, '--repo', repo, '--base', base], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout }); }
+  catch (e) {
+    out = String(e.stdout || '');
+    const errLines = String(e.stderr || e.message || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    failed = e.code === 'ETIMEDOUT' ? `timed out after ${Math.round(timeout / 1000)} s`
+      : (errLines.find(l => /^(?:SIZE: |\w*Error\b)/.test(l)) || errLines[0] || 'exit ' + e.status).replace(/^SIZE:\s*/, '');
+  }
   const line = re => (out.split(/\r?\n/).find(l => re.test(l)) || '').trim();
-  return { stack: line(/^Stack:/), size: line(/^SIZE/), callers: line(/^\s*callers:/).replace(/^callers:\s*/, '') };
+  const size = line(/^SIZE/);
+  if (!failed && !size) failed = 'no SIZE line in its output';
+  return { stack: line(/^Stack:/), size, callers: line(/^\s*callers:/).replace(/^callers:\s*/, ''), failed };
+}
+
+// The size the briefs and launch.md use: the larger of the routed size (--size) and the measured one, so a
+// change routed small that measures big gets the full round (2026-11-12, audit C8a: --size beat the measure).
+export function chooseSize(facts, routed) {
+  const m = /^SIZE:\s*(\w+)|^SIZE GREW:\s*\w+\s*→\s*(\w+)/.exec((facts && facts.size) || '') || [];
+  const measured = SIZES.includes(m[1] || m[2]) ? (m[1] || m[2]) : '';
+  const asked = SIZES.includes(routed) ? routed : '';
+  const size = asked && measured ? SIZES[Math.max(SIZES.indexOf(asked), SIZES.indexOf(measured))] : asked || measured;
+  return { size, note: asked && measured && asked !== measured ? `size: routed ${asked}, measured ${measured} → using ${size}` : '' };
 }
 
 const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`; or "no findings" and what you checked. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any.';
@@ -133,23 +179,53 @@ const RULES = [
 function diffLine({ repo, branch, base, mergeBase }) {
   return `Repo: ${repo}, branch ${branch}. Review the working tree against ${mergeBase.slice(0, 12)} (where it left ${base}): \`git diff ${mergeBase}\` (uncommitted work included).`;
 }
+// Every changed file, untracked ones marked: reviewers start before the commit, and `git diff` never shows
+// a file not yet added to git (2026-11-12, audit C1: a new component or test was never reviewed).
+const NEW_FILE = '(new, not in git yet: read the whole file — `git diff` does not show it)';
+function changedBlock(changed) {
+  if (!changed) return [];
+  return ['## Changed files', '', ...(changed.length ? changed.map(f => `- ${f.name}${f.untracked ? ' ' + NEW_FILE : ''}`) : ['- none yet']), ''];
+}
+// Items in the files this change touches come first, under a heading that asks for a check against the
+// change (2026-11-12, audit C9: they sat beside "do not report again").
 function known({ touched, other, decided = [] }) {
   const fmt = o => `- ${o.what}${o.where ? ` (${o.where})` : ''}`;
   return [
+    ...(touched.length ? ['## Problems outside the ticket in the files this change touches — CHECK each one against the change: report it if this change alters or worsens it', '', ...touched.map(fmt), ''] : []),
     '## Problems outside the ticket — known, do not report again', '', ...(other.length ? other.map(fmt) : ['- none']), '',
-    ...(touched.length ? ['## Problems outside the ticket in the files this change touches — report only if this change alters or worsens them', '', ...touched.map(fmt), ''] : []),
     ...(decided.length ? ['## Decided by the user — do not ask again', '', ...decided.map(d => '- ' + d), ''] : []),
   ];
 }
 const focusedBlock = ['## Focused brief (small change)', '',
   'Trace the changed hunks, each caller and each Check line; do not re-derive the whole screen or file. About 15 tool calls and 2 minutes; stop once every line is traced.'];
-const isFocused = (facts, size) => /^(?:tiny|small)$/.test(size || (/^SIZE(?: GREW)?:\s*(\w+)/.exec(facts.size) || [])[1] || '');
+const isFocused = (facts, size) => /^(?:tiny|small)$/.test(chooseSize(facts, size).size);
+const callersLine = facts => facts.failed ? `SIZE CHECK FAILED: ${facts.failed}` : `Callers: ${facts.callers || 'none yet (no change yet)'}`;
 const tidy = lines => lines.filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n') + '\n';
 
-export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines = [], checks, outside, facts, size, proof = [] }) {
+// The lines of each proof log that the brief carries. 2026-11-12: two proofs (server and page) give two
+// logs and only one reached the reviewers; a stopped proof (ENVIRONMENT, TIMEOUT, BREAK INVALID) was
+// filtered out; and nothing said which code a log was for. red-proof.mjs writes the tree it proves as
+// the log's first line ("RED-PROOF-LOG: tree <id> at <time>"): when the code under review is another
+// tree, the brief says so beside that proof.
+const PROOF_LINE = /^(?:RED-PROOF: (?:RED|NOT|PROVED|SETUP|ENVIRONMENT|TIMEOUT|REMOTE)|\s*(?:BREAK|GREEN) )/;
+export function proofLines(logs, currentTree = '') {
+  const out = [];
+  for (const { name, text } of logs) {
+    const rows = String(text).split(/\r?\n/);
+    const stamp = /^RED-PROOF-LOG: tree (\S+)(?: dirty)? at (\S+)/.exec(rows[0] || '');
+    const kept = rows.filter(l => PROOF_LINE.test(l)).map(l => l.trim());
+    if (logs.length > 1 || stamp) out.push(`${name}${stamp ? ` — ran ${stamp[2]} on tree ${stamp[1].slice(0, 12)}` : ''}:`);
+    if (stamp && currentTree && stamp[1] !== currentTree) out.push(`NOTE: the code under review is tree ${currentTree.slice(0, 12)}; it changed after this proof ran. Check that the proof still covers it, or ask for a new run.`);
+    out.push(...(kept.length ? kept : ['(no result line in this log: the proof did not finish)']));
+  }
+  return out;
+}
+
+export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines = [], checks, outside, facts, size, proof = [], changed }) {
   return tidy([
     ROLE, '', diffLine({ repo, branch, base, mergeBase }), '',
-    facts.stack || 'Stack: unknown', facts.size || '', `Callers: ${facts.callers || 'none yet (no change yet)'}`, '',
+    facts.stack || 'Stack: unknown', facts.size || '', callersLine(facts), '',
+    ...changedBlock(changed),
     '## Ticket (verbatim)', '', ticket.trim(), '',
     ...(ticketLines.length ? ['## Ticket lines — every one has a Check line', '', ...ticketLines.map((t, i) => `- T${i + 1}. ${t}`), ''] : []),
     '## Check — each line names its source ([Tn] a ticket line, [change], [rule: ...]); its tests carry the tag [Cn]', '',
@@ -161,10 +237,11 @@ export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines 
   ]);
 }
 
-export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, missed, facts, size }) {
+export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, missed, facts, size, changed }) {
   return tidy([
     ROLE.replace('You are a code reviewer.', 'You are a code reviewer with fresh eyes: judge the change only against the ticket and the code.'), '',
     diffLine({ repo, branch, base, mergeBase }), '', facts.stack || 'Stack: unknown', '',
+    ...changedBlock(changed),
     '## Ticket (verbatim)', '', ticket.trim(), '',
     ...(missed.length ? ['## Bug classes this project missed before — check the change for each', '', ...missed.map(m => '- ' + m), ''] : []),
     ...known(outside),
@@ -178,9 +255,10 @@ export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside
 // checks each Check line's test mechanically, the job the small whole-diff pass had.
 const WHOLE_DIFF_FULL = 'Fill the coverage checklist lines that apply (CLIENT STATE, NEW BLOCKS, FAILURES / LOCALES, USERS FOUND BY SEARCH, TESTS CAN FAIL).';
 
-export function buildLaunch({ brief, fresh, repo, branch, focused = false }) {
+export function buildLaunch({ brief, fresh, repo, branch, focused = false, sizeNote = '' }) {
   return [
     '# Launch lines (copy as they are)', '',
+    ...(sizeNote ? [sizeNote, ''] : []),
     '## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
     `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. Area: <the files and the field or endpoint — author fills>. Deliver per your guide.`, '',
     '## Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', '',
@@ -200,9 +278,12 @@ function parse(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (!['--out', '--ticket', '--lines', '--check', '--repo', '--base', '--outside', '--missed', '--size', '--proof-log'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
-    o[k.slice(2)] = argv[++i];
+    // --proof-log may come more than once: a server proof and a page proof give two logs.
+    if (k === '--proof-log') (o['proof-log'] ||= []).push(argv[++i]);
+    else o[k.slice(2)] = argv[++i];
   }
   for (const need of ['out', 'ticket', 'lines', 'check']) if (!o[need]) throw new Error('--' + need + ' is required');
+  if (o.size && !SIZES.includes(o.size)) throw new Error('--size must be one of ' + SIZES.join(', '));
   return o;
 }
 
@@ -221,20 +302,25 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const gaps = coverageProblems(ticketLines, checks);
     if (gaps.length) throw new Error('the Check lines do not cover the ticket:\n  ' + gaps.join('\n  '));
     const listFile = (flag, key) => { const f = flag || git(repo, ['config', '--get', key]); return f && fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : ''; };
-    const changed = [...git(repo, ['diff', '--name-only', mergeBase]).split(/\r?\n/), ...git(repo, ['ls-files', '--others', '--exclude-standard']).split(/\r?\n/)].filter(Boolean);
+    const tracked = git(repo, ['diff', '--name-only', '-z', mergeBase]).split('\0').filter(Boolean);
+    const untracked = git(repo, ['ls-files', '-z', '--others', '--exclude-standard']).split('\0').filter(Boolean);
+    const changedFiles = [...tracked.map(name => ({ name })), ...untracked.filter(n => !tracked.includes(n)).map(name => ({ name, untracked: true }))];
+    const changed = changedFiles.map(f => f.name);
     const outsideText = listFile(o.outside, 'sanad.outsideList');
     const outside = { ...splitOutside(outsideItems(outsideText), changed), decided: decidedItems(outsideText) };
     const missed = missedClasses(listFile(o.missed, 'sanad.missedBugs'));
-    const proof = o['proof-log'] && fs.existsSync(o['proof-log'])
-      ? fs.readFileSync(o['proof-log'], 'utf8').split(/\r?\n/).filter(l => /^(?:RED-PROOF: (?:RED|NOT|PROVED|SETUP)|\s+(?:BREAK|GREEN) )/.test(l)).map(l => l.trim()) : [];
+    const logs = (o['proof-log'] || []).filter(f => fs.existsSync(f)).map(f => ({ name: path.basename(f), text: fs.readFileSync(f, 'utf8') }));
+    const proof = proofLines(logs, logs.length ? treeId(repo) : '');
     const facts = sizeFacts(repo, base);
     const branch = git(repo, ['branch', '--show-current']) || '(detached)';
     const ticket = fs.readFileSync(o.ticket, 'utf8');
     const out = path.resolve(o.out), fresh = out.replace(/(\.md)?$/, '-fresh.md'), launch = path.join(path.dirname(out), 'launch.md');
-    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof }));
-    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, missed, facts, size: o.size }));
-    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, focused: isFocused(facts, o.size) }));
-    process.stdout.write(`BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'}\n` +
+    const chosen = chooseSize(facts, o.size);
+    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof, changed: changedFiles }));
+    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, missed, facts, size: o.size, changed: changedFiles }));
+    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, focused: isFocused(facts, o.size), sizeNote: chosen.note }));
+    process.stdout.write((chosen.note ? chosen.note + '\n' : '') + (facts.failed ? `SIZE CHECK FAILED: ${facts.failed}\n` : '') +
+      `BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.failed ? 'SIZE CHECK FAILED' : facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'} · ${changedFiles.length} changed file(s), ${changedFiles.length - tracked.length} new untracked\n` +
       `FRESH: ${fresh} · ${missed.length} missed-bug class(es)\nLAUNCH: ${launch}\n`);
   } catch (error) {
     process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--missed <file>] [--size <size>] [--proof-log <file>]\n');

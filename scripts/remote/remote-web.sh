@@ -42,6 +42,9 @@ case "$host" in *[!A-Za-z0-9_.-]*) echo "FAILED: sanad.remoteHost must be a plai
 link_file="$state/remote-web-$host.link"      # this machine: "<pid> <windows pid or -> <ports>"
 server_file="$state/remote-web-$host.server"  # the test machine: "<port> <pid>"
 log="$state/remote-web-$host.log"
+# This machine: the folder whose code the running app serves. remote-sync.sh refuses a sync from ANOTHER
+# folder while that app is up (2026-11-12: a second task's sync changed the code under a browser check).
+owner_file="$state/remote-web-$host.owner"
 
 via=()
 reach() { ssh -o BatchMode=yes -o ConnectTimeout=12 "$@" "$host" "echo ok" >/dev/null 2>&1; }
@@ -89,6 +92,7 @@ stop_own() {
     fi
     rm -f "$server_file"
   fi
+  rm -f "$owner_file"
   [ -n "$stopped" ] && echo "STOPPED: $stopped"
   return 0
 }
@@ -148,6 +152,7 @@ ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 ${via
 pid=$!
 winpid=$(cat "/proc/$pid/winpid" 2>/dev/null || echo -)
 echo "$pid $winpid $ports" > "$link_file"
+git rev-parse --show-toplevel > "$owner_file" 2>/dev/null || rm -f "$owner_file"
 
 answers() { [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://localhost:$web_port" 2>/dev/null)" -ge 200 ] 2>/dev/null; }
 start=$SECONDS

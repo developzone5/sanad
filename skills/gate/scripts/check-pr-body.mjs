@@ -8,12 +8,20 @@
 //
 // Usage: node check-pr-body.mjs <pr-body.md>
 //   prints `PR BODY: clean` and exits 0, or one `PARKED` line per flagged line and exits 1.
-// A line passes when it quotes the user (the word "user" and a quoted phrase) or a ticket
-// (a key like TUW-160 and a quoted phrase) — the authority for leaving it as it is.
+// A line passes when it quotes the user (`user said`, `user:` or `the user's words`, then their words
+// in "…", “…” or «…») or a ticket (a key like TUW-160 and a quoted phrase) — the authority for leaving
+// it as it is.
 import fs from 'node:fs';
 
 // Words that leave a known problem in place. Matched case-insensitively on each line.
+// 2026-11-12 (audit C13): "out of scope", "by design" and the others below parked findings unseen.
 export const PARKING = [
+  /\bout of scope\b/i,
+  /\bby design\b/i,
+  /\bunchanged on purpose\b/i,
+  /\bseparate PR\b/i,
+  /\bfollow-?up PR\b/i,
+  /\bnot in this PR\b/i,
   /\bauthor'?s? (?:own )?(?:decision|choice|call)\b/i,
   /\b(?:kept|left|leave|keep) (?:it |them |this |that )?as (?:it|they|is|are)\b/i,
   /\bas (?:it|they) (?:is|are) on purpose\b/i,
@@ -27,14 +35,22 @@ export const PARKING = [
   /\bdeferred\b/i,
 ];
 
-const QUOTED = /"[^"]{3,}"|“[^”]{3,}”|«[^»]{3,}»|'[^'\s][^']{2,}'/;
-const USER = /\buser\b|\bthe user's\b/i;
+// 2026-11-12 (audit C13): two apostrophes made a "quote" ("the teacher's list doesn't …") and the bare
+// word "user" made it the user's. A quotation is now double, typographic or angle quotes only, and the
+// user's words follow `user said`, `user:` or `the user's words`.
+const QUOTE = String.raw`(?:"[^"]{3,}"|“[^”]{3,}”|«[^»]{3,}»)`;
+const QUOTED = new RegExp(QUOTE);
+const USER_WORDS = new RegExp(String.raw`\buser(?:\s+said\b|\s*:|['’]s\s+words\b)[^"“«]*` + QUOTE, 'i');
 const TICKET = /\b[A-Z][A-Z0-9]+-\d+\b/;
 
 // A flagged line passes with a quoted phrase plus who said it: the user or a ticket.
 export function hasAuthority(line) {
-  return QUOTED.test(line) && (USER.test(line) || TICKET.test(line));
+  return USER_WORDS.test(line) || (QUOTED.test(line) && TICKET.test(line));
 }
+
+// 2026-11-12 (audit C13): "Fixes the pre-existing crash" was refused. A line that fixes an old problem
+// parks nothing: the fix words are taken out before the parking words are looked for.
+const FIXES_OLD = /\bfix(?:es|ed|ing)?\s+(?:the\s+|a\s+|an\s+)?(?:pre-?existing|existing)\b/gi;
 
 const BULLET = /^\s*(?:[-*+]|\d+[.)])\s+/;
 
@@ -50,11 +66,12 @@ export function check(text) {
   const findings = [];
   const lines = text.split(/\r?\n/);
   lines.forEach((line, i) => {
-    const hit = PARKING.find((re) => re.test(line));
+    const words = line.replace(FIXES_OLD, ' ');
+    const hit = PARKING.find((re) => re.test(words));
     if (!hit || hasAuthority(line)) return;
     const under = line.trimEnd().endsWith(':') ? bulletsUnder(lines, i) : [];
     if (under.length && under.every(hasAuthority)) return;
-    findings.push({ line: i + 1, text: line.trim(), words: line.match(hit)[0] });
+    findings.push({ line: i + 1, text: line.trim(), words: words.match(hit)[0] });
   });
   return findings;
 }

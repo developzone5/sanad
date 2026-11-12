@@ -27,7 +27,8 @@ d="$(dirname "$0")"
 cmd="\${@: -1}"
 case "$cmd" in
   "echo ok") echo ok ;;
-  *"status --porcelain"*) : ;;
+  *"--untracked-files=no"*) : ;;
+  *"status --porcelain"*) cat "$d/status" 2>/dev/null ;;
   *"fetch -q origin"*) : ;;
   *"sanad-run.bundle"*) mv "$d/bundle" "$d/taken.$$" 2>/dev/null || exit 1 ;;
   *"checkout -q --detach"*) : ;;
@@ -83,6 +84,73 @@ test('two syncs started together both finish: the second waits for the first', a
       assert.match(r.out, /^SYNCED pc2:C:\/repos\/App [0-9a-f]{40} tree [0-9a-f]{40}$/m);
     }
     assert.equal(fs.existsSync(path.join(state, 'remote-sync.lock')), false, 'the lock is gone when both are done');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// 2026-11-12: every worktree of a repository shares the ONE clone on the test machine. A sync from a
+// second task changed the code under the first task's running suite (or under its browser-check app),
+// and the first task still got "passed". The sync now refuses while another task holds the clone.
+function checkLock(state, { toplevel, pid = process.pid, minutes = 10,
+  command = 'C:/Windows/System32/OpenSSH/ssh.exe -o BatchMode=yes pc2 cd /d C:\\repos\\App\\Server && dotnet test' }) {
+  const dir = path.join(state, 'check-locks');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, Math.random().toString(16).slice(2) + '.json'), JSON.stringify({ toplevel, pid,
+    startedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + minutes * 60000).toISOString(), command }));
+}
+
+test("a sync is refused while another task's check runs in the test machine's clone", async () => {
+  const { root, state, run } = setup();
+  try {
+    checkLock(state, { toplevel: 'C:/work/other-task' });
+    const r = await run();
+    assert.equal(r.code, 11, r.out);
+    assert.match(r.out, /^REMOTE-BUSY: a check of C:\/work\/other-task is running in pc2:C:\/repos\/App/m);
+    assert.doesNotMatch(r.out, /SYNCED/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("this folder's own check, a check that is gone or expired, and a check outside the clone do not block a sync", async () => {
+  const { root, state, run } = setup();
+  try {
+    checkLock(state, { toplevel: path.join(root, 'repo') });
+    checkLock(state, { toplevel: 'C:/work/other-task', pid: 999999 });
+    checkLock(state, { toplevel: 'C:/work/other-task', minutes: -1 });
+    checkLock(state, { toplevel: 'C:/work/other-task', command: 'ssh pc2 cd /d C:\\repos\\Else && dotnet test' });
+    checkLock(state, { toplevel: 'C:/work/other-task', command: 'node node_modules/vitest/vitest.mjs run' });
+    const r = await run();
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /^SYNCED /m);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a sync is refused while another task's browser-check app is served from the clone, not for its own app or a dead link", async () => {
+  const { root, state, run } = setup();
+  try {
+    const owner = path.join(state, 'remote-web-pc2.owner'), link = path.join(state, 'remote-web-pc2.link');
+    fs.writeFileSync(owner, 'C:/work/other-task\n');
+    fs.writeFileSync(link, `1 ${process.pid} 3000 5050\n`);
+    const other = await run();
+    assert.equal(other.code, 11, other.out);
+    assert.match(other.out, /^REMOTE-BUSY: the browser-check app of C:\/work\/other-task is served from pc2:C:\/repos\/App/m);
+    assert.match(other.out, /remote-web\.sh stop/);
+
+    fs.writeFileSync(link, '1 999999 3000 5050\n');
+    assert.equal((await run()).code, 0, 'a link that is gone holds nothing');
+
+    fs.writeFileSync(owner, path.join(root, 'repo') + '\n');
+    fs.writeFileSync(link, `1 ${process.pid} 3000 5050\n`);
+    assert.equal((await run()).code, 0, 'its own app does not block its own sync');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('files on the test machine that are not in git make its clone dirty: they would be compiled into the run', async () => {
+  const { root, run } = setup();
+  try {
+    fs.writeFileSync(path.join(root, 'bin', 'status'), '?? Server/Leftover.cs\n');
+    const r = await run();
+    assert.equal(r.code, 5, r.out);
+    assert.match(r.out, /^REMOTE-DIRTY: /m);
+    assert.match(r.out, /Leftover\.cs/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

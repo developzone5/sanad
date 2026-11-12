@@ -25,7 +25,10 @@ function fixture() {
   fs.writeFileSync(path.join(repo, 'app.cjs'), 'module.exports = 1;\r\n');
   git('add', 'app.cjs'); git('commit', '-qm', 'buggy');
   fs.writeFileSync(path.join(repo, 'app.cjs'), 'module.exports = 2; // fixed\n');
-  fs.writeFileSync(path.join(repo, 'check.cjs'), 'process.exit(require("./app.cjs") === 2 ? 0 : 1);\n');
+  // 2026-11-12: the old code is red only by a named test that fails by an assertion, so the test says so.
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'if (require("./app.cjs") !== 2) { console.log(" FAIL  src/app.test.cjs > app > is fixed" + String.fromCharCode(10) + "AssertionError: expected 1 to be 2"); process.exit(1); }',
+    'process.exit(0);', ''].join('\n'));
   return { repo, git };
 }
 // The fixtures must not see this machine's git settings (a test machine there sends runs away).
@@ -55,7 +58,7 @@ test('a test that also passes on the old code is NOT RED (exit 1), files restore
 test('a fix file that did not exist on the old code is removed for the run and put back', () => {
   const { repo } = fixture();
   fs.writeFileSync(path.join(repo, 'helper.cjs'), 'module.exports = "new";\n');
-  fs.writeFileSync(path.join(repo, 'check.cjs'), 'require("node:fs").existsSync(__dirname + "/helper.cjs") ? process.exit(0) : process.exit(1);\n');
+  fs.writeFileSync(path.join(repo, 'check.cjs'), 'if (!require("node:fs").existsSync(__dirname + "/helper.cjs")) { console.log(" FAIL  src/helper.test.cjs > helper > exists\\nAssertionError: expected false to be true"); process.exit(1); }\n');
   const result = run(['--repo', repo, '--old', 'HEAD', '--files', 'helper.cjs', '--', process.execPath, 'check.cjs']);
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(fs.readFileSync(path.join(repo, 'helper.cjs'), 'utf8'), 'module.exports = "new";\n');
@@ -143,10 +146,13 @@ test('a timeout and a dotnet failure are read too; a build error with no test is
   assert.match(mixed.stdout, /✗ setup\s+src\/b\.test\.ts > export > writes the file — Error: Test timed out/);
   runnerOutput(repo, ['Build FAILED.', 'Program.cs(3,1): error CS1002: ; expected']);
   assert.equal(run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']).status, 3);
+  // 2026-11-12 (S2): this pinned "RED ✓ — failure reasons not read" for any non-zero exit; a host crash
+  // or a missing test then read as red. A run that names no failing test is NOT RED now.
   runnerOutput(repo, ['some runner we do not read']);
   const unread = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
-  assert.equal(unread.status, 0, 'an unknown runner keeps the old exit-code rule');
-  assert.match(unread.stdout, /failure reasons not read from this runner/);
+  assert.equal(unread.status, 1, unread.stdout);
+  assert.match(unread.stdout, /NOT RED ✗ — the run fails on HEAD \(exit 1\), but no failing test was named \(failure reasons not read from this runner\)/);
+  assert.doesNotMatch(unread.stdout, /RED ✓/);
 });
 
 // 2026-11-06: vitest lists tests that fail the same way together, one FAIL line each, above one
@@ -169,7 +175,8 @@ function breakFixture() {
   fs.writeFileSync(path.join(repo, 'rule.cjs'), 'module.exports = { blocks: true };\n');
   git('add', 'rule.cjs'); git('commit', '-qm', 'rule');
   fs.mkdirSync(path.join(repo, 'src'));
-  fs.writeFileSync(path.join(repo, 'src/a.test.cjs'), '// the tests\n');
+  // The tests check.cjs stands for, by their own titles (2026-11-12: a mustFail part is matched to them).
+  fs.writeFileSync(path.join(repo, 'src/a.test.cjs'), "describe('form', () => {\n  it('saves nothing', () => {});\n  it('shows it once', () => {});\n});\n");
   fs.writeFileSync(path.join(repo, 'check.cjs'), [
     'const blocks = require("./rule.cjs").blocks;',
     'const fails = [];',
@@ -192,12 +199,13 @@ test('--breaks: the named tests fail under the break, the old code is red, the f
   assert.match(result.stdout, /GREEN ✓/);
   assert.match(result.stdout, /RED-PROOF: PROVED ✓ — red on the old code, 1 break\(s\) caught, green on the fix/);
   assert.deepEqual(fs.readFileSync(path.join(repo, 'rule.cjs')), rule);
-  const { readRecord, testFileHashes, provesCurrent } = await import('../scripts/proof-record.mjs');
-  const record = readRecord(repo);
-  assert.equal(record.breaks, 1);
-  assert.ok(provesCurrent(record, testFileHashes(repo, ['src/a.test.cjs'])), 'the record covers the test file as it is now');
+  const { readRecord, provenTestFiles } = await import('../scripts/proof-record.mjs');
+  const entries = Object.values(readRecord(repo).entries);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].breaks, 1);
+  assert.deepEqual([...provenTestFiles(repo)], ['src/a.test.cjs'], 'the record covers the test file as it is now');
   fs.appendFileSync(path.join(repo, 'src/a.test.cjs'), '// edited after the proof\n');
-  assert.ok(!provesCurrent(record, testFileHashes(repo, ['src/a.test.cjs'])), 'an edit after the proof voids it');
+  assert.deepEqual([...provenTestFiles(repo)], [], 'an edit after the proof voids it');
 });
 
 test('--breaks: a named test that still passes under the break is reported and fails the proof', () => {
@@ -304,9 +312,9 @@ test('the proof record is found under any spelling of the same folder', async ()
   const alias = repo + '-alias';
   fs.symlinkSync(repo, alias, 'junction');
   try {
-    const { writeRecord, readRecord } = await import('../scripts/proof-record.mjs');
-    writeRecord(alias, { ok: true, breaks: 1, files: { 'src/a.test.cjs': 'x' } });
-    assert.equal(readRecord(repo)?.breaks, 1, 'written through the link, read through the real path');
+    const { writeEntry, readRecord } = await import('../scripts/proof-record.mjs');
+    writeEntry(alias, 'k', { ok: true, breaks: 1, files: { 'src/a.test.cjs': 'x' }, targets: {} });
+    assert.equal(readRecord(repo)?.entries?.k?.breaks, 1, 'written through the link, read through the real path');
   } finally {
     fs.unlinkSync(alias);
   }
@@ -631,4 +639,266 @@ test('--timeout-min with one --break: the file in the working folder comes back 
   assert.match(result.stdout, /TIMEOUT ✗ — break ran past 0\.05 min/);
   assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before);
   assert.ok(gone(Number(fs.readFileSync(pidFile, 'utf8'))));
+});
+
+// ---- 2026-11-12 audit fixes ----
+
+// S2: a stopped database or a crashed test host failed every red run, and the proof read PROVED ✓.
+const ENVIRONMENT_LINE = /RED-PROOF: ENVIRONMENT ✗ — the test machine failed \(database or host\), not the tests; fix it and run the same proof again\./;
+test('a database or host failure is ENVIRONMENT (exit 6) on the old code, never RED', () => {
+  const { repo } = fixture();
+  const before = fs.readFileSync(path.join(repo, 'app.cjs'));
+  runnerOutput(repo, ['  Failed Api.Tests.HomeworkTests.LateAtTheMinute [1 s]', '  Error Message:', '   MySqlConnector.MySqlException : Unable to connect to any of the specified MySQL hosts.']);
+  const db = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(db.status, 6, db.stdout);
+  assert.match(db.stdout, ENVIRONMENT_LINE);
+  assert.match(db.stdout, /✗ env\s+Api\.Tests\.HomeworkTests\.LateAtTheMinute — .*Unable to connect/);
+  assert.doesNotMatch(db.stdout, /RED ✓/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before);
+  runnerOutput(repo, ['Starting test execution, please wait...', 'The active test run was aborted. Reason: Test host process crashed : Fatal error.']);
+  const host = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(host.status, 6, host.stdout);
+  assert.match(host.stdout, ENVIRONMENT_LINE);
+});
+
+test('a break run that fails on the database is ENVIRONMENT, not a caught break', () => {
+  const { repo, breaks } = breakFixture();
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'if (!require("./rule.cjs").blocks) { console.log([" FAIL  src/a.test.cjs > form > saves nothing", "Error: connect ECONNREFUSED 127.0.0.1:3307"].join(String.fromCharCode(10))); process.exit(1); }', ''].join('\n'));
+  writeBreaks(breaks, ['saves nothing']);
+  for (const parallel of [['--parallel', '1'], ['--parallel', '2']]) {
+    const result = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--then-green', ...parallel, '--', process.execPath, 'check.cjs']);
+    assert.equal(result.status, 6, result.stdout);
+    assert.match(result.stdout, ENVIRONMENT_LINE);
+    assert.doesNotMatch(result.stdout, /BREAK ✓|PROVED ✓/);
+  }
+});
+
+test('the old code is red by a named failing test: an unread runner or no test run is NOT RED; a product error counts and is named', () => {
+  const { repo } = fixture();
+  // A named test that fails by an error the old code throws is the bug too (not an assertion, so the line says it).
+  runnerOutput(repo, [' FAIL  src/a.test.tsx > list > shows it', 'Error: boom']);
+  const other = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(other.status, 0, other.stdout);
+  assert.match(other.stdout, /RED ✓ — the tests fail on HEAD for app\.cjs \(exit 1; 0 of 1 failing test\(s\) by an assertion, 1 by another error: check above that it is the bug\)/);
+  runnerOutput(repo, ['', ' RUN  v3.2.4', 'No test files found, exiting with code 1']);
+  const none = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(none.status, 1, none.stdout);
+  assert.match(none.stdout, /NOT RED ✗ — no test ran on HEAD/);
+});
+
+test('jest-dom and Moq failures read as assertions; a connection failure reads as the environment', async () => {
+  const { failureReasons } = await import('../scripts/red-proof.mjs');
+  const kinds = failureReasons([' FAIL  src/a.test.tsx > form > shows the hint', 'Error: expect(element).toBeInTheDocument()',
+    '  Failed Api.Tests.T.Saves [1 ms]', '  Error Message:', '   Moq.MockException : Expected invocation on the mock once, but was 0 times: x => x.Save()',
+    '  Failed Api.Tests.T.Loads [1 ms]', '  Error Message:', '   MySqlConnector.MySqlException : Connect Timeout expired.'].join('\n')).map(w => w.kind);
+  assert.deepEqual(kinds, ['assert', 'assert', 'env']);
+  // A screen text or an asserted value that names a connection error is the test's own failure, not the machine's.
+  const own = failureReasons([' FAIL  src/a.test.tsx > banner > shows the offline text', 'TestingLibraryElementError: Unable to find an element with the text: Unable to connect to the server',
+    ' FAIL  src/a.test.tsx > retry > keeps the code', "AssertionError: expected 'ETIMEDOUT' to be 'ECONNREFUSED'"].join('\n')).map(w => w.kind);
+  assert.deepEqual(own, ['setup', 'assert']);
+});
+
+// S6: a break whose text crashed everything failed every named test and read as caught.
+test('--breaks: a break that does not compile or run is BREAK INVALID, never caught', () => {
+  const { repo, breaks } = breakFixture();
+  writeBreaks(breaks, ['saves nothing']);
+  for (const crash of [[' FAIL  src/a.test.cjs > form > saves nothing', 'ReferenceError: blokcs is not defined'], ['Build FAILED.', 'Rule.cs(3,1): error CS0103: The name \'blokcs\' does not exist in the current context']]) {
+    fs.writeFileSync(path.join(repo, 'check.cjs'), `if (!require("./rule.cjs").blocks) { console.log(${JSON.stringify(crash.join('\n'))}); process.exit(1); }\n`);
+    const result = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--', process.execPath, 'check.cjs']);
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stdout, /BREAK INVALID ✗ the rule does not block: the break does not compile\/run; write a break that changes one rule/);
+    assert.match(result.stdout, /RED-PROOF: NOT PROVED ✗/);
+    assert.doesNotMatch(result.stdout, /BREAK ✓/);
+  }
+});
+
+test('--break: a break that makes a ReferenceError is BREAK INVALID, not RED; the file comes back', () => {
+  const { repo } = fixture();
+  fs.writeFileSync(path.join(repo, 'check.cjs'), 'if (require("./app.cjs") !== 2) { console.log(" FAIL  src/app.test.cjs > app > is fixed\\nReferenceError: exprts is not defined"); process.exit(1); }\n');
+  const before = fs.readFileSync(path.join(repo, 'app.cjs'));
+  const result = run(breakArgs(repo, 'exports = 2', 'exports = 3'));
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stdout, /BREAK INVALID ✗ break: the break does not compile\/run/);
+  assert.match(result.stdout, /RED-PROOF: NOT RED ✗/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before);
+});
+
+test('a break whose --put is its --find changes nothing: BREAK INVALID, and nothing runs', () => {
+  const { repo, breaks } = breakFixture();
+  fs.writeFileSync(breaks, JSON.stringify([{ name: 'same text', file: 'rule.cjs', find: 'blocks: true', put: 'blocks: true', mustFail: ['saves nothing'] }]));
+  const many = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--', process.execPath, 'check.cjs']);
+  assert.equal(many.status, 1, many.stdout);
+  assert.match(many.stdout, /BREAK INVALID ✗ same text: the break changes nothing/);
+  assert.doesNotMatch(many.stdout, /ran |BREAK ✓|BREAK ✗ same/);
+  const one = run(breakArgs(repo, 'exports = 2', 'exports = 2'));
+  assert.equal(one.status, 1, one.stdout);
+  assert.match(one.stdout, /BREAK INVALID ✗ break: the break changes nothing/);
+});
+
+test('a break text matched with other line endings: applied in either, and a no-op is found', async () => {
+  const { applyBreak } = await import('../scripts/red-proof.mjs');
+  assert.equal(applyBreak('a\r\nb\r\nc', 'a\nb', 'a\nX'), 'a\r\nX\r\nc', 'an LF break in a CRLF file');
+  assert.equal(applyBreak('a\nb\nc', 'a\r\nb', 'a\r\nX'), 'a\nX\nc', 'a CRLF break in an LF file');
+  assert.equal(applyBreak('a\nb', 'zzz', 'y'), null, 'not found: nothing would change');
+  assert.equal(applyBreak('a\nb', 'a', 'a'), null, 'the same text: nothing would change');
+  assert.equal(applyBreak('a a', 'a', 'b'), null, 'twice: not one rule');
+});
+
+test('--parallel: a break written with LF lines still breaks a copy that checked the file out with CRLF', () => {
+  const { repo, breaks } = breakFixture();
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true });
+  fs.writeFileSync(path.join(repo, '.gitattributes'), 'rule.cjs text eol=crlf\n');
+  fs.writeFileSync(path.join(repo, 'rule.cjs'), 'module.exports = {\n  blocks: true,\n};\n');
+  git('add', '.gitattributes', 'rule.cjs'); git('commit', '-qm', 'crlf rule');
+  fs.writeFileSync(path.join(repo, 'rule.cjs'), 'module.exports = {\n  blocks: true,\n};\n'); // LF here, CRLF in each copy
+  assert.equal(git('status', '--porcelain', '--', 'rule.cjs').trim(), '', 'the folder copy counts as unchanged');
+  fs.writeFileSync(breaks, JSON.stringify([{ name: 'the rule does not block', file: 'rule.cjs', find: '{\n  blocks: true', put: '{\n  blocks: false', mustFail: ['saves nothing'] }]));
+  const result = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--then-green', '--parallel', '2', '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /BREAK ✓ the rule does not block/);
+});
+
+// S7: --files was never checked.
+test('--files: a test file is refused; product files the old-code run keeps at the fix are named', () => {
+  const { repo } = fixture();
+  fs.mkdirSync(path.join(repo, 'src'));
+  fs.writeFileSync(path.join(repo, 'src/app.test.cjs'), "it('is fixed', () => {});\n");
+  const refused = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs,src/app.test.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(refused.status, 2, refused.stdout);
+  assert.match(refused.stdout, /--files names test file\(s\): src\/app\.test\.cjs/);
+  assert.doesNotMatch(refused.stdout, /RED ✓|ran /);
+  fs.writeFileSync(path.join(repo, 'other.cjs'), 'module.exports = "also changed";\n');
+  const warned = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(warned.status, 0, warned.stdout);
+  assert.match(warned.stdout, /RED-PROOF: WARNING — product file\(s\) differ from HEAD but are not in --files.*other\.cjs/);
+  assert.doesNotMatch(warned.stdout, /WARNING.*app\.test\.cjs/, 'test files are not product files');
+});
+
+// S5: an early exit left the previous proof.log (with its PROVED) in place.
+test('--log is emptied at the start and written on every exit; its first line names the tree under test', () => {
+  const { repo, git } = fixture();
+  const log = path.join(repo, '..', path.basename(repo) + '-early.log');
+  fs.writeFileSync(log, 'RED-PROOF: PROVED ✓ — a proof of another tree\n');
+  const early = run(['--repo', repo, '--break', 'app.cjs', '--find', 'not there', '--put', 'x', '--log', log, '--', process.execPath, 'check.cjs']);
+  assert.equal(early.status, 2, early.stdout);
+  let text = fs.readFileSync(log, 'utf8');
+  assert.doesNotMatch(text, /PROVED/);
+  assert.match(text, /matches 0 time\(s\)/, 'the early exit line is in the log');
+  const dirtyTree = /^RED-PROOF-LOG: tree ([0-9a-f]{40})\b/.exec(text.split(/\r?\n/)[0]);
+  assert.ok(dirtyTree, 'first line: ' + text.split(/\r?\n/)[0]);
+  assert.notEqual(dirtyTree[1], git('rev-parse', 'HEAD^{tree}'), 'uncommitted work is part of the tree');
+  git('add', '-A'); git('commit', '-qm', 'all');
+  const clean = run(['--repo', repo, '--old', 'HEAD~1', '--files', 'app.cjs', '--log', log, '--', process.execPath, 'check.cjs']);
+  assert.equal(clean.status, 0, clean.stdout);
+  text = fs.readFileSync(log, 'utf8');
+  assert.equal(/^RED-PROOF-LOG: tree ([0-9a-f]{40})\b/.exec(text)?.[1], git('rev-parse', 'HEAD^{tree}'));
+  assert.equal(dirtyTree[1], git('rev-parse', 'HEAD^{tree}'), 'the same files committed give the same tree');
+  assert.match(text, /RED-PROOF: RED ✓/);
+});
+
+// S4 / C5 / S12 / S8: one record per repository, one entry per proof.
+test('the proof record: an entry per command and folder, merged; an old-code-only run and a single --break leave it; only files with a caught test count', async () => {
+  const { readRecord, provenTestFiles } = await import('../scripts/proof-record.mjs');
+  const { repo, breaks } = breakFixture();
+  fs.writeFileSync(path.join(repo, 'src/other.test.cjs'), "it('unrelated', () => {});\n");
+  writeBreaks(breaks, ['saves nothing']);
+  const proof = (...extra) => run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--then-green', '--', process.execPath, 'check.cjs', ...extra]);
+  assert.equal(proof().status, 0);
+  let entries = Object.values(readRecord(repo).entries);
+  assert.equal(entries.length, 1);
+  assert.deepEqual(Object.keys(entries[0].files), ['src/a.test.cjs'], 'only the file that holds a caught test');
+  assert.deepEqual(Object.keys(entries[0].targets), ['rule.cjs']);
+  const old = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD~1', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(old.status, 0, old.stdout);
+  const single = run(['--repo', repo, '--base', 'HEAD', '--break', 'rule.cjs', '--find', 'blocks: true', '--put', 'blocks: false', '--', process.execPath, 'check.cjs']);
+  assert.equal(single.status, 0, single.stdout);
+  assert.deepEqual(Object.values(readRecord(repo).entries), entries, 'neither run touched the record');
+  assert.equal(proof('--second').status, 0);
+  entries = Object.values(readRecord(repo).entries);
+  assert.equal(entries.length, 2, 'another command adds its own entry');
+  assert.deepEqual([...provenTestFiles(repo)], ['src/a.test.cjs']);
+  fs.writeFileSync(path.join(repo, 'rule.cjs'), 'module.exports = { blocks: true }; // changed after the proof\n');
+  assert.deepEqual([...provenTestFiles(repo)], [], 'a changed break target voids the entries that broke it');
+});
+
+// S13: Ctrl-C (or a stop) during a single --break left the product file broken in the working folder.
+test('--break: SIGINT, SIGTERM and SIGBREAK stop the run, put the file back and end the run', () => {
+  const { repo, pidFile } = hangFixture();
+  const before = fs.readFileSync(path.join(repo, 'app.cjs'));
+  // Windows has no way to send a signal to another process, so the run's own process raises it.
+  const wrapper = path.join(repo, '..', path.basename(repo) + '-signal.mjs');
+  fs.writeFileSync(wrapper, [
+    "import fs from 'node:fs';",
+    "import { pathToFileURL } from 'node:url';",
+    'const [script, pidFile, signal, ...args] = process.argv.slice(2);',
+    'process.argv = [process.argv[0], script, ...args];',
+    'const timer = setInterval(() => { if (fs.existsSync(pidFile)) { clearInterval(timer); process.emit(signal, signal); } }, 50);',
+    'await import(pathToFileURL(script).href);', ''].join('\n'));
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK']) {
+    fs.rmSync(pidFile, { force: true });
+    const result = spawnSync(process.execPath, [wrapper, script, pidFile, signal, '--repo', repo, '--break', 'app.cjs', '--find', 'exports = 2', '--put', 'exports = 3', '--timeout-min', '1', '--', process.execPath, 'check.cjs'],
+      { encoding: 'utf8', windowsHide: true, timeout: 120000, env: { ...process.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: '1' } });
+    assert.equal(result.status, 2, signal + ': ' + result.stdout + result.stderr);
+    assert.match(result.stdout, new RegExp(`RED-PROOF: NOT PROVED ✗ — stopped by ${signal}; files restored`));
+    assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before, signal);
+    assert.ok(gone(Number(fs.readFileSync(pidFile, 'utf8'))), 'the run it started is stopped too: ' + signal);
+  }
+});
+
+// S22: a mustFail part matched the full name (file > describe > test), so a tag on a describe or a shared
+// tag let one failing test stand for all.
+test('a mustFail part matches a test\'s own title, and every test with that part must fail', async () => {
+  const { survivors, failureReasons } = await import('../scripts/red-proof.mjs');
+  const declared = [{ titles: ['saves nothing'] }, { titles: ['shows it once'] }, { titles: ['[C2] blocks a'] }, { titles: ['[C2] blocks b'] }];
+  const failed = failureReasons([' FAIL  src/a.test.cjs > [C1] form > saves nothing', 'AssertionError: expected 1 to be 0', ' FAIL  src/a.test.cjs > [C2] blocks a', 'AssertionError: expected 1 to be 0'].join('\n'));
+  assert.deepEqual(survivors(['[C1]'], failed, [], declared), ['[C1]'], 'a tag on the describe names no test');
+  assert.deepEqual(survivors(['a.test.cjs'], failed, [], declared), ['a.test.cjs'], 'nor does the file name');
+  assert.deepEqual(survivors(['saves nothing'], failed, [], declared), []);
+  assert.deepEqual(survivors(['[C2]'], failed, [], declared).map(s => s.replace(/ \(.*$/, '')), ['[C2]'], 'blocks b did not fail');
+  assert.match(survivors(['[C2]'], failed, [], declared)[0], /blocks b/);
+  assert.deepEqual(survivors(['[C2] blocks a'], failed, [], declared), []);
+});
+
+test('--breaks: a tag on a describe, or one failing test of two that share a tag, does not catch the break', () => {
+  const { repo, breaks } = breakFixture();
+  fs.writeFileSync(path.join(repo, 'src/a.test.cjs'), "describe('[C1] form', () => {\n  it('saves nothing', () => {});\n});\nit('[C2] blocks a', () => {});\nit('[C2] blocks b', () => {});\n");
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'if (!require("./rule.cjs").blocks) { console.log([" FAIL  src/a.test.cjs > [C1] form > saves nothing", "AssertionError: expected 1 to be 0", " FAIL  src/a.test.cjs > [C2] blocks a", "AssertionError: expected 1 to be 0"].join(String.fromCharCode(10))); process.exit(1); }', ''].join('\n'));
+  for (const [mustFail, ok] of [[['[C1]'], false], [['[C2]'], false], [['saves nothing', '[C2] blocks a'], true]]) {
+    writeBreaks(breaks, mustFail);
+    const result = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--', process.execPath, 'check.cjs']);
+    assert.equal(result.status, ok ? 0 : 1, mustFail.join(',') + ': ' + result.stdout);
+    assert.match(result.stdout, ok ? /BREAK ✓/ : /BREAK ✗ the rule does not block: still pass \(or not seen failing\)/);
+  }
+});
+
+// S3: on the test machine, the proof read HEAD again after its sync; a second sync in between moved it.
+test('--plan with a commit: the copies are that commit, not the HEAD the folder has now', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'red-proof-tests-'));
+  fixtures.push(repo);
+  const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true }).trim();
+  git('init', '-q'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid'); git('config', 'core.autocrlf', 'false');
+  fs.writeFileSync(path.join(repo, 'rule.cjs'), 'module.exports = { blocks: true };\n');
+  fs.writeFileSync(path.join(repo, 'marker.txt'), 'synced\n');
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'console.log("MARKER=" + require("node:fs").readFileSync("marker.txt", "utf8").trim());',
+    'if (!require("./rule.cjs").blocks) { console.log([" FAIL  src/a.test.cjs > form > saves nothing", "AssertionError: expected 1 to be 0"].join(String.fromCharCode(10))); process.exit(1); }', ''].join('\n'));
+  git('add', '-A'); git('commit', '-qm', 'synced');
+  const synced = git('rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(repo, 'marker.txt'), 'moved\n'); git('commit', '-qam', 'another sync');
+  const planFile = path.join(repo, '..', path.basename(repo) + '-plan.json');
+  const log = path.join(repo, '..', path.basename(repo) + '-plan.log');
+  const plan = (commit) => fs.writeFileSync(planFile, JSON.stringify({ commit, green: true, breaks: [{ name: 'the rule does not block', file: 'rule.cjs', find: 'blocks: true', put: 'blocks: false', mustFail: ['saves nothing'] }] }));
+  plan(synced);
+  const result = run(['--repo', repo, '--local', '--plan', planFile, '--parallel', '2', '--log', log, '--', process.execPath, 'check.cjs']);
+  assert.equal(result.status, 0, result.stdout);
+  const text = fs.readFileSync(log, 'utf8');
+  assert.match(text, /MARKER=synced/);
+  assert.doesNotMatch(text, /MARKER=moved/);
+  assert.equal(/^RED-PROOF-LOG: tree ([0-9a-f]{40})/.exec(text)?.[1], git('rev-parse', synced + '^{tree}'), 'the log names the synced tree');
+  plan('0123456789abcdef0123456789abcdef01234567');
+  const missing = run(['--repo', repo, '--local', '--plan', planFile, '--parallel', '2', '--', process.execPath, 'check.cjs']);
+  assert.equal(missing.status, 2, missing.stdout);
+  assert.match(missing.stdout, /the synced commit 0123456789ab is not on this machine/);
 });

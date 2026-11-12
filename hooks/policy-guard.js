@@ -40,6 +40,16 @@ const { execFileSync } = require('child_process');
 // Plumbing
 // ---------------------------------------------------------------------------
 
+// 2026-11-12: the host stops a hook after 25 s and then lets the command run, so a
+// slow push check (many git calls, a large transcript) ended as a silent allow. The
+// guard keeps its own 20 s budget, checked before every git call, and refuses a push
+// it could not finish judging. Other commands keep their usual answer.
+const BUDGET_MS = 20000;
+const DEADLINE = Date.now() + BUDGET_MS;
+const TIME_UP = 'Blocked by policy-guard: the push check ran out of time; run the push again.';
+let outOfTime = false, publishing = false;
+function timeLeft() { const left = DEADLINE - Date.now(); if (left <= 0) outOfTime = true; return left; }
+
 function allow() { process.exit(0); }
 function emit(decision, reason) {
   process.stdout.write(JSON.stringify({
@@ -81,18 +91,30 @@ if (!shell) {
     emit('ask', 'policy-guard: command parser unavailable (hooks/lib/shell-command.cjs) — confirm this delete manually.');
   allow();
 }
-const { tokenize } = shell;
 const SHELL_OPTS = { tool: input.tool_name === 'Bash' ? 'Bash' : 'PowerShell', home: require('os').homedir(), tmp: (require('os').tmpdir || (() => ''))() };
 
 function gitRaw(args) {
-  return execFileSync('git', args, { cwd: gitCwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+  const left = timeLeft();
+  if (left <= 0) throw new Error('the guard ran out of time');
+  return execFileSync('git', args, { cwd: gitCwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(8000, left), maxBuffer: 8 * 1024 * 1024, windowsHide: true });
 }
+// While a command from another machine is judged, this machine's repository says
+// nothing about it: lookups answer "unknown" ('') instead of reading the wrong clone.
+let remoteContext = false;
 function git(args) {
-  try { return gitRaw(args).trim(); } catch (e) { return ''; }
+  if (remoteContext) return '';
+  try { return gitRaw(args).trim(); } catch (e) { timeLeft(); return ''; }
 }
 let _branch;
 function currentBranch() { if (_branch === undefined) _branch = git(['rev-parse', '--abbrev-ref', 'HEAD']); return _branch; }
-function headIsPushed() { return git(['branch', '-r', '--contains', 'HEAD']) !== ''; }
+function headIsPushed() { return remoteContext || git(['branch', '-r', '--contains', 'HEAD']) !== ''; }
+// A saved alias is looked up in the command's own folder, inside the time budget.
+function resolveAlias(word, dir) {
+  const left = timeLeft();
+  if (left <= 0) return '';
+  try { return execFileSync('git', ['config', '--get', 'alias.' + word], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(3000, left), windowsHide: true }).trim(); }
+  catch (e) { return ''; }
+}
 
 const PROD_BRANCH = /^(main|master|prod|production|release(\/.+)?)$/i;
 const INTEGRATION_BRANCH = /^(staging|develop|dev)$/i;
@@ -150,6 +172,10 @@ function checkGit(g) {
       if (file) ask('`git checkout ' + file + '` discards the uncommitted changes in that file');
       return;
     }
+    case 'switch':
+      // 2026-11-12: like `checkout -f`, a forced switch throws away uncommitted changes.
+      if (has(/^(--force|--discard-changes)$/) || shortHas('f')) ask('`git switch --force/--discard-changes` discards uncommitted changes');
+      return;
     case 'restore': {
       const staged = has(/^(--staged|-S)$/), worktree = has(/^(--worktree|-W)$/);
       if (!(staged && !worktree)) ask('`git restore` discards working-tree changes (only `--staged` alone is safe)');
@@ -182,6 +208,10 @@ function checkGit(g) {
       const reads = has(/^(?:--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/);
       const key = a.find((t) => /^sanad\./i.test(t));
       if (key && !reads) ask('`git config ' + key + '` changes how this guard treats the clone (integration branch / lane) — the human sets it, not Claude');
+      // 2026-11-12: a saved alias puts a push/reset/clean behind a new word.
+      const alias = a.findIndex((t) => /^alias\./i.test(t));
+      if (alias >= 0 && !reads && /\b(?:push|reset|clean)\b/i.test(a.slice(alias + 1).join(' ')))
+        ask('`git config ' + a[alias] + '` saves an alias that runs push/reset/clean under a new name');
       return;
     }
     case 'worktree':
@@ -200,13 +230,34 @@ function checkGit(g) {
 }
 
 function fileExists(t) {
+  if (remoteContext) return false;
   try { return fs.statSync(path.resolve(cwd, t)).isFile(); } catch (e) { return false; }
+}
+
+// 2026-11-12: a push that runs on another machine (inside `ssh host "…"`) cannot be
+// covered by this machine's evidence, review and gate: it always asks. A refspec
+// that names a production branch is refused wherever the push runs.
+const REMOTE_PUSH = 'this runs a push on another machine; the local checks cannot cover it';
+function checkRemoteGit(g) {
+  if (g.sub !== 'push') { checkGit(g); return; }
+  const a = g.args;
+  if (a.some((t) => /^(--dry-run|-n)$/.test(t)) && !a.includes('--no-dry-run')) return;
+  const words = [];
+  for (let i = 0; i < a.length; i++) {
+    if (/^(-o|--push-option|--receive-pack|--repo|--exec)$/.test(a[i]) || /^(\d*>>?|&>>?|\d*<)$/.test(a[i])) { i++; continue; }
+    if (!a[i].startsWith('-') && !/^(\d*>>?|&>>?|\d*<)\S/.test(a[i])) words.push(a[i]);
+  }
+  const prod = words.slice(1).map((r) => r.replace(/^\+/, '')).map((r) => (r.includes(':') ? r.slice(r.indexOf(':') + 1) : r).replace(/^refs\/heads\//, ''))
+    .find((d) => PROD_BRANCH.test(d));
+  if (prod) deny('this push targets `' + prod + '` — CLAUDE.md: push feature branches to the integration branch (' + INTEGRATION_HINT + ') via a PR, never main/master/prod/release/*.');
+  ask(REMOTE_PUSH);
 }
 
 function checkPush(a, cliConfig) {
   // The last dry-run flag wins in git; a mix of both is ambiguous, so deny it.
   const dryFlags = a.filter((t) => /^(--dry-run|-n|--no-dry-run)$/.test(t));
   if (dryFlags.length && dryFlags.every((t) => t !== '--no-dry-run')) return;
+  publishing = true;
   if (dryFlags.some((t) => t !== '--no-dry-run') && dryFlags.includes('--no-dry-run')) {
     deny('conflicting dry-run flags (`--dry-run`/`-n` with `--no-dry-run`) make it unclear whether this push publishes. Use one form.');
     return;
@@ -315,7 +366,15 @@ function gateCheck(base) {
   const checked = r.completedCheck;
   const root = gitRaw(['rev-parse', '--show-toplevel']).trim().replace(/\\/g, '/').toLowerCase();
   const tree = gitRaw(['rev-parse', 'HEAD^{tree}']).trim();
-  const treeMatches = !!checked && String(checked.source?.toplevel || '').replace(/\\/g, '/').toLowerCase() === root &&
+  // 2026-11-12: with the scanner's list of every passing receipt, ANY receipt of this
+  // repository and this exact tree proves it (evidence on PR B no longer hides PR A's
+  // own receipt), and each top-level folder with changed code needs a receipt that ran
+  // there or at the root (a lint in one folder does not prove another folder's code).
+  const slash = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const receipts = Array.isArray(r.passingReceipts)
+    ? r.passingReceipts.filter((c) => c && slash(c.toplevel) === root && c.treeBefore === tree && c.treeAfter === tree)
+    : null;
+  const treeMatches = receipts ? receipts.length > 0 : !!checked && String(checked.source?.toplevel || '').replace(/\\/g, '/').toLowerCase() === root &&
     checked.source?.treeBefore === tree && checked.source?.treeAfter === tree;
   // Same-tree memo: a git switch/pull/merge that left HEAD identical to the tree the
   // last passing evidence check verified needs no rerun; only earlier real edits count.
@@ -325,12 +384,17 @@ function gateCheck(base) {
   // change, in folders left clean, only shows upstream code; earlier changes still count.
   const moves = Array.isArray(r.remoteCheckouts) ? r.remoteCheckouts : [];
   const remoteOnly = r.lastEditPath === '<git-remote>' && moves.length > 0 && [...new Set(moves.map((m) => m.repo))].every((dir) => {
-    try { return !!dir && execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000, windowsHide: true }) === ''; } catch (e) { return false; }
+    const left = timeLeft();
+    if (left <= 0) return false;
+    try { return !!dir && execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(8000, left), windowsHide: true }) === ''; } catch (e) { return false; }
   });
   const treeVerified = !remoteOnly && treeMatches && r.lastEditPath === '<git>' && status === '';
   const lastEdit = remoteOnly ? r.lastNonRemoteEdit : treeVerified ? r.lastNonGitEdit : r.lastEdit;
   if (!treeMatches || r.lastBoundCheck <= lastEdit) {
     deny('publishing requires a completed evidence.mjs check of this repository and the exact outgoing tree. Run the final check through skills/gate/scripts/evidence.mjs; bare output or a written PASS cannot replace it. Commit or ignore unrelated untracked files before checking.');
+  } else if (receipts) {
+    const folder = uncheckedFolder(files, receipts, root, slash);
+    if (folder) deny('no passing check ran in ' + folder + '/ for this code. Run its evidence.mjs check on this exact tree, from that folder or the repository root, then /gate again.');
   }
   const file = /^<git(?:-remote)?>$/.test(r.lastEditPath) ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
   // A check stopped with TaskStop is neither a pass nor running: it is cleared by a later pass of
@@ -368,6 +432,18 @@ function gateCheck(base) {
     deny('code adds ExecuteUpdate/ExecuteDelete, raw SQL or a migration and has no completed real-provider run after the last edit' + file + '. ' +
          'Exercise the affected flow against MySQL (docker exec … mysql, a live API request, or the smoke script), quote it in the gate, then re-review and re-gate. Unrepeatable malformed checks require the documented recovery procedure in skills/gate/reference/command-evidence.md.');
   }
+}
+
+// The first top-level folder that holds changed code but no matching receipt whose
+// folder is inside it or is the repository root. Code at the root itself is covered
+// by any matching receipt.
+function uncheckedFolder(files, receipts, root, slash) {
+  const folders = [...new Set(files.filter((f) => f.includes('/')).map((f) => f.split('/')[0]))];
+  const dirs = receipts.map((c) => slash(c.cwd));
+  return folders.find((f) => {
+    const top = root + '/' + f.toLowerCase();
+    return !dirs.some((d) => d === root || d === top || d.startsWith(top + '/'));
+  }) || '';
 }
 
 // Non-test .cs lines this push changes that only the real provider can prove:
@@ -458,7 +534,9 @@ function checkGh(g, raw) {
       else if (!isIntegration(base)) ask('PR base `' + base + '` is not the integration branch (' + INTEGRATION_HINT + ')');
     }
     if (act === 'create' && !draft) ask('non-draft PR — CLAUDE.md "Draft until proven": open as DRAFT unless every Definition-of-Done item passed');
+    if (act === 'create' && remoteContext) { ask('this opens a PR from another machine; the local checks cannot cover it'); return; }
     if (act === 'create') {
+      publishing = true;
       try {
         const branch = currentBranch();
         if (!branch || branch === 'HEAD' || (head !== null && head !== branch)) deny('PR head must be the verified checked-out branch.');
@@ -515,8 +593,12 @@ function checkGhApi(t, raw) {
 // docker / rm / Remove-Item / dotnet ef / raw SQL
 // ---------------------------------------------------------------------------
 
-function checkDocker(seg) {
-  const t = tokenize(seg).map((x) => x.toLowerCase());
+// SQL a database client receives: its command line plus any heredoc/here-string/piped input.
+function sqlText(rec) { return rec.text + (rec.stdin ? '\n' + rec.stdin : ''); }
+
+function checkDocker(rec) {
+  const seg = sqlText(rec);
+  const t = rec.tokens.map((x) => x.toLowerCase());
   const isCompose = t[0].startsWith('docker-compose') || t[1] === 'compose';
   const hasVol = t.some((x) => /^(-v|--volumes)$/.test(x));
   if (isCompose) {
@@ -570,12 +652,41 @@ function checkDelete(rec) {
   }
   const boom = targets.find((x) => CATASTROPHIC.test(x));
   if (boom) return deny('recursive delete of `' + boom + '` — catastrophic target.');
+  if (rec.remote) {
+    // 2026-11-12: a delete on another machine: this machine's folders say nothing about
+    // it, so only a plain relative build-output folder (bin, obj, node_modules…) is exempt.
+    const plain = (x) => !/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(x) && !/^(?:[\\/~$%]|[A-Za-z]:)/.test(x) && GENERATED_DIR.test(x.replace(/[\\/]+$/, '').split(/[\\/]/).pop());
+    const odd = pattern || !targets.length ? (targets.join(' ') || '(unparsed target)') : targets.find((x) => !plain(x));
+    if (odd !== undefined) ask('recursive delete of `' + odd + '` on another machine — only a plain build-output folder there is exempt from confirmation');
+    return;
+  }
   const resolved = targets.map((x) => shell.shellPath(x, rec.cwd, SHELL_OPTS));
   const root = resolved.find((r) => r && catastrophicPath(r));
   if (root) return deny('recursive delete of `' + root + '` — catastrophic target.');
   if (pattern || !targets.length) return ask('recursive delete of ' + (targets.join(' ') || '(unparsed target)') + ' with a pattern or unparsed target — mass file delete');
+  // 2026-11-12: a folder holding a `.git` entry (a clone, or a worktree's .git file) has
+  // its own commits and uncommitted work: deleting it asks, also in the temp folder.
+  const repoDir = targets.find((x, i) => resolved[i] && hasGitEntry(resolved[i]));
+  if (repoDir !== undefined) return ask('recursive delete of `' + repoDir + '` — this folder is a git work tree; unpushed work in it would be lost');
   const unsafe = targets.find((x, i) => !disposable(resolved[i], rec.cwd));
   if (unsafe !== undefined) ask('recursive delete of `' + unsafe + '` — only untracked build output inside the current directory, or the temp folder, is exempt from confirmation');
+}
+
+function hasGitEntry(dir) { try { return fs.existsSync(path.join(dir, '.git')); } catch (e) { return false; } }
+// Inside a work tree below `stop` (the temp folder): a parent folder holds `.git`.
+function insideWorkTree(real, stop) {
+  for (let p = path.dirname(real); inside(p, stop); p = path.dirname(p)) if (hasGitEntry(p)) return true;
+  return false;
+}
+
+// `find … -delete` and `find … -exec rm …` delete everything the expression matches.
+function checkFind(rec) {
+  const t = rec.tokens;
+  if (t.includes('-delete')) return ask('`find … -delete` deletes every file it matches');
+  for (let i = 1; i < t.length - 1; i++) {
+    if (/^-(?:exec|execdir|ok|okdir)$/.test(t[i]) && /^(?:rm|rmdir|unlink|shred|rimraf|del|remove-item)(?:\.exe)?$/i.test(path.basename(t[i + 1])))
+      return ask('`find … ' + t[i] + ' ' + t[i + 1] + '` deletes every file it matches');
+  }
 }
 
 function samePath(a, b) { return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase(); }
@@ -595,10 +706,14 @@ function disposable(target, base) {
     real = fs.realpathSync.native(target);                            // judge the real folder: short 8.3 names and linked ancestors resolved
   } catch (e) { return false; }                                       // missing or unreadable: never assume harmless
   const realOf = (p) => { try { return fs.realpathSync.native(p); } catch (e) { return p; } };
-  if (SHELL_OPTS.tmp && inside(real, realOf(SHELL_OPTS.tmp))) return true;
+  // The temp folder is exempt, except inside a git work tree there (worktrees live in Temp too).
+  const tmp = SHELL_OPTS.tmp && realOf(SHELL_OPTS.tmp);
+  if (tmp && inside(real, tmp) && !insideWorkTree(real, tmp)) return true;
   if (!base || !inside(real, realOf(base)) || !GENERATED_DIR.test(path.basename(real))) return false;
+  const left = timeLeft();
+  if (left <= 0) return false;
   try {
-    return execFileSync('git', ['ls-files', '-z', '--', target], { cwd: base, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000, windowsHide: true }) === '';
+    return execFileSync('git', ['ls-files', '-z', '--', target], { cwd: base, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: Math.min(8000, left), windowsHide: true }) === '';
   } catch (e) { return /not a git repository/i.test(String(e.stderr || '')); }   // tracked content is never build output
 }
 
@@ -637,8 +752,8 @@ function checkPackageManager(rec) {
   }
 }
 
-function checkEf(seg) {
-  const t = tokenize(seg).map((x) => x.toLowerCase());
+function checkEf(rec) {
+  const t = rec.tokens.map((x) => x.toLowerCase());
   const i = t.indexOf('ef');
   const area = t[i + 1] || '', verb = t[i + 2] || '';
   if (area === 'database' && verb === 'drop') return ask('`dotnet ef database drop` destroys the database');
@@ -662,24 +777,27 @@ function checkSql(seg) {
 // Walk every segment; deny outranks ask; first reason of the winning kind wins.
 // ---------------------------------------------------------------------------
 
-function checkTypeScriptProject(seg, directory) {
+function checkTypeScriptProject(tokens, directory) {
   if (!scan) return; // Publishing fails closed in gateCheck when a module is missing.
   const { invalidVerificationTarget, isInspection } = require(path.join(__dirname, 'lib', 'verification-target.cjs'));
-  const tokens = tokenize(seg);
   if (isInspection(tokens.slice(1))) return;
   const reason = invalidVerificationTarget(tokens[0], tokens.slice(1), directory);
   if (reason) deny(reason);
 }
 
 try {
-  const records = shell.parseCommand(cmd, { ...SHELL_OPTS, cwd });
+  const records = shell.parseCommand(cmd, { ...SHELL_OPTS, cwd, resolveAlias });
   for (const rec of records) {
     if (!rec.tokens.length) continue;
-    checkTypeScriptProject(rec.text, rec.cwd || cwd);
+    // A command from another machine (rec.remote) gets the same text checks; this
+    // machine's files and repository are never read for it.
+    remoteContext = !!rec.remote;
+    if (!rec.remote) checkTypeScriptProject(rec.tokens, rec.cwd || cwd);
 
     if (rec.git) {
       const g = rec.git;
       gitCwd = g.cwd || cwd; _branch = undefined;
+      if (rec.remote) { checkRemoteGit(g); continue; }
       // A push whose repository cannot be resolved cannot be verified: deny.
       if (g.sub === 'push' && !g.certain) { deny('this push cannot be checked (' + g.why + '). Run plain `git push` from the repository directory, as its own command.'); continue; }
       checkGit(g);
@@ -688,14 +806,17 @@ try {
     if (rec.gh) { gitCwd = rec.cwd || cwd; _branch = undefined; checkGh(rec.gh, rec.text); continue; }
 
     const p = rec.program;
-    if (p === 'docker' || p === 'docker-compose') { checkDocker(rec.text); continue; }
+    if (p === 'docker' || p === 'docker-compose') { checkDocker(rec); continue; }
     if (/^(?:rm|rmdir|rd|del|erase|remove-item|ri|rimraf|npx)$/.test(p)) { checkDelete(rec); if (p !== 'npx') continue; }
-    if (p === 'dotnet' && String(rec.args[0] || '').toLowerCase() === 'ef') { checkEf(rec.text); continue; }
-    if (/^(?:mysql|mysqlsh|psql|sqlcmd|sqlite3)$/.test(p)) { checkSql(rec.text); continue; }
+    if (p === 'find') { checkFind(rec); continue; }
+    if (p === 'dotnet' && String(rec.args[0] || '').toLowerCase() === 'ef') { checkEf(rec); continue; }
+    if (/^(?:mysql|mysqlsh|psql|sqlcmd|sqlite3)$/.test(p)) { checkSql(sqlText(rec)); continue; }
     checkPackageManager(rec);
   }
+  remoteContext = false;
 } catch (e) {
   // A parser/check failure on a guarded action must not fall through to allow.
+  if (publishing && outOfTime) emit('deny', TIME_UP);
   if (verdict) emit(verdict.d, verdict.r);
   const hits = shell.tripwire(cmd);
   if (hits.has('push') || hits.has('gh-merge') || hits.has('gh-release') || hits.has('publish')) emit('deny', 'Blocked by policy-guard: the command could not be checked (' + String(e && e.message || e).slice(0, 120) + '). Split it into simple commands and retry.');
@@ -703,5 +824,6 @@ try {
   allow();
 }
 
+if (publishing && outOfTime) emit('deny', TIME_UP);
 if (verdict) emit(verdict.d, verdict.r);
 allow();
