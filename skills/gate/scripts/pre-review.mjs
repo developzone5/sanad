@@ -6,19 +6,23 @@
 // mechanical check read another folder and called the wrong code clean. This runs them in parallel,
 // always on the git top level of --repo (default: the current folder):
 //   lint        ESLint on the changed script files of each package that has it
-//   types       tsc --noEmit on each package with a changed .ts/.tsx file (tsconfig.app.json first)
+//   types       tsc --noEmit on each package with a changed .ts/.tsx file: once per project the root
+//               tsconfig.json references (tsconfig.app.json and tsconfig.node.json, as `tsc -b` does),
+//               else tsconfig.app.json or tsconfig.json
 //               Both run here when the package's node_modules is here. A task's own folder (a new git
 //               worktree) has none: they then run in the clone on the test machine (git config
 //               sanad.remoteHost, sanad.remoteRepo), after a sync of this folder's exact code, and with
 //               no test machine they show as NOT RUN and fail the run. Never left out silently.
-//   format      `dotnet csharpier check` on the changed .cs files, from the folder whose tool manifest
-//               (.config/dotnet-tools.json) lists CSharpier: the project's own version, CI's command
+//   format      `dotnet csharpier check` on the changed .cs, .csproj, .props and .targets files, from the
+//               folder whose tool manifest (.config/dotnet-tools.json) lists CSharpier: the project's own
+//               version, CI's command
 //   ticket      check-ticket-lines.mjs, when --lines is given
 //   asserts     check-test-asserts.mjs: new test lines — a range where the exact value is known, a "nothing
 //               happens" check no break run proved, and (with --check) a check line with no [Cn] test
 //   commits     check-commits.mjs: one commit, a Conventional subject that ends with the ticket ID
 //   size        size-check.mjs on the real change (--was <size> fails when it grew)
 //   mechanical  the project's own script, when `git config sanad.mechanical <path>` is set
+// A part left out because its option is missing (--lines, --check, --was) is printed as skipped.
 // A .NET change is built and tested by the test step, not here.
 //
 // Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--node <path>]
@@ -67,6 +71,48 @@ function csharpierRootOf(repo, file) {
     if (dir === repo) break;
   }
   return null;
+}
+
+// A tsconfig file is JSON with comments and trailing commas: both are dropped (outside strings) before
+// JSON.parse. null when the file is missing or still not JSON.
+export function readJsonc(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); if (text.charCodeAt(0) === 0xfeff) text = text.slice(1); } catch { return null; }
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1); i = j;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? text.length : end + 1;
+    } else if (c === ',' && /^\s*(?:\/\/[^\n]*\s*|\/\*[\s\S]*?\*\/\s*)*[}\]]/.test(text.slice(i + 1))) {
+      // a trailing comma: dropped
+    } else out += c;
+  }
+  try { return JSON.parse(out); } catch { return null; }
+}
+
+// 2026-11-12 (audit C15): types ran only tsconfig.app.json, so vite.config.ts and vitest.config.ts (in
+// tsconfig.node.json) were never type checked here, while `tsc -b` in the build checks both. Each project
+// the root tsconfig.json references is its own check; a package with no references keeps the one config.
+export function tsProjects(pkg) {
+  const root = readJsonc(path.join(pkg, 'tsconfig.json'));
+  const refs = root && Array.isArray(root.references) ? root.references.map(r => (r && typeof r.path === 'string' ? r.path : '')).filter(Boolean) : [];
+  if (refs.length) {
+    return refs.map(ref => {
+      const config = ref.replace(/\\/g, '/').replace(/^\.\//, '');
+      const label = /\.json$/i.test(config) ? path.posix.basename(config).replace(/^tsconfig\.?/i, '').replace(/\.json$/i, '') : '';
+      return { config, label: label || config };
+    });
+  }
+  const config = ['tsconfig.app.json', 'tsconfig.json'].find(c => fs.existsSync(path.join(pkg, c)));
+  return config ? [{ config, label: '' }] : [];
 }
 
 // Does the package's own package.json list this tool? Then its check is owed, installed here or not.
@@ -118,31 +164,38 @@ export function planChecks({ repo, base, was, lines, check, node, remote }) {
       if (remote) checks.push({ name: label, cmd: 'ssh', args: sshArgs(remote, remoteLine(remote, name, [remote.node, ...words])), cwd: repo, remote: true });
       else checks.push({ name: label, notRun: `no node_modules in ${name}, and no test machine is set (git config sanad.remoteHost and sanad.remoteRepo): run \`npm ci\` in ${name}, then pre-review again.` });
     };
+    // Warnings do not fail this check (2026-11-12): 14 of the project's 757 script files carry old warnings, and
+    // a task that edits one of them would go red for lines it did not write.
     const eslint = path.join(pkg, 'node_modules', 'eslint', 'bin', 'eslint.js');
     if (fs.existsSync(eslint)) checks.push({ name: `lint ${name} (${count})`, cmd: node, args: [eslint, ...list], cwd: pkg });
     else if (lists(pkg, 'eslint')) owed('lint', count, ['node_modules/eslint/bin/eslint.js', ...list]);
     const tsc = path.join(pkg, 'node_modules', 'typescript', 'bin', 'tsc');
-    const config = ['tsconfig.app.json', 'tsconfig.json'].find(c => fs.existsSync(path.join(pkg, c)));
-    if (config && list.some(f => /\.tsx?$/i.test(f))) {
-      // Incremental, with its build info outside the repo: a repeat run reads only what changed.
-      const infoName = 'sanad-tsc-' + crypto.createHash('sha1').update((remote && !fs.existsSync(tsc) ? remote.repo + '/' + name : pkg).toLowerCase() + config).digest('hex').slice(0, 12) + '.tsbuildinfo';
-      if (fs.existsSync(tsc)) checks.push({ name: `types ${name}`, cmd: node, args: [tsc, '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', path.join(os.tmpdir(), infoName)], cwd: pkg });
-      else if (lists(pkg, 'typescript')) owed('types', '', ['node_modules/typescript/bin/tsc', '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', (remote && /^[A-Za-z]:\//.test(remote.repo) ? '%TEMP%\\' : '/tmp/') + infoName]);
+    if (list.some(f => /\.tsx?$/i.test(f))) {
+      for (const { config, label } of tsProjects(pkg)) {
+        // Incremental, with its build info outside the repo: a repeat run reads only what changed.
+        const infoName = 'sanad-tsc-' + crypto.createHash('sha1').update((remote && !fs.existsSync(tsc) ? remote.repo + '/' + name : pkg).toLowerCase() + config).digest('hex').slice(0, 12) + '.tsbuildinfo';
+        if (fs.existsSync(tsc)) checks.push({ name: `types ${name}${label ? ` (${label})` : ''}`, cmd: node, args: [tsc, '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', path.join(os.tmpdir(), infoName)], cwd: pkg });
+        else if (lists(pkg, 'typescript')) owed('types', label, ['node_modules/typescript/bin/tsc', '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', (remote && /^[A-Za-z]:\//.test(remote.repo) ? '%TEMP%\\' : '/tmp/') + infoName]);
+      }
     }
   }
   // 2026-11-10 (PR #767): CI's format check failed on two C# files that came in an earlier commit. The commit
   // guard checks only the files staged right then, and the user's own push runs no hook. Every changed .cs
-  // file is checked here, with the same command CI runs.
+  // file is checked here, with the same command CI runs. 2026-11-12 (audit C15): CSharpier 1.x also formats
+  // .csproj, .props and .targets files, and CI runs it on the whole folder: changed ones are checked too.
   const byTool = new Map();
-  for (const f of files.filter(f => /\.cs$/i.test(f))) {
+  for (const f of files.filter(f => /\.(?:cs|csproj|props|targets)$/i.test(f))) {
     const dir = csharpierRootOf(repo, f);
     if (!dir) continue;
     if (!byTool.has(dir)) byTool.set(dir, []);
     byTool.get(dir).push(path.relative(dir, path.join(repo, f)).replace(/\\/g, '/'));
   }
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   for (const [dir, list] of byTool) {
     const name = path.relative(repo, dir).replace(/\\/g, '/') || '.';
-    checks.push({ name: `format ${name} (${list.length} C# file${list.length === 1 ? '' : 's'})`, cmd: 'dotnet', args: ['csharpier', 'check', ...list], cwd: dir });
+    const cs = list.filter(f => /\.cs$/i.test(f)).length;
+    const what = [cs ? plural(cs, 'C# file') : '', list.length - cs ? plural(list.length - cs, 'project file') : ''].filter(Boolean).join(', ');
+    checks.push({ name: `format ${name} (${what})`, cmd: 'dotnet', args: ['csharpier', 'check', ...list], cwd: dir });
   }
   if (lines) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
   checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : [])], cwd: repo });
@@ -150,7 +203,14 @@ export function planChecks({ repo, base, was, lines, check, node, remote }) {
   checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : [])], cwd: repo, show: true });
   const mechanical = git(repo, ['config', '--get', 'sanad.mechanical']);
   if (mechanical) checks.push({ name: 'mechanical', cmd: process.execPath, args: [mechanical, '--repo', repo, '--base', base], cwd: repo, show: true });
-  return { files, checks, remote };
+  // 2026-11-12 (audit C14): with no --lines, --check or --was those parts were left out without a word, and
+  // the summary still read "N of N checks passed". Each is named as skipped (not a failure).
+  const skipped = [
+    lines ? null : { name: 'ticket lines', why: 'no --lines' },
+    check ? null : { name: 'test labels', why: 'no --check' },
+    was ? null : { name: 'size growth', why: 'no --was' },
+  ].filter(Boolean);
+  return { files, checks, remote, skipped };
 }
 
 // Same folder as checkLockDir() in evidence.mjs: a lock per source-bound check that runs right now.
@@ -200,9 +260,18 @@ function runOne(check) {
   });
 }
 
+// 2026-11-12 (audit C14): a failing check showed only its last 12 lines, so a ✗ or GAP line above them was
+// lost. Every line that names a problem is shown, plus the last 12 lines, each once, in their own order.
+const PROBLEM = /^(?:✗|GAP|BUG|UNTAGGED|UNPROVEN|NOT RUN)/;
+export function failureLines(text) {
+  const keep = new Set(text.flatMap((l, i) => (PROBLEM.test(l.trim()) ? [i] : [])));
+  for (let i = Math.max(0, text.length - 12); i < text.length; i++) keep.add(i);
+  return [...keep].sort((a, b) => a - b).map(i => text[i]);
+}
+
 // opts.sync: tests only (in place of the real sync to the test machine).
 export async function preReview(opts) {
-  const { files, checks, remote } = planChecks(opts);
+  const { files, checks, remote, skipped } = planChecks(opts);
   let synced = '';
   if (checks.some(c => c.remote)) {
     const sync = (opts.sync || syncRemote)(opts.repo, remote);
@@ -213,14 +282,17 @@ export async function preReview(opts) {
     if (sync.ok) synced = `  (no node_modules here: lint and types run on ${remote.host}, on this folder's code${sync.tree ? ', tree ' + String(sync.tree).slice(0, 12) : ''})`;
   }
   const results = await Promise.all(checks.map(runOne));
-  const lines = [`PRE-REVIEW: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed · ${files.length} changed file(s) · ${opts.repo}`];
+  const skippedText = skipped.length ? ` · ${skipped.length} skipped: ${skipped.map(s => s.name).join(', ')}` : '';
+  const lines = [`PRE-REVIEW: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed${skippedText} · ${files.length} changed file(s) · ${opts.repo}`];
   if (synced) lines.push(synced);
   for (const r of results) {
     lines.push(`  ${r.code === 0 ? '✓' : '✗'} ${r.name}${r.notRun ? ' — NOT RUN' : ` (${(r.ms / 1000).toFixed(1)} s)`}`);
     const text = r.out.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).filter(l => l.trim());
-    if (r.code !== 0) lines.push(...text.slice(-12).map(l => '      ' + l));
-    else if (r.show) lines.push(...text.filter(l => /^(?:SIZE|SIZE GREW|MECHANICAL|  callers|  roles)/.test(l)).map(l => '      ' + l.trim()));
+    if (r.code !== 0) lines.push(...failureLines(text).map(l => '      ' + l));
+    // The project check's GAP and NOTE lines are leads for the review: shown also when it passes (2026-11-12).
+    else if (r.show) lines.push(...text.filter(l => /^(?:SIZE|SIZE GREW|MECHANICAL|GAP|NOTE|  callers|  roles)/.test(l)).map(l => '      ' + l.trim()));
   }
+  for (const s of skipped) lines.push(`  – ${s.name}: skipped (${s.why})`);
   return { ok: results.every(r => r.code === 0), text: lines.join('\n') };
 }
 

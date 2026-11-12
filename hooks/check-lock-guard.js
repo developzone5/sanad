@@ -7,9 +7,9 @@
  * meanwhile voids the whole run (2026-11-05: a full suite was lost twice to an
  * edit made while it ran). evidence.mjs holds a lock file while it runs; this
  * hook refuses an edit that would change a locked repository's tree: a file
- * edit to a path git does not ignore, or a shell command that writes a code
- * file there, runs a git content change (switch, merge, stash) or regenerates
- * files (package add, migrations add).
+ * edit to a path git does not ignore, or a shell command that writes or deletes
+ * such a file there, runs a git content change (switch, merge, stash), runs a
+ * formatter, or regenerates files (package add, migrations add).
  *
  * A lock whose process is gone or whose deadline has passed is stale: it is
  * removed and never blocks. No live lock → the hook exits at once.
@@ -117,6 +117,9 @@ if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(tool)) {
     const resolved = shell.shellPath(p, cwd, opts);
     if (resolved) targets.push({ path: resolved, shown: p });
   }
+  // Any other file the command writes or deletes is in the recorded tree too, unless git ignores it
+  // (2026-11-12, audit H14: a note or a spec written during a suite voided the run only at its end).
+  try { for (const t of scan.shellWriteTargets(command, { cwd, ...opts })) if (!targets.some((x) => x.path === t.path)) targets.push(t); } catch (e) { /* the targets above still count */ }
 }
 
 for (const target of targets) {

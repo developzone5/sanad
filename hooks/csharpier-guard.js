@@ -76,7 +76,8 @@ const cmd = String((input && input.tool_input && input.tool_input.command) || ''
 let shell;
 try { shell = require(path.join(__dirname, 'lib', 'shell-command.cjs')); } catch (e) { allow('shell-command library missing (fail-open)'); }
 const records = shell.parseCommand(cmd, { cwd: (input && input.cwd) || process.cwd(), tool: input && input.tool_name === 'Bash' ? 'Bash' : 'PowerShell', home: os.homedir(), tmp: os.tmpdir() });
-const action = records.find((r) => r.git && (r.git.sub === 'commit' || r.git.sub === 'push'));
+// A commit or push sent to another machine (ssh) says nothing about the files here: skip it (2026-11-12).
+const action = records.find((r) => !r.remote && r.git && (r.git.sub === 'commit' || r.git.sub === 'push'));
 if (!action) allow('not a git commit/push');
 // Formatting is not a security boundary: an unresolvable target stays fail-open
 // (precommit-guard owns the fail-closed side of the same command).

@@ -132,7 +132,35 @@ function takeLock(receipt, timeoutMs) {
   } catch { return null; }
 }
 
-export async function runCommand({ executable, args = [], cwd, outputRoot, timeoutMs = 300000, maxBytes, secrets = [] }) {
+// 2026-11-12: a check that runs over ssh inside the test machine's clone (git config sanad.remoteHost +
+// sanad.remoteRepo) proved nothing about THIS folder's code when another task had put its own code
+// there: every worktree of a repository shares that one clone, and the receipt was bound to the local
+// tree only. Such a run is now bound to the clone as well: the clone must hold exactly the local tree
+// before the command starts (otherwise the command does not start: a run on other code is a wasted
+// run) and still hold it when the command ends. The test machine runs Windows, as for remote-sync.sh.
+function configValue(cwd, key) { try { return sourceGit(cwd, ['config', '--get', key]); } catch { return ''; } }
+export function remoteTarget(executable, args, toplevel) {
+  if (!/^ssh(?:\.exe)?$/i.test(path.basename(String(executable)))) return null;
+  const host = configValue(toplevel, 'sanad.remoteHost'), repo = configValue(toplevel, 'sanad.remoteRepo');
+  if (!host || !repo) return null;
+  const at = args.indexOf(host);
+  if (at < 0 || at === args.length - 1) return null;
+  const flat = text => String(text).replace(/\\/g, '/').toLowerCase();
+  if (!flat(args.slice(at + 1).join(' ')).includes(flat(repo).replace(/\/+$/, ''))) return null;
+  return { host, repo, sshArgs: args.slice(0, at + 1) };
+}
+function probeRemote(remote, executable) {
+  if (/["&|<>^%\r\n]/.test(remote.repo)) throw new Error('Unsafe sanad.remoteRepo.');
+  const out = execFileSync(executable, [...remote.sshArgs, `cd /d "${remote.repo}" && git rev-parse HEAD^^{tree} && git status --porcelain --untracked-files=no`],
+    { encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+  const lines = out.split(/\r?\n/).map(line => line.trimEnd()).filter(Boolean);
+  const at = lines.findIndex(line => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(line.trim()));
+  if (at < 0) throw new Error('The test machine did not name its tree.');
+  return { tree: lines[at].trim(), dirty: lines.slice(at + 1).join('\n') };
+}
+
+// `remoteProbe` (a function, so never from a JSON spec) stands in for the test machine in tests.
+export async function runCommand({ executable, args = [], cwd, outputRoot, timeoutMs = 300000, maxBytes, secrets = [], remoteProbe }) {
   if (typeof executable !== 'string' || !executable || !Array.isArray(args) || args.some(a => typeof a !== 'string') || !path.isAbsolute(cwd) || !path.isAbsolute(outputRoot)) throw new Error('Use an executable, argv array and absolute cwd/outputRoot.');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000) throw new Error('Timeout must be 1..3600000 ms.');
   fs.mkdirSync(outputRoot, { recursive: true });
@@ -152,6 +180,25 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
   fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
   const lock = source ? takeLock(receipt, timeoutMs) : null;
   try {
+    const remote = source && !sourceFailure ? remoteTarget(executable, args, source.toplevel) : null;
+    const askRemote = async () => (typeof remoteProbe === 'function' ? remoteProbe : probeRemote)(remote, executable);
+    if (remote) {
+      receipt.remote = { host: remote.host, repo: remote.repo, treeBefore: null, treeAfter: null };
+      let refused = null;
+      try {
+        const there = await askRemote();
+        receipt.remote.treeBefore = there.tree;
+        if (there.dirty) refused = `The folder on the test machine (${remote.host}) has changed files that are not part of this code. Clean it there, then run remote-sync.sh and the check again.`;
+        else if (there.tree !== source.treeBefore) refused = `The test machine holds other code (tree ${String(there.tree).slice(0, 12)}; this folder is ${source.treeBefore.slice(0, 12)}). Run remote-sync.sh, then the check again.`;
+      } catch { refused = `Cannot read the code on the test machine (${remote.host}) before the check.`; }
+      if (refused) {
+        stdout.close(); stderr.close();
+        Object.assign(receipt, { completedAt: new Date().toISOString(), nativeExitCode: null, signal: null, reason: refused, status: 'failed',
+          stdoutBytes: 0, stderrBytes: 0, stdout: path.join(runDir, 'stdout.log'), stderr: path.join(runDir, 'stderr.log') });
+        fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
+        return { ...receipt, runDir };
+      }
+    }
     const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let failure = null, fallback;
     let finish;
@@ -179,6 +226,14 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
         source.treeAfter = sourceTree(source.toplevel);
         if (source.treeBefore !== source.treeAfter) sourceFailure = 'Verified source changed while the command was running.';
       } catch { sourceFailure = 'Cannot capture the Git source tree after verification.'; }
+    }
+    // Another task's sync during this run changed the code under it: the result is not for this code.
+    if (remote) {
+      try {
+        const there = await askRemote();
+        receipt.remote.treeAfter = there.tree;
+        if (there.tree !== source.treeBefore) sourceFailure ||= 'The code on the test machine changed while the command was running (another task put its code there). Run remote-sync.sh and the check again.';
+      } catch { sourceFailure ||= `Cannot read the code on the test machine (${remote.host}) after the check.`; }
     }
     failure ||= sourceFailure;
     Object.assign(receipt, { completedAt: new Date().toISOString(), nativeExitCode: terminal.code, signal: terminal.signal, reason: failure,

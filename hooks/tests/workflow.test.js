@@ -37,7 +37,17 @@ const reviewReason = r => r.output.hookSpecificOutput?.permissionDecisionReason 
 function invoke(hook, entries, options = {}) {
   const transcript = entries.map(JSON.stringify).join('\n');
   const input = { cwd: repo, transcript_path: transcriptPath, hook_event_name: hook === 'stop-gate.js' ? 'Stop' : 'PreToolUse', tool_name: 'PowerShell', tool_input: { command: 'git push origin feature/check' }, ...options.input };
+  // The scan reads files by descriptor, in pieces (2026-11-12). Open files: the transcript and, with
+  // options.subagents ({ 'agent-x.jsonl': entries }), helper transcripts in <transcript>/subagents/.
+  const helperFolder = transcriptPath.replace(/\.jsonl$/, '') + '/subagents';
+  const openable = new Map([[transcriptPath, Buffer.from(transcript)]]);
+  for (const [name, list] of Object.entries(options.subagents || {})) openable.set(helperFolder + '/' + name, Buffer.from(list.map(JSON.stringify).join('\n') + '\n'));
   const fakeFs = {
+    openSync(p) { if (!openable.has(String(p))) throw Error('Unexpected open: ' + p); return String(p); },
+    fstatSync(fd) { return { size: openable.get(fd).length }; },
+    readSync(fd, buf, offset, length, position) { const src = openable.get(fd); const n = Math.max(0, Math.min(length, src.length - position)); src.copy(buf, offset, position, position + n); return n; },
+    closeSync() {},
+    readdirSync(p) { if (String(p) === helperFolder && options.subagents) return Object.keys(options.subagents); throw Object.assign(Error('ENOENT: ' + p), { code: 'ENOENT' }); },
     readFileSync(p) { if (p === 0) return JSON.stringify(input); if (p === transcriptPath) return transcript; if (options.outputFiles && Object.hasOwn(options.outputFiles, String(p))) return options.outputFiles[p]; if (String(p).replace(/\\/g, '/') === 'C:/checks/run/metadata.json') { if (options.missingCheckRecord) throw Error('Missing check record'); return JSON.stringify(checkRecord(options.savedCheckChange)); } if (options.tsconfig && path.resolve(p) === path.resolve(options.configCwd || repo, 'tsconfig.json')) return JSON.stringify(options.tsconfig); throw Error('Unexpected read: ' + p); },
     existsSync(p) { return p === transcriptPath; },
     statSync(p) { if (options.tsconfig && path.resolve(p) === path.resolve(options.configCwd || repo, 'tsconfig.json')) return { isDirectory: () => false, isFile: () => true }; if (options.tsconfig && path.resolve(p) === path.resolve(options.configCwd || repo)) return { isDirectory: () => true, isFile: () => false }; if (p !== transcriptPath) throw Error('Unexpected stat'); return { size: Buffer.byteLength(transcript), isFile: () => true }; },
@@ -412,7 +422,9 @@ test('a red test never excuses failed or unproven restoration', () => {
 });
 test('an identical complete retry clears an attributed compound failure', () => {
   const cmd = 'git stash push; dotnet test Backend.Tests.csproj; git stash pop';
-  assert.equal(invoke('stop-gate.js', [...edit(), ...command('red', cmd, 'SETUP_EXIT=0\nFailed! - Failed: 1, Passed: 0\nCLEANUP_EXIT=0'), ...command('green', cmd, 'Passed: 1')]).decision, 'allow');
+  // The pop's exit code hides the test's (2026-11-12, audit H4): the green run proves itself by the runner's summary.
+  assert.equal(invoke('stop-gate.js', [...edit(), ...command('red', cmd, 'SETUP_EXIT=0\nFailed! - Failed: 1, Passed: 0\nCLEANUP_EXIT=0'), ...command('green', cmd, 'Passed!  - Failed:     0, Passed:     1')]).decision, 'allow');
+  assert.equal(invoke('stop-gate.js', [...edit(), ...command('red', cmd, 'SETUP_EXIT=0\nFailed! - Failed: 1, Passed: 0\nCLEANUP_EXIT=0'), ...command('green', cmd, 'Passed: 1')]).decision, 'block', 'no summary: the hidden run proves nothing');
 });
 test('environment overrides are part of the verification identity', () => {
   assert.equal(invoke('stop-gate.js', [...edit(),
@@ -628,7 +640,7 @@ test('a source-bound receipt cannot certify a different tree or repository', () 
 test('a different display tail or redirection does not keep an old failure alive', () => {
   assert.equal(invoke('stop-gate.js', [...edit(),
     ...command('red', 'dotnet test Backend.Tests.csproj | head -5', 'Failed! - Failed: 1, Passed: 0', true),
-    ...command('green', 'dotnet test Backend.Tests.csproj 2>&1 | grep -E "Passed|Failed" | head -20', 'Passed: 1')]).decision, 'allow');
+    ...command('green', 'dotnet test Backend.Tests.csproj 2>&1 | grep -E "Passed|Failed" | head -20', 'Passed!  - Failed:     0, Passed:     1')]).decision, 'allow');
   assert.equal(invoke('stop-gate.js', [...edit(),
     ...command('red', 'dotnet test Backend.Tests.csproj', 'Failed! - Failed: 1, Passed: 0', true),
     ...command('green', 'dotnet test Backend.Tests.csproj 2>&1', 'Passed: 1')]).decision, 'allow');
@@ -768,4 +780,31 @@ test('a checkout of a fetched remote ref in a clean folder is not a code change;
   assert.equal(invoke('stop-gate.js', [...edit(), ...fetched], { clean: true }).decision, 'block', 'an earlier unverified edit is still owed');
   assert.equal(invoke('policy-guard.js', [...fullProof(), ...fetched], { clean: true }).decision, 'allow', 'the push guard agrees');
   assert.equal(invoke('policy-guard.js', [...fullProof(), ...fetched], { clean: false }).decision, 'deny');
+});
+
+// 2026-11-12 (audit H10): a helper agent's code edits never counted, so a stop after a sonnet-worker
+// changed code asked for no check. They count at their own time; the helper's own checks do not.
+test('a helper agent\'s code edit after the last check blocks the stop; one before it does not', () => {
+  const at = (n) => '2026-11-12T06:00:' + String(n).padStart(2, '0') + '.000Z';
+  const stamped = (entries, n) => entries.map((e) => ({ ...e, timestamp: at(n) }));
+  const session = [...stamped(edit(), 1), ...stamped(command('test', 'dotnet test', 'Passed!  - Failed:     0, Passed:     3'), 10)];
+  const helperEdit = (n) => ({ 'agent-w1.jsonl': stamped([call('h1', 'Edit', { file_path: repo + '/src/Helper.cs' }), result('h1', 'File updated.')], n) });
+  const late = invoke('stop-gate.js', session, { subagents: helperEdit(20) });
+  assert.equal(late.decision, 'block');
+  assert.match(late.output.reason, /last edit: Helper\.cs/);
+  assert.equal(invoke('stop-gate.js', session, { subagents: helperEdit(5) }).decision, 'allow', 'checked after the helper edit');
+  const helperCheck = { 'agent-w2.jsonl': stamped([...helperEdit(20)['agent-w1.jsonl'], ...command('h2', 'dotnet test', 'Passed!  - Failed:     0, Passed:     3'), verdict('GATE: PASS')], 21) };
+  assert.equal(invoke('stop-gate.js', session, { subagents: helperCheck }).decision, 'block', 'a helper\'s own check is not the session\'s');
+});
+
+// 2026-11-12 (audit H4): a display tail after a check replaces its exit code.
+test('a check behind a display tail passes on its summary, fails on a failure line, else is not run', () => {
+  const after = (cmd, output, isError) => invoke('stop-gate.js', [...edit(), ...bash('t', cmd, output, isError)]);
+  assert.equal(after('dotnet test | tail -5', 'Passed!  - Failed:     0, Passed:     3').decision, 'allow');
+  const red = after('npx vitest run 2>&1 | grep -E "FAIL|Tests" | head -8', ' FAIL  src/a.test.ts > case\n FAIL  src/b.test.ts > case');
+  assert.equal(red.decision, 'block');
+  assert.match(red.output.reason, /FAILED/);
+  const cut = after('dotnet test | head -3', 'Build succeeded.');
+  assert.equal(cut.decision, 'block');
+  assert.match(cut.output.reason, /no build\/test has run since the last edit/, 'not a failure, not a pass');
 });

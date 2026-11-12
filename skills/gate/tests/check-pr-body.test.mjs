@@ -68,6 +68,38 @@ test('every parking phrase is caught, in any case', () => {
   ]) assert.equal(check(line).length, 1, line);
 });
 
+// 2026-11-12 (audit C13): two apostrophes made a "quote" and the bare word "user" made it the user's, so
+// "Known gap: the teacher's list doesn't refresh for the user." passed.
+test('two apostrophes are not a quote, and the bare word "user" is not the user\'s words', () => {
+  assert.equal(check("Known gap: the teacher's list doesn't refresh for the user.").length, 1);
+  assert.equal(check('Known gap: "rare in practice" for the user.').length, 1);
+  assert.equal(hasAuthority("Left as is: the user said 'leave it alone'."), false);
+  assert.equal(hasAuthority("Kept as is: TUW-160's 'old rule' stays."), false);
+});
+
+test('the user\'s own words in double or typographic quotes still pass', () => {
+  assert.deepEqual(check('Out of scope: the user said "only the export, nothing else" (2026-11-12).'), []);
+  assert.deepEqual(check('Known gap, in the user\'s words: “leave the old list as it is”.'), []);
+  assert.deepEqual(check('By design. User: "teachers never see drafts".'), []);
+});
+
+test('the other parking phrases are caught', () => {
+  for (const line of [
+    'Out of scope for this ticket.',
+    'The order is by design.',
+    'The old export is unchanged on purpose.',
+    'The rename goes to a separate PR.',
+    'A follow-up PR handles the AR text.',
+    'Not in this PR: the parent view.',
+  ]) assert.equal(check(line).length, 1, line);
+});
+
+test('a line that fixes an old problem is not parked', () => {
+  assert.deepEqual(check('Fixes the pre-existing crash when the list is empty.'), []);
+  assert.deepEqual(check('Fixed the existing race in the counter.'), []);
+  assert.equal(check('Fixes the pre-existing crash; the other pre-existing bug stays.').length, 1);
+});
+
 test('usage errors exit 2', () => {
   const r = spawnSync(process.execPath, [script], { encoding: 'utf8' });
   assert.equal(r.status, 2);

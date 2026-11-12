@@ -12,7 +12,10 @@
 'use strict';
 
 const fs = require('fs');
-const { invalidVerificationTarget, nativeVerificationTarget } = require('./verification-target.cjs');
+const path = require('path');
+const { invalidVerificationTarget, nativeVerificationTarget, verificationTarget } = require('./verification-target.cjs');
+// The hooks' process, when there is one (a test sandbox may have none).
+const proc = typeof process === 'object' && process ? process : null;
 
 // ---------------------------------------------------------------------------
 // What counts as code
@@ -41,7 +44,31 @@ const MANIFEST_BASENAME = /(^|[/\\])(package(-lock)?\.json|pnpm-lock\.yaml|yarn\
 // Paths that never oblige a verify: Claude's and Codex's own config, memory,
 // scratch, specs, vendored/VCS-internal trees, device files. The temp folder
 // (the session scratchpad lives in it) is named literally or by its variable.
-const EXEMPT = /((^|[/\\])\.claude([/\\]|$)|(^|[/\\])\.codex([/\\]|$)|[/\\]memory[/\\]|[/\\]specs[/\\]|AppData[/\\]Local[/\\]Temp|[/\\]node_modules[/\\]|[/\\]\.git[/\\]|^\/tmp\/|^\/private\/tmp\/|^\/(?:private\/)?var\/folders\/|^\$\{?(?:TEMP|TMP|TMPDIR)\}?[/\\]|^\$env:(?:TEMP|TMP)[/\\]|^%(?:TEMP|TMP)%[/\\]|^\/dev\/|^\/proc\/)/i;
+const EXEMPT = /((^|[/\\])\.claude([/\\]|$)|(^|[/\\])\.codex([/\\]|$)|[/\\]memory[/\\]|[/\\]specs[/\\]|[/\\]node_modules[/\\]|[/\\]\.git[/\\]|^\/tmp\/|^\/private\/tmp\/|^\/(?:private\/)?var\/folders\/|^\$\{?(?:TEMP|TMP|TMPDIR)\}?[/\\]|^\$env:(?:TEMP|TMP)[/\\]|^%(?:TEMP|TMP)%[/\\]|^\/dev\/|^\/proc\/)/i;
+// The Windows temp folder is exempt only outside a git work tree: real worktrees live there too, and
+// edits in them never counted (2026-11-12, audit H3: no check asked, no timer).
+const TEMP_DIR = /AppData\/Local\/Temp/i;
+const workTreeDirs = new Map(); // folder -> inside a work tree rooted below the temp folder (for this process)
+function inTempWorkTree(p) {
+  const local = p.replace(/^\/([A-Za-z])\//, '$1:/');   // Git Bash spells C:/ as /c/
+  const m = TEMP_DIR.exec(local);
+  if (!m) return false;
+  const top = local.slice(0, m.index + m[0].length);
+  // Walk up from the file's folder to the temp folder; a folder that does not exist yet has no .git,
+  // so the nearest existing parent decides.
+  const seen = [];
+  let dir = local.replace(/\/+$/, '').replace(/\/[^/]*$/, ''), inside = false;
+  while (dir.length > top.length) {
+    if (workTreeDirs.has(dir)) { inside = workTreeDirs.get(dir); break; }
+    seen.push(dir);
+    let found = false;
+    try { found = fs.existsSync(dir + '/.git'); } catch (e) { found = false; }
+    if (found) { inside = true; break; }
+    dir = dir.replace(/\/[^/]*$/, '');
+  }
+  for (const d of seen) workTreeDirs.set(d, inside);
+  return inside;
+}
 
 function stripQuotes(s) { return String(s || '').replace(/^["']+|["']+$/g, ''); }
 
@@ -74,7 +101,8 @@ function isCodePath(p) {
   // absolute path starts inside .claude. Apply exemptions within that checkout.
   p = collapseDots(p.replace(/\\/g, '/')).replace(/^.*(?:^|\/)\.claude\/worktrees\/[^/]+\//i, '');
   if (EXEMPT.test(p)) return false;
-  return CODE_EXT.test(p) || CODE_BASENAME.test(p) || CODE_JSON.test(p) || MANIFEST_BASENAME.test(p);
+  if (!(CODE_EXT.test(p) || CODE_BASENAME.test(p) || CODE_JSON.test(p) || MANIFEST_BASENAME.test(p))) return false;
+  return !TEMP_DIR.test(p) || inTempWorkTree(p);
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +111,22 @@ function isCodePath(p) {
 
 // One command grammar for every hook: segment splitting and tokenizing live in
 // shell-command.cjs (quote- and heredoc-aware); re-exported here unchanged.
-const { splitSegments, tokenize } = require('./shell-command.cjs');
+const shellCommand = require('./shell-command.cjs');
+const { parseCommand, shellPath } = shellCommand;
+// The same command is split and tokenized many times while it is judged; a whole session has tens of
+// thousands of commands (2026-11-12: the first read of a 449 MB session spent seconds here). Each
+// caller gets its own copy, so the remembered answer cannot be changed.
+function remembered(fn) {
+  const seen = new Map();
+  return (s) => {
+    const key = String(s == null ? '' : s);
+    let v = seen.get(key);
+    if (!v) { v = fn(key); if (seen.size >= 4000) seen.clear(); seen.set(key, v); }
+    return v.slice();
+  };
+}
+const splitSegments = remembered(shellCommand.splitSegments);
+const tokenize = remembered(shellCommand.tokenize);
 
 // A verify command: build, test, lint or typecheck. Starting a server or an
 // arbitrary helper script is not verification. Matched at the START (after env-var
@@ -143,6 +186,8 @@ function segmentIsVerify(seg) {
   }
   const command = words.join(' ');
   if (/(?:^|\s)(?:--list-tests|--collect-only|--collectonly|--passWithNoTests|--help|--version)(?:\s|=|$)/i.test(command)) return false;
+  // A fixer rewrites the code it checks: it is an edit, not a passing check (2026-11-12, audit H14).
+  if (/(?:^|\s)--fix(?:\s|=|$)/i.test(command)) return false;
   // TypeScript inventory/help commands can exit 0 without checking any source.
   if (/^(?:npx\s+)?tsc\b/i.test(command) && /(?:^|\s)(?:--listFilesOnly|--showConfig|--help|--version|-h|-v)(?:\s|=|$)/i.test(command)) return false;
   // A red-proof run that ends with green on the fixed tree runs the tests on the code as it is: a test run
@@ -157,6 +202,112 @@ function segmentIsVerify(seg) {
 }
 
 function hasVerify(cmd) { return splitSegments(cmd).some(segmentIsVerify); }
+
+// The list operator after each segment ('' after the last), with the same boundaries as
+// splitSegments in shell-command.cjs. When the two ever disagree (the shared grammar changed),
+// the caller gets null and treats every check as one whose exit code it cannot see.
+function segmentOps(cmd) {
+  cmd = String(cmd || '');
+  const out = [];
+  let cur = '', q = null, i = 0;
+  const cut = (op) => {
+    const text = cur.trim();
+    cur = '';
+    if (text) out.push({ text, op });
+    else if (out.length && out[out.length - 1].op === '&&') out[out.length - 1].op = op;
+  };
+  while (i < cmd.length) {
+    const ch = cmd[i];
+    if (q) {
+      cur += ch;
+      if (ch === q) q = null;
+      else if (ch === '\\' && q === '"' && i + 1 < cmd.length) { cur += cmd[i + 1]; i++; }
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { q = ch; cur += ch; i++; continue; }
+    if (ch === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') {
+      const m = /^<<-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(cmd.slice(i));
+      if (m) {
+        const eol = cmd.indexOf('\n', i);
+        if (eol === -1) { cur += cmd.slice(i); i = cmd.length; continue; }
+        cur += cmd.slice(i, eol);
+        let j = eol + 1, end = cmd.length;
+        while (j < cmd.length) {
+          let nl = cmd.indexOf('\n', j);
+          if (nl === -1) nl = cmd.length;
+          if (cmd.slice(j, nl).replace(/^\t+/, '').trim() === m[2]) { end = nl; break; }
+          j = nl + 1;
+        }
+        i = end;
+        continue;
+      }
+    }
+    if (cmd.startsWith('&&', i) || cmd.startsWith('||', i)) { cut(cmd.slice(i, i + 2)); i += 2; continue; }
+    if (ch === ';' || ch === '\n' || ch === '|') { cut(ch); i++; continue; }
+    if (ch === '&' && cmd[i - 1] !== '>' && cmd[i + 1] !== '>') { cut('&'); i++; continue; }
+    cur += ch;
+    i++;
+  }
+  cut('');
+  const plain = splitSegments(cmd);
+  return plain.length === out.length && plain.every((s, n) => s === out[n].text) ? out : null;
+}
+
+// A check's exit code reaches the tool only when it ends its pipeline and nothing after it but `&&`
+// follows: `| tail`, `; echo`, `|| true`, `&` or a later `;` command replace it (2026-11-12, audit H4:
+// `… vitest run > log; sed … | grep … | head -8` with eight failures exited 0 and read as a pass).
+const HIDING_OPS = new Set([';', '\n', '||', '&']);
+function exitHidden(ops, i) {
+  if (ops[i].op === '|') return true;
+  for (let j = i; j < ops.length - 1; j++) if (HIDING_OPS.has(ops[j].op)) return true;
+  return false;
+}
+
+// Which runner a check is, for its own pass marker.
+function checkRunner(seg) {
+  const c = verificationCommand(seg);
+  if (/^node(?:\.exe)?\s+\S*red-proof\.mjs(?:\s|$)/i.test(c)) return 'red-proof';
+  if (/^dotnet\s+test\b/i.test(c)) return 'dotnet-test';
+  if (/^dotnet\s+(?:build|publish)\b/i.test(c)) return 'dotnet-build';
+  if (/^node\s+--test\b/i.test(c)) return 'node-test';
+  if (/^(?:npx\s+)?vitest\b/i.test(c)) return 'vitest';
+  if (/^(?:npx\s+)?jest\b/i.test(c)) return 'jest';
+  if (/^(?:npm|pnpm|yarn|bun)\s+(?:test\b|run\s+test)/i.test(c)) return 'js-test';
+  return 'unknown';
+}
+
+// The command's exit code is a display step's (`| head`, `; echo done`, `|| true`), so a non-zero code
+// says nothing about the check. Any other last step (a `git stash pop`) failing is a real failure.
+const SHOW_STEP = /^(?:echo|printf|true|:|Write-Host|Write-Output|exit\s+0)(?:\s|$)/i;
+function exitIsDisplay(cmd) {
+  const segs = splitSegments(cmd);
+  const last = segs[segs.length - 1] || '';
+  const words = verificationWords(last);
+  if (isSsh(words)) return exitIsDisplay(remoteCommand(words));
+  return isDisplaySegment(last) || SHOW_STEP.test(String(last).trim());
+}
+
+// The checks in a command whose exit code is hidden: { runners, realExit }, or null when every check's
+// exit code is visible. runners: the hidden checks only (a visible one is proved by the exit code).
+// realExit: the command's own exit code is a real step's, not a display tail's. A remote command over
+// ssh is judged the same way inside.
+function hiddenCheckRunners(cmd) {
+  const plain = splitSegments(cmd);
+  const ops = segmentOps(cmd);
+  const runners = [];
+  plain.forEach((seg, i) => {
+    if (!segmentIsVerify(seg)) return;
+    const hidden = !ops || exitHidden(ops, i);
+    const words = verificationWords(seg);
+    if (isSsh(words)) {
+      const inner = remoteCommand(words);
+      if (hidden) runners.push(...splitSegments(inner).filter(segmentIsVerify).map(checkRunner));
+      else { const nested = hiddenCheckRunners(inner); if (nested) runners.push(...nested.runners); }
+    } else if (hidden) runners.push(checkRunner(seg));
+  });
+  return runners.length ? { runners, realExit: !exitIsDisplay(cmd) } : null;
+}
 
 // Display-only consumers after a pipe (grep, head, tail, tee, Select-String …)
 // change what is shown, not what was verified: they are not part of a check's
@@ -331,9 +482,128 @@ function segmentEditPaths(seg, base) {
     const written = COPY_PROGRAM.test(program) ? copyWrites(tokens) : null;
     for (const t of written || tokens) if (isCodePath(inFolder(t, base))) out.push(stripQuotes(t));
   }
-  if (PATHLESS_WRITE.test(seg)) out.push('<generated>');
+  for (const t of deletedPaths(seg)) if (isCodePath(inFolder(t, base))) out.push(stripQuotes(t));
+  if (PATHLESS_WRITE.test(seg) || formatterWrites(seg)) out.push('<generated>');
   if (GIT_CONTENT_CHANGE.test(seg)) out.push(remoteCheckout(seg) ? '<git-remote>' : '<git>');
   return [...new Set(out)];
+}
+
+// A deleted code file changes the code like an edit; a formatter or fixer rewrites the files it is
+// given (2026-11-12, audit H14: neither counted, and `eslint --fix` even passed as a check). Judged
+// by the program that runs, never by text inside quotes.
+const DELETE_PROGRAM = /^(?:rm|rmdir|rd|del|erase|ri|remove-item|rimraf|unlink)$/;
+// PowerShell options whose value is not a path.
+const VALUE_OPTION = /^-(?:value|encoding|itemtype|filter|include|exclude|inputobject|delimiter|stream|width|erroraction|ea|warningaction|wa)$/i;
+function programArgs(seg) {
+  const s = String(seg).trim()
+    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/, '')
+    .replace(/^(?:sudo|time|env|command|nohup|timeout\s+\d+[smh]?)\s+/, '').replace(/^&\s+/, '');
+  const words = tokenize(s);
+  return { program: String(words[0] || '').split(/[\\/]/).pop().replace(/\.(?:exe|cmd|bat|ps1)$/i, '').toLowerCase(), args: words.slice(1) };
+}
+function pathArgs(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (VALUE_OPTION.test(args[i])) { i++; continue; }
+    if (!args[i].startsWith('-')) out.push(args[i]);
+  }
+  return out;
+}
+function gitSubcommand(args) {
+  let i = 0;
+  while (i < args.length && /^-[Cc]$/.test(args[i])) i += 2;
+  return { sub: String(args[i] || '').toLowerCase(), rest: args.slice(i + 1) };
+}
+function deletedPaths(seg) {
+  const { program, args } = programArgs(seg);
+  if (DELETE_PROGRAM.test(program)) return pathArgs(args);
+  if (program === 'git') {
+    const { sub, rest } = gitSubcommand(args);
+    if (sub === 'rm' && !rest.includes('--cached')) return pathArgs(rest);   // --cached keeps the file
+  }
+  return [];
+}
+function formatterWrites(seg) {
+  const words = verificationWords(seg);
+  if (!words.length) return false;
+  const { executable: name, args } = verificationTarget(words[0], words.slice(1));
+  const has = (re) => args.some((a) => re.test(a));
+  if (has(/^--(?:help|version)$/)) return false;
+  if (name === 'dotnet') {
+    const sub = String(args[0] || '').toLowerCase();
+    if (sub === 'format') return !has(/^--verify-no-changes$/);
+    if (sub === 'csharpier') return !/^check$/i.test(args[1] || '') && !has(/^--check$/);
+    return false;
+  }
+  if (name === 'csharpier') return !/^check$/i.test(args[0] || '') && !has(/^--check$/);
+  if (name === 'prettier') return has(/^(?:--write|-w)$/);
+  if (name === 'eslint') return has(/^--fix$/);
+  // `npx <tool> --fix|--write`, `npm run lint -- --fix`.
+  return /^(?:npx|npm|pnpm|yarn|bun)$/.test(String(words[0]).toLowerCase()) && has(/^--(?:fix|write)$/);
+}
+
+// Every file a shell segment writes or deletes, code or not, for check-lock-guard: any change to a
+// file git tracks or would add voids a running source-bound check (2026-11-12, audit H14: only code
+// paths were refused, so a note or a spec written during a suite lost the whole run). Paths as written.
+const NULL_TARGET = /^(?:\/dev\/(?:null|stdout|stderr|tty)|nul:?|\$null|con:?)$/i;
+const MOVE_PROGRAM = /^(?:mv|move|move-item|mi|ren|rename|rename-item|rni)$/;
+const TOUCH_PROGRAM = /^(?:touch|new-item|ni)$/;
+const CONTENT_PROGRAM = /^(?:set-content|sc|add-content|ac|out-file|clear-content|clc)$/;
+// Same length as the text, quoted characters blanked: an operator inside quotes is no redirection.
+function blankQuoted(s) {
+  let out = '', q = null;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (q) { out += ch === q ? ch : '_'; if (ch === q) q = null; continue; }
+    if (ch === '"' || ch === "'") q = ch;
+    out += ch;
+  }
+  return out;
+}
+function redirectTargets(seg) {
+  const s = String(seg), b = blankQuoted(s), out = [];
+  for (let i = 0; i < b.length; i++) {
+    if (b[i] !== '>') continue;
+    if (b[i + 1] === '>') i++;
+    if (b[i + 1] === '&') continue;                       // 2>&1, >&2
+    let j = i + 1;
+    while (j < b.length && /\s/.test(b[j])) j++;
+    let k = j;
+    if (b[j] === '"' || b[j] === "'") { k = b.indexOf(b[j], j + 1); k = k === -1 ? b.length : k + 1; }
+    else while (k < b.length && !/[\s;&|<>()]/.test(b[k])) k++;
+    const target = stripQuotes(s.slice(j, k));
+    if (target && !NULL_TARGET.test(target)) out.push(target);
+    i = Math.max(i, k - 1);
+  }
+  return out;
+}
+function segmentWritePaths(seg) {
+  const out = redirectTargets(seg);
+  const { program, args } = programArgs(seg);
+  const tokens = [program, ...args];
+  if (DELETE_PROGRAM.test(program) || MOVE_PROGRAM.test(program) || program === 'tee' || program === 'tee-object') out.push(...pathArgs(args));
+  else if (TOUCH_PROGRAM.test(program)) { if (!args.some((a, i) => /^-itemtype$/i.test(args[i - 1] || '') && /^directory$/i.test(a))) out.push(...pathArgs(args)); }
+  else if (COPY_PROGRAM.test(program)) out.push(...(copyWrites(tokens) || pathArgs(args)));
+  else if (program === 'sed' && args.some((a) => /^(?:-[a-zA-Z]*i|--in-place)/.test(a))) {
+    // The script is the first plain argument unless -e/-f name it.
+    const named = args.some((a) => /^(?:-e|-f|--expression|--file)(?:=|$)/.test(a));
+    const files = [];
+    for (let i = 0; i < args.length; i++) {
+      if (/^(?:-e|-f|--expression|--file)$/.test(args[i])) { i++; continue; }
+      if (!args[i].startsWith('-')) files.push(args[i]);
+    }
+    out.push(...(named ? files : files.slice(1)));
+  } else if (CONTENT_PROGRAM.test(program)) {
+    const named = args.findIndex((a) => /^-(?:path|literalpath|filepath)$/i.test(a));
+    const first = pathArgs(args)[0];
+    if (named !== -1 && args[named + 1] !== undefined) out.push(args[named + 1]);
+    else if (first !== undefined) out.push(first);
+  } else if (program === 'git') {
+    const { sub, rest } = gitSubcommand(args);
+    if ((sub === 'rm' && !rest.includes('--cached')) || sub === 'mv') out.push(...pathArgs(rest));
+  }
+  for (const m of String(seg).matchAll(/(?:WriteAll(?:Text|Lines|Bytes)|AppendAll(?:Text|Lines))\(\s*(["'])([^"']+)\1/gi)) out.push(m[2]);
+  return [...new Set(out.map(stripQuotes).filter(Boolean))];
 }
 const GIT_CHANGE = /^<git(?:-remote)?>$/;
 
@@ -358,6 +628,22 @@ function shellEditPaths(cmd) {
   return [...new Set(out)];
 }
 
+// check-lock-guard: every file a shell command writes or deletes, resolved in the folder its segment
+// runs in (a `cd` earlier in the command, else the tool's folder). opts: { cwd, tool, home, tmp }.
+// A path that cannot be resolved literally (a variable, a glob) is left out, as before.
+function shellWriteTargets(cmd, opts = {}) {
+  const records = parseCommand(cmd, opts);
+  const texts = expandVariables(records.map((r) => r.text));
+  const out = [];
+  records.forEach((rec, i) => {
+    for (const p of segmentWritePaths(texts[i])) {
+      const resolved = shellPath(p, rec.cwd == null ? opts.cwd : rec.cwd, opts);
+      if (resolved) out.push({ path: resolved, shown: p });
+    }
+  });
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Did a verify command PASS? Judged from its recorded result.
 // ---------------------------------------------------------------------------
@@ -378,9 +664,38 @@ const FAIL_MARKERS = [
   /(?:BUILD|TEST|TSC|ESLINT|LINT|TYPECHECK|SETUP|CLEANUP)_EXIT=(?:[1-9]|-\d)/,
   /The build failed\./i,
   // red-proof.mjs proved nothing. Its exit code is lost behind a pipe (`… | tail`), so its own verdict counts.
-  /RED-PROOF: (?:NOT PROVED|NOT RED|SETUP|TIMEOUT|REMOTE-DOWN)\b/,
+  /RED-PROOF: (?:NOT PROVED|NOT RED|SETUP|TIMEOUT|REMOTE-DOWN|ENVIRONMENT)\b/,
   /^\s*GREEN ✗/m,
+  // One failed test, as each runner lists it: a display tail can keep these lines and cut the summary
+  // (2026-11-12, audit H4). vitest/jest ` FAIL  file > case` and `× case`; dotnet `Failed Name [12 ms]`
+  // and xUnit `[FAIL]`; node:test `✖ case` (not eslint's `✖ N problems`, whose warnings are no failure),
+  // its `ℹ fail N` summary and TAP `not ok` (not a TODO/SKIP one).
+  /^\s*FAIL\s+\S/m,
+  /^\s*× \S/m,
+  /^\s*Failed [\w.`+<>,-]+(?:\([^)\n]*\))? \[/m,
+  /\[FAIL\]/,
+  /^\s*✖ (?!\d+ problems?\b)\S/m,
+  /^\s*ℹ fail [1-9]/m,
+  /^not ok \d+(?![^\n]*#\s*(?:TODO|SKIP)\b)/m,
+  // MSBuild's own error line for any analyzer or generator code (`x.cs(23,5): error RMG012: …`): a build
+  // with one passed behind `| grep … | head` in a real session (2026-11-12).
+  /\): error [A-Z]{2,}\d{2,}\s*:/,
 ];
+// The tool's own exit-code line: no proof either way when something after the check hides its code.
+const EXIT_LINE = FAIL_MARKERS[0];
+
+// What each runner prints only when all of its tests passed. Behind a display tail the summary is the
+// only proof left (2026-11-12, audit H4); a runner with no marker here gets no credit there.
+const PASS_MARKERS = {
+  vitest: [/^\s*Tests\s+\d+ passed\b/m],
+  jest: [/^Tests:\s+(?:\d+ (?:skipped|todo), )*\d+ passed, \d+ total/m],
+  'node-test': [/^\s*ℹ fail 0\s*$/m, /^# fail 0\s*$/m],
+  'dotnet-test': [/\bPassed!\s/, /\bFailed:\s+0\b/, /^\s*Test Run Successful\./m],
+  'dotnet-build': [/\bBuild succeeded\b/, /^\s*0 Error\(s\)/m],
+  'red-proof': [/^\s*GREEN ✓/m],
+};
+PASS_MARKERS['js-test'] = [...PASS_MARKERS.vitest, ...PASS_MARKERS.jest, ...PASS_MARKERS['node-test']];
+const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
 
 function resultText(block, entry) {
   let s = '';
@@ -401,7 +716,7 @@ function resultText(block, entry) {
 
 function verifyFailed(text, isError) {
   if (isError) return true;
-  const t = String(text || '');
+  const t = String(text || '').replace(ANSI, '');
   return FAIL_MARKERS.some((re) => re.test(t));
 }
 
@@ -412,24 +727,48 @@ function userRejected(block, entry) {
 }
 
 // ---------------------------------------------------------------------------
-// Transcript loading. Normal transcripts are read whole. A pathologically large
-// one (> 80 MB) is scanned from its 16 MB tail only — the verdict needs just the
-// LAST edit / verify / gate, and those live near the end.
+// Transcript loading. The whole session counts, read line by line, never as one
+// string (2026-11-12, audit H17: above 80 MB only the last 16 MB was read, so an
+// older reviewer run, check, failure or edit vanished; one session is 426 MB).
+// What the scan learned is kept in a small cache per transcript (see below), so
+// a later hook call reads only the bytes appended since.
 // ---------------------------------------------------------------------------
 
-function readTranscript(p) {
-  const FULL_READ_MAX = 80 * 1024 * 1024;
-  const TAIL_BYTES = 16 * 1024 * 1024;
-  const size = fs.statSync(p).size;
-  if (size <= FULL_READ_MAX) return fs.readFileSync(p, 'utf8');
-  const fd = fs.openSync(p, 'r');
-  try {
-    const buf = Buffer.alloc(TAIL_BYTES);
-    const n = fs.readSync(fd, buf, 0, TAIL_BYTES, size - TAIL_BYTES);
-    const s = buf.toString('utf8', 0, n);
-    const nl = s.indexOf('\n');
-    return nl === -1 ? '' : s.slice(nl + 1);
-  } finally { fs.closeSync(fd); }
+// Each complete ('\n'-ended) line of the bytes [start, end) of an open file, to onLine. Returns the
+// offset after the last complete line, and the bytes after it (a last line still being written, or a
+// file that does not end with a newline) for the caller to judge.
+const READ_CHUNK = 8 * 1024 * 1024;
+// The host's copies of API requests are most of a long transcript's bytes and never events (see
+// feedLine): such a line is passed over before it is even decoded.
+const REQUEST_COPY = Buffer.from('{"type":"api-request');
+// onChunk(done), when given, runs after each chunk, when every line before done has been judged.
+function readLines(fd, start, end, onLine, onChunk) {
+  const buf = Buffer.allocUnsafe(Math.max(1, Math.min(READ_CHUNK, end - start)));
+  let pos = start, done = start, pieces = [];
+  while (pos < end) {
+    const n = fs.readSync(fd, buf, 0, Math.min(buf.length, end - pos), pos);
+    if (!(n > 0)) break;
+    const data = buf.subarray(0, n);
+    let from = 0, nl;
+    while ((nl = data.indexOf(10, from)) !== -1) {
+      const bytes = pieces.length ? Buffer.concat([...pieces, data.subarray(from, nl)]) : data.subarray(from, nl);
+      pieces = [];
+      from = nl + 1;
+      done = pos + from;
+      if (bytes.length >= REQUEST_COPY.length && bytes.compare(REQUEST_COPY, 0, REQUEST_COPY.length, 0, REQUEST_COPY.length) === 0) continue;
+      onLine(bytes.toString('utf8'), done);
+    }
+    if (from < n) pieces.push(Buffer.from(data.subarray(from)));   // the buffer is reused: keep a copy
+    pos += n;
+    if (onChunk) onChunk(done);
+  }
+  return { done, tail: pieces.length ? Buffer.concat(pieces).toString('utf8') : '' };
+}
+
+function readBytes(fd, start, length) {
+  const buf = Buffer.alloc(Math.max(0, length));
+  const n = length > 0 ? fs.readSync(fd, buf, 0, length, start) : 0;
+  return buf.subarray(0, n);
 }
 
 // ---------------------------------------------------------------------------
@@ -442,7 +781,10 @@ function readTranscript(p) {
 // build` verifies AFTER its edit; `dotnet build; sed -i …` does not.
 // ---------------------------------------------------------------------------
 
-const MAYBE_LINE = /"tool_use"|"tool_result"|GATE:|REVIEW:|CHECK RETIRED:|PROBE EXPECTED:|"commandMode":"task-notification"|<task-notification>/;
+// A line can matter only if it holds one of these. Plain substring searches: one regex alternation
+// over long result lines cost seconds on a 449 MB session (2026-11-12).
+const MAYBE_PARTS = ['"tool_use"', '"tool_result"', 'GATE:', 'REVIEW:', 'CHECK RETIRED:', 'PROBE EXPECTED:', '"commandMode":"task-notification"', '<task-notification>'];
+const maybeLine = (l) => MAYBE_PARTS.some((part) => l.includes(part));
 const GATE_RE = /^GATE:\s*(PASS|FAIL)\b/gm;
 const REVIEW_RE = /^REVIEW:\s*(PASS|FAIL)\b/gm;
 // An explicit, auditable retirement of a completed failed check that cannot
@@ -472,11 +814,29 @@ function verificationResult(block, entry) {
   if (verifyFailed(text, block.is_error === true) || t.interrupted === true ||
       (exit !== undefined && exit !== null && Number(exit) !== 0) ||
       /^(failed|killed|cancelled|canceled)$/.test(t.task?.status || '')) return 'failed';
-  if (t.backgroundTaskId || t.background_task_id ||
-      /^(running|pending|queued)$/.test(t.task?.status || '') ||
-      /^(timeout|not_ready)$/.test(t.retrieval_status || '') ||
-      /running in background|running in the background|command still running/i.test(text)) return 'pending';
+  if (stillRunning(t, text)) return 'pending';
   return 'passed';
+}
+function stillRunning(t, text) {
+  return !!(t.backgroundTaskId || t.background_task_id ||
+    /^(running|pending|queued)$/.test(t.task?.status || '') ||
+    /^(timeout|not_ready)$/.test(t.retrieval_status || '') ||
+    /running in background|running in the background|command still running/i.test(text));
+}
+
+// A check whose exit code was hidden (see hiddenCheckRunners): a failure line fails it, every check's
+// own pass marker passes it, anything else proves nothing ('none': no credit, no failure). A non-zero
+// exit still fails it when the last step is a real one (a setup or cleanup step failed).
+function hiddenVerificationResult(block, entry, hidden) {
+  const t = entry.toolUseResult || {};
+  const text = resultText(block, entry).replace(ANSI, '');
+  const exit = t.task?.exitCode ?? t.exitCode ?? t.exit_code;
+  const nonZero = block.is_error === true || (exit !== undefined && exit !== null && Number(exit) !== 0) || t.task?.status === 'failed' || EXIT_LINE.test(text);
+  if (FAIL_MARKERS.some((re) => re !== EXIT_LINE && re.test(text)) || t.interrupted === true ||
+      /^(killed|cancelled|canceled)$/.test(t.task?.status || '') || (hidden.realExit && nonZero)) return 'failed';
+  if (stillRunning(t, text)) return 'pending';
+  const runners = hidden.runners || [];
+  return runners.length && runners.every((r) => (PASS_MARKERS[r] || []).some((re) => re.test(text))) ? 'passed' : 'none';
 }
 
 function isEvidenceCommand(segment) {
@@ -544,263 +904,537 @@ function taskNotifications(entry) {
   return [...text.matchAll(NOTE_RE)].map(m => parseNotification(m[1])).filter(Boolean);
 }
 
-function scanTranscript(transcriptPath) {
-  const res = { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastGitRepo: '', passedTrees: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 };
-  let lines;
-  try { lines = readTranscript(transcriptPath).split('\n'); } catch (e) { return res; }
+// The reducer state of one scan: plain data only (Maps and Sets become arrays in the cache), so a
+// later call continues where the last one stopped (2026-11-12, audit H17).
+function newScanState() {
+  return {
+    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 },
+    seq: 0,
+    pending: new Map(), // tool_use_id -> { editSeq, editPath, verifySeq }
+    background: new Map(), // task id -> originating command (not its polling command)
+    finishedUncollected: new Set(), // background task ids whose finish notice carried no exit code
+    verificationStates: new Map(), // retries clear only the same command's failure
+    providerStates: new Map(),
+    reviewerCalls: new Map(),  // Agent tool_use id -> launch seq (reviewer prompt)
+    reviewerAgents: new Map(), // agent id -> { launch, at } (latest run, incl. SendMessage follow-ups)
+    // For the task timer: each finished reviewer run, { launchAt, doneAt } (the entries' own times). A review
+    // runs beside the other stages, so the timer lists it apart (2026-11-11: the report showed no review time).
+    reviewerAt: new Map(),     // Agent tool_use id -> the launch entry's time
+    reviews: [],
+    // Every helper agent still working: launched in the background and not yet reported done. While one
+    // launched after the last change works, the stop waits for it instead of asking for a check (2026-11-06).
+    helperCalls: new Map(),    // tool_use id -> seq
+    helpersRunning: new Map(), // agent id -> launch seq
+    retirements: [], // CHECK RETIRED lines: { seq, failed: [names], replacement: [names] }
+    probes: [],      // PROBE EXPECTED lines: { seq, command: [names] }
+    passes: [],      // passing verifications: { seq, command }
+    stopCalls: new Map(),      // TaskStop tool_use id -> background task id
+    remoteCheckouts: [],       // moves to a fetched remote ref: { seq, repo }
+    helperEdits: [],           // helper agents' edits not yet placed in time: { t, file, pos, edit }
+    helperPending: new Map(),  // '<helper file>\n<tool_use id>' -> a helper's edit awaiting its result
+  };
+}
+const STATE_MAPS = ['pending', 'background', 'verificationStates', 'providerStates', 'reviewerCalls', 'reviewerAgents', 'reviewerAt', 'helperCalls', 'helpersRunning', 'stopCalls', 'helperPending'];
+const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'helperEdits'];
+function saveState(st) {
+  const o = { ...st, finishedUncollected: [...st.finishedUncollected] };
+  for (const k of STATE_MAPS) o[k] = [...st[k]];
+  return o;
+}
+// A cached state of any other shape is ignored (the scan starts from zero).
+function restoreState(o) {
+  const st = newScanState();
+  if (!o || typeof o !== 'object' || !o.res || typeof o.res !== 'object' || typeof o.seq !== 'number' || !Array.isArray(o.finishedUncollected)) return null;
+  for (const k of STATE_MAPS) {
+    if (!Array.isArray(o[k]) || !o[k].every((e) => Array.isArray(e) && e.length === 2)) return null;
+    st[k] = new Map(o[k]);
+  }
+  for (const k of STATE_LISTS) { if (!Array.isArray(o[k])) return null; st[k] = o[k]; }
+  for (const [k, v] of Object.entries(st.res)) if (typeof o.res[k] !== typeof v || Array.isArray(o.res[k]) !== Array.isArray(v)) return null;
+  st.finishedUncollected = new Set(o.finishedUncollected);
+  st.res = o.res; st.seq = o.seq;
+  return st;
+}
 
-  const pending = new Map(); // tool_use_id -> { editSeq, editPath, verifySeq }
-  const background = new Map(); // task id -> originating command (not its polling command)
-  const finishedUncollected = new Set(); // background task ids whose finish notice carried no exit code
-  const verificationStates = new Map(); // retries clear only the same command's failure
-  const providerStates = new Map();
-  const reviewerCalls = new Map();  // Agent tool_use id -> launch seq (reviewer prompt)
-  const reviewerAgents = new Map(); // agent id -> { launch, at } (latest run, incl. SendMessage follow-ups)
-  // For the task timer: each finished reviewer run, { launchAt, doneAt } (the entries' own times). A review
-  // runs beside the other stages, so the timer lists it apart (2026-11-11: the report showed no review time).
-  const reviewerAt = new Map();     // Agent tool_use id -> the launch entry's time
-  const reviews = [];
-  const reviewDone = (launchAt, doneAt) => { if (launchAt && doneAt && !reviews.some((r) => r.launchAt === launchAt)) reviews.push({ launchAt, doneAt }); };
-  // Every helper agent still working: launched in the background and not yet reported done. While one
-  // launched after the last change works, the stop waits for it instead of asking for a check (2026-11-06).
-  const helperCalls = new Map();    // tool_use id -> seq
-  const helpersRunning = new Map(); // agent id -> launch seq
-  const retirements = []; // CHECK RETIRED lines: { seq, failed: [names], replacement: [names] }
-  const probes = [];      // PROBE EXPECTED lines: { seq, command: [names] }
-  const passes = [];      // passing verifications: { seq, command }
-  const stopCalls = new Map();      // TaskStop tool_use id -> background task id
-  const remoteCheckouts = [];       // moves to a fetched remote ref: { seq, repo }
-  let seq = 0;
-
-  for (const l of lines) {
-    if (!MAYBE_LINE.test(l)) continue;
-    // The host also writes a copy of each API request (`api-request-blob`): old tool calls,
-    // results and verdicts again, out of order. Copies are not events (2026-11-09: copied
-    // launches stayed "pending" and refused a PR; a copied old pass could follow a newer edit).
-    if (l.startsWith('{"type":"api-request')) continue;
-    let entry = null;
-    try { entry = JSON.parse(l); } catch (e) { continue; }
-    if (!entry || /^api-request/.test(String(entry.type || ''))) continue;
-    const notes = taskNotifications(entry);
-    if (notes.length > 0) {
-      for (const note of notes) {
-        // This host reports a finished background command as a task-notification
-        // attachment instead of a TaskOutput result. The command's saved output
-        // file is its collected result; a completion without an exit code stays pending.
-        seq++;
-        if (background.has(note.id) && (note.status !== 'completed' || note.exitCode !== undefined)) {
-          let output = '';
-          try { output = note.file ? fs.readFileSync(note.file, 'utf8') : ''; } catch (e) { output = ''; }
-          settle({ ...background.get(note.id), editSeq: -1, taskId: note.id },
-            { type: 'tool_result', content: output, is_error: false },
-            { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } } });
-        } else if (background.has(note.id)) finishedUncollected.add(note.id);
-        if (helpersRunning.has(note.id) && /^(?:completed|failed|killed|cancelled|canceled|stopped)$/.test(note.status)) helpersRunning.delete(note.id);
-        // An independent reviewer agent finished: credit the run it completed.
-        const agent = reviewerAgents.get(note.id);
-        if (agent && note.status === 'completed') reviewDone(agent.at, String(entry.timestamp || ''));
-        if (agent && note.status === 'completed' && agent.launch > res.lastReviewerRun) { res.lastReviewerRun = agent.launch; res.lastReviewerResult = seq; }
+// The edit (and check) facts of an Edit-like or shell tool use, the same for the session and its helpers
+// (editsOnly: a helper's, whose checks never count; only whether it verifies is kept, for the error rule).
+function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
+  if (EDIT_TOOLS.has(blk.name)) {
+    const p = String(blk.input.file_path || blk.input.notebook_path || '');
+    if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; rec.nonRemoteEditSeq = seq; }
+    return;
+  }
+  const segs = splitSegments(String(blk.input.command || ''));
+  // A failed compound command must be retried as a whole; a success in
+  // another directory or only its last test cannot erase that failure.
+  // Display tails and redirections are not part of the identity (see identitySegments).
+  if (!editsOnly) {
+    rec.verifyKey = String(blk.input.cwd || blk.input.workdir || entry.cwd || '') + '\n' + identitySegments(segs).map(verificationIdentity).join(' ; ');
+    rec.command = commandIdentity(blk.input.command);
+    if (segs.length === 1 && isEvidenceCommand(segs[0])) { rec.evidence = true; rec.verifySeq = seq + 0.001; }
+  }
+  const expanded = expandVariables(segs);
+  // A red-proof bundle (`git stash push; <test>; git stash pop`) restores
+  // the code it set aside, so its stash steps are not a net change; its
+  // own failure accounting (setup/cleanup markers) still applies.
+  const stashBundle = segs.some((s) => /\bgit(?:\.exe)?\s+stash(?:\s+(?:push|save))?(?:\s|$)/i.test(s) && !/\bstash\s+(?:pop|apply|list|show)\b/i.test(s)) &&
+    segs.some((s) => /\bgit(?:\.exe)?\s+stash\s+(?:pop|apply)\b/i.test(s));
+  // The folder a git change lands in: its `-C <dir>`, else the last `cd <dir>`
+  // before it in the same command, else the tool's own working directory.
+  let cdDir = String(blk.input.cwd || blk.input.workdir || entry.cwd || '');
+  for (let i = 0; i < segs.length; i++) {
+    const frac = seq + (i + 1) / 1000;
+    const cd = /^\s*(?:cd|Set-Location|pushd)\s+(?:\/d\s+)?("[^"]+"|'[^']+'|[^\s;&|]+)\s*$/i.exec(String(expanded[i]));
+    if (cd) cdDir = stripQuotes(cd[1]);
+    if (segmentIsVerify(segs[i])) rec.verifySeq = frac;
+    if (!editsOnly && segs.length === 1 && segmentIsProvider(segs[i])) rec.providerSeq = frac;
+    if (!editsOnly && segs.length === 1 && /^git(?:\.exe)?\s+range-diff\s/i.test(String(segs[i]).trim())) rec.rangeDiffSeq = frac;
+    const paths = segmentEditPaths(expanded[i], cdDir).filter((p) => !(stashBundle && p === '<git>' && /\bstash\b/i.test(segs[i])));
+    if (paths.length) {
+      rec.editSeq = frac; rec.editPath = paths[0];
+      if (paths.some((p) => !GIT_CHANGE.test(p))) rec.nonGitEditSeq = frac;
+      if (paths.some((p) => p !== '<git-remote>')) rec.nonRemoteEditSeq = frac;
+      if (paths.some((p) => GIT_CHANGE.test(p))) {
+        const dashC = /\bgit(?:\.exe)?\s+-C\s+("[^"]+"|'[^']+'|\S+)/i.exec(String(expanded[i]));
+        const repo = dashC ? stripQuotes(dashC[1]) : cdDir;
+        if (GIT_CHANGE.test(paths[0])) rec.gitRepo = repo;
+        if (paths.includes('<git-remote>')) rec.remotes.push({ seq: frac, repo });
       }
-      // A bundled notice shares the entry with the user's own words; nothing else there is scanned.
+    }
+  }
+  // A check whose exit code a later part of the command hides is judged by its output alone (H4).
+  if (!editsOnly && rec.verifySeq !== -1 && !rec.evidence) {
+    const hidden = hiddenCheckRunners(String(blk.input.command || ''));
+    if (hidden) rec.hidden = hidden;
+  }
+}
+const emptyRecord = (background) => ({ editSeq: -1, editPath: '', nonGitEditSeq: -1, nonRemoteEditSeq: -1, remotes: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background });
+
+function reviewDone(st, launchAt, doneAt) {
+  if (launchAt && doneAt && !st.reviews.some((r) => r.launchAt === launchAt)) st.reviews.push({ launchAt, doneAt });
+}
+
+// The tool ids a line's tool_result blocks answer (as the host writes them: compact JSON, so quotes
+// inside a result's text are escaped and never match).
+const RESULT_ID = /"tool_use_id":"([^"\\]+)"/g;
+function answersAny(l, maps) {
+  let found = false;
+  for (const m of l.matchAll(RESULT_ID)) { found = true; if (maps.some((map) => map.has(m[1]))) return true; }
+  return !found;   // no id read: judge the whole line
+}
+
+// One line of the session's own transcript.
+function feedLine(st, l) {
+  // The host also writes a copy of each API request (`api-request-blob`): old tool calls,
+  // results and verdicts again, out of order. Copies are not events (2026-11-09: copied
+  // launches stayed "pending" and refused a PR; a copied old pass could follow a newer edit).
+  if (l.startsWith('{"type":"api-request')) return;
+  if (!maybeLine(l)) return;
+  // A result no recorded call waits for changes nothing (most of a long session: Read, Grep and the
+  // like), so it is not parsed (2026-11-12: the first read of a 449 MB session).
+  if (l.includes('"type":"tool_result"') && !answersAny(l, [st.pending, st.helperCalls, st.reviewerCalls, st.stopCalls])) return;
+  let entry = null;
+  try { entry = JSON.parse(l); } catch (e) { return; }
+  if (!entry || /^api-request/.test(String(entry.type || ''))) return;
+  placeHelperEdits(st, entry.timestamp);
+  const res = st.res;
+  const notes = taskNotifications(entry);
+  if (notes.length > 0) {
+    for (const note of notes) {
+      // This host reports a finished background command as a task-notification
+      // attachment instead of a TaskOutput result. The command's saved output
+      // file is its collected result; a completion without an exit code stays pending.
+      st.seq++;
+      if (st.background.has(note.id) && (note.status !== 'completed' || note.exitCode !== undefined)) {
+        let output = '';
+        try { output = note.file ? fs.readFileSync(note.file, 'utf8') : ''; } catch (e) { output = ''; }
+        settle(st, { ...st.background.get(note.id), editSeq: -1, taskId: note.id },
+          { type: 'tool_result', content: output, is_error: false },
+          { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } } });
+      } else if (st.background.has(note.id)) st.finishedUncollected.add(note.id);
+      if (st.helpersRunning.has(note.id) && /^(?:completed|failed|killed|cancelled|canceled|stopped)$/.test(note.status)) st.helpersRunning.delete(note.id);
+      // An independent reviewer agent finished: credit the run it completed.
+      const agent = st.reviewerAgents.get(note.id);
+      if (agent && note.status === 'completed') reviewDone(st, agent.at, String(entry.timestamp || ''));
+      if (agent && note.status === 'completed' && agent.launch > res.lastReviewerRun) { res.lastReviewerRun = agent.launch; res.lastReviewerResult = st.seq; }
+    }
+    // A bundled notice shares the entry with the user's own words; nothing else there is scanned.
+    return;
+  }
+  const msg = entry.message;
+  const content = msg && Array.isArray(msg.content) ? msg.content : (Array.isArray(entry.content) ? entry.content : null);
+  if (!content) return;
+
+  for (const blk of content) {
+    const seq = ++st.seq;
+    if (!blk || typeof blk !== 'object') continue;
+
+    if (blk.type === 'text' && typeof blk.text === 'string' && msg && msg.role === 'assistant') {
+      const plain = blk.text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, '');
+      const g = [...plain.matchAll(GATE_RE)].pop();
+      if (g) { res.lastGate = seq + (g.index + 1) / (plain.length + 1); res.lastGateVerdict = g[1]; res.lastGateAt = String(entry.timestamp || ''); }
+      const rv = [...plain.matchAll(REVIEW_RE)].pop();
+      if (rv) {
+        res.lastReview = seq + (rv.index + 1) / (plain.length + 1); res.lastReviewVerdict = rv[1];
+        res.lastReviewText = plain.slice(rv.index).split('\n')[0];
+      }
+      for (const m of plain.matchAll(RETIRE_RE)) {
+        try {
+          const r = JSON.parse(m[1]);
+          if ([r.failed, r.replacement, r.reason].every((v) => typeof v === 'string' && v.trim())) {
+            st.retirements.push({ seq: seq + (m.index + 1) / (plain.length + 1), failed: namedCommand(r.failed), replacement: namedCommand(r.replacement) });
+          }
+        } catch (e) { /* a malformed retirement retires nothing */ }
+      }
+      for (const m of plain.matchAll(PROBE_RE)) {
+        try {
+          const p = JSON.parse(m[1]);
+          if ([p.command, p.reason].every((v) => typeof v === 'string' && v.trim())) {
+            st.probes.push({ seq: seq + (m.index + 1) / (plain.length + 1), command: namedCommand(p.command) });
+          }
+        } catch (e) { /* a malformed probe declaration covers nothing */ }
+      }
       continue;
     }
-    const msg = entry.message;
-    const content = msg && Array.isArray(msg.content) ? msg.content : (Array.isArray(entry.content) ? entry.content : null);
-    if (!content) continue;
 
-    for (const blk of content) {
-      seq++;
-      if (!blk || typeof blk !== 'object') continue;
-
-      if (blk.type === 'text' && typeof blk.text === 'string' && msg && msg.role === 'assistant') {
-        const plain = blk.text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, '');
-        const g = [...plain.matchAll(GATE_RE)].pop();
-        if (g) { res.lastGate = seq + (g.index + 1) / (plain.length + 1); res.lastGateVerdict = g[1]; res.lastGateAt = String(entry.timestamp || ''); }
-        const rv = [...plain.matchAll(REVIEW_RE)].pop();
-        if (rv) {
-          res.lastReview = seq + (rv.index + 1) / (plain.length + 1); res.lastReviewVerdict = rv[1];
-          res.lastReviewText = plain.slice(rv.index).split('\n')[0];
-        }
-        for (const m of plain.matchAll(RETIRE_RE)) {
-          try {
-            const r = JSON.parse(m[1]);
-            if ([r.failed, r.replacement, r.reason].every((v) => typeof v === 'string' && v.trim())) {
-              retirements.push({ seq: seq + (m.index + 1) / (plain.length + 1), failed: namedCommand(r.failed), replacement: namedCommand(r.replacement) });
-            }
-          } catch (e) { /* a malformed retirement retires nothing */ }
-        }
-        for (const m of plain.matchAll(PROBE_RE)) {
-          try {
-            const p = JSON.parse(m[1]);
-            if ([p.command, p.reason].every((v) => typeof v === 'string' && v.trim())) {
-              probes.push({ seq: seq + (m.index + 1) / (plain.length + 1), command: namedCommand(p.command) });
-            }
-          } catch (e) { /* a malformed probe declaration covers nothing */ }
-        }
-        continue;
+    if (blk.type === 'tool_use' && blk.input && typeof blk.input === 'object') {
+      const rec = emptyRecord(blk.input.run_in_background === true);
+      if (EDIT_TOOLS.has(blk.name) || SHELL_TOOLS.has(blk.name)) {
+        fillToolRecord(rec, blk, entry, seq);
+      } else if ((blk.name === 'TaskStop' || blk.name === 'KillShell') && st.background.has(String(blk.input.task_id || blk.input.shell_id || ''))) {
+        st.stopCalls.set(blk.id, String(blk.input.task_id || blk.input.shell_id));   // judged when its result arrives
+      } else if (blk.name === 'Agent' && REVIEWER_PROMPT.test(String(blk.input.prompt || ''))) {
+        st.reviewerCalls.set(blk.id, seq);                  // agent id arrives with the result
+        st.reviewerAt.set(blk.id, String(entry.timestamp || ''));
+      } else if (blk.name === 'SendMessage' && st.reviewerAgents.has(String(blk.input.to || ''))) {
+        st.reviewerAgents.get(String(blk.input.to)).launch = seq;   // a follow-up review run
+        st.reviewerAgents.get(String(blk.input.to)).at = String(entry.timestamp || '');
+      } else if (blk.name === 'TaskOutput' && st.background.has(blk.input.task_id)) {
+        Object.assign(rec, st.background.get(blk.input.task_id), { editSeq: -1, taskId: blk.input.task_id });
       }
+      if (blk.name === 'Agent') st.helperCalls.set(blk.id, seq);
+      if (rec.editSeq !== -1 || rec.verifySeq !== -1 || rec.providerSeq !== -1 || rec.rangeDiffSeq !== -1) st.pending.set(blk.id, rec);
+      continue;
+    }
 
-      if (blk.type === 'tool_use' && blk.input && typeof blk.input === 'object') {
-        const rec = { editSeq: -1, editPath: '', nonGitEditSeq: -1, nonRemoteEditSeq: -1, remotes: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background: blk.input.run_in_background === true };
-        if (EDIT_TOOLS.has(blk.name)) {
-          const p = String(blk.input.file_path || blk.input.notebook_path || '');
-          if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; rec.nonRemoteEditSeq = seq; }
-        } else if (SHELL_TOOLS.has(blk.name)) {
-          const segs = splitSegments(String(blk.input.command || ''));
-          // A failed compound command must be retried as a whole; a success in
-          // another directory or only its last test cannot erase that failure.
-          // Display tails and redirections are not part of the identity (see identitySegments).
-          rec.verifyKey = String(blk.input.cwd || blk.input.workdir || entry.cwd || '') + '\n' + identitySegments(segs).map(verificationIdentity).join(' ; ');
-          rec.command = commandIdentity(blk.input.command);
-          if (segs.length === 1 && isEvidenceCommand(segs[0])) { rec.evidence = true; rec.verifySeq = seq + 0.001; }
-          const expanded = expandVariables(segs);
-          // A red-proof bundle (`git stash push; <test>; git stash pop`) restores
-          // the code it set aside, so its stash steps are not a net change; its
-          // own failure accounting (setup/cleanup markers) still applies.
-          const stashBundle = segs.some((s) => /\bgit(?:\.exe)?\s+stash(?:\s+(?:push|save))?(?:\s|$)/i.test(s) && !/\bstash\s+(?:pop|apply|list|show)\b/i.test(s)) &&
-            segs.some((s) => /\bgit(?:\.exe)?\s+stash\s+(?:pop|apply)\b/i.test(s));
-          // The folder a git change lands in: its `-C <dir>`, else the last `cd <dir>`
-          // before it in the same command, else the tool's own working directory.
-          let cdDir = String(blk.input.cwd || blk.input.workdir || entry.cwd || '');
-          for (let i = 0; i < segs.length; i++) {
-            const frac = seq + (i + 1) / 1000;
-            const cd = /^\s*(?:cd|Set-Location|pushd)\s+(?:\/d\s+)?("[^"]+"|'[^']+'|[^\s;&|]+)\s*$/i.exec(String(expanded[i]));
-            if (cd) cdDir = stripQuotes(cd[1]);
-            if (segmentIsVerify(segs[i])) rec.verifySeq = frac;
-            if (segs.length === 1 && segmentIsProvider(segs[i])) rec.providerSeq = frac;
-            if (segs.length === 1 && /^git(?:\.exe)?\s+range-diff\s/i.test(String(segs[i]).trim())) rec.rangeDiffSeq = frac;
-            const paths = segmentEditPaths(expanded[i], cdDir).filter((p) => !(stashBundle && p === '<git>' && /\bstash\b/i.test(segs[i])));
-            if (paths.length) {
-              rec.editSeq = frac; rec.editPath = paths[0];
-              if (paths.some((p) => !GIT_CHANGE.test(p))) rec.nonGitEditSeq = frac;
-              if (paths.some((p) => p !== '<git-remote>')) rec.nonRemoteEditSeq = frac;
-              if (paths.some((p) => GIT_CHANGE.test(p))) {
-                const dashC = /\bgit(?:\.exe)?\s+-C\s+("[^"]+"|'[^']+'|\S+)/i.exec(String(expanded[i]));
-                const repo = dashC ? stripQuotes(dashC[1]) : cdDir;
-                if (GIT_CHANGE.test(paths[0])) rec.gitRepo = repo;
-                if (paths.includes('<git-remote>')) rec.remotes.push({ seq: frac, repo });
-              }
-            }
-          }
-        } else if ((blk.name === 'TaskStop' || blk.name === 'KillShell') && background.has(String(blk.input.task_id || blk.input.shell_id || ''))) {
-          stopCalls.set(blk.id, String(blk.input.task_id || blk.input.shell_id));   // judged when its result arrives
-        } else if (blk.name === 'Agent' && REVIEWER_PROMPT.test(String(blk.input.prompt || ''))) {
-          reviewerCalls.set(blk.id, seq);                  // agent id arrives with the result
-          reviewerAt.set(blk.id, String(entry.timestamp || ''));
-        } else if (blk.name === 'SendMessage' && reviewerAgents.has(String(blk.input.to || ''))) {
-          reviewerAgents.get(String(blk.input.to)).launch = seq;   // a follow-up review run
-          reviewerAgents.get(String(blk.input.to)).at = String(entry.timestamp || '');
-        } else if (blk.name === 'TaskOutput' && background.has(blk.input.task_id)) {
-          Object.assign(rec, background.get(blk.input.task_id), { editSeq: -1, taskId: blk.input.task_id });
-        }
-        if (blk.name === 'Agent') helperCalls.set(blk.id, seq);
-        if (rec.editSeq !== -1 || rec.verifySeq !== -1 || rec.providerSeq !== -1 || rec.rangeDiffSeq !== -1) pending.set(blk.id, rec);
-        continue;
-      }
+    if (blk.type === 'tool_result' && blk.tool_use_id && st.helperCalls.has(blk.tool_use_id)) {
+      const launch = st.helperCalls.get(blk.tool_use_id);
+      st.helperCalls.delete(blk.tool_use_id);
+      const t = entry.toolUseResult || {};
+      const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
+      if (id && blk.is_error !== true && t.status !== 'completed') st.helpersRunning.set(id, launch);
+    }
 
-      if (blk.type === 'tool_result' && blk.tool_use_id && helperCalls.has(blk.tool_use_id)) {
-        const launch = helperCalls.get(blk.tool_use_id);
-        helperCalls.delete(blk.tool_use_id);
-        const t = entry.toolUseResult || {};
-        const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
-        if (id && blk.is_error !== true && t.status !== 'completed') helpersRunning.set(id, launch);
-      }
+    if (blk.type === 'tool_result' && blk.tool_use_id && st.reviewerCalls.has(blk.tool_use_id)) {
+      const launch = st.reviewerCalls.get(blk.tool_use_id);
+      st.reviewerCalls.delete(blk.tool_use_id);
+      const t = entry.toolUseResult || {};
+      const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
+      const at = st.reviewerAt.get(blk.tool_use_id) || '';
+      st.reviewerAt.delete(blk.tool_use_id);
+      if (id && blk.is_error !== true) st.reviewerAgents.set(id, { launch, at });
+      if (id && t.status === 'completed') reviewDone(st, at, String(entry.timestamp || ''));
+      // A synchronous reviewer returns its finished report in this result.
+      if (id && t.status === 'completed' && launch > res.lastReviewerRun) { res.lastReviewerRun = launch; res.lastReviewerResult = seq; }
+      continue;
+    }
 
-      if (blk.type === 'tool_result' && blk.tool_use_id && reviewerCalls.has(blk.tool_use_id)) {
-        const launch = reviewerCalls.get(blk.tool_use_id);
-        reviewerCalls.delete(blk.tool_use_id);
-        const t = entry.toolUseResult || {};
-        const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
-        const at = reviewerAt.get(blk.tool_use_id) || '';
-        reviewerAt.delete(blk.tool_use_id);
-        if (id && blk.is_error !== true) reviewerAgents.set(id, { launch, at });
-        if (id && t.status === 'completed') reviewDone(at, String(entry.timestamp || ''));
-        // A synchronous reviewer returns its finished report in this result.
-        if (id && t.status === 'completed' && launch > res.lastReviewerRun) { res.lastReviewerRun = launch; res.lastReviewerResult = seq; }
-        continue;
-      }
+    if (blk.type === 'tool_result' && blk.tool_use_id && st.stopCalls.has(blk.tool_use_id)) {
+      const id = st.stopCalls.get(blk.tool_use_id);
+      st.stopCalls.delete(blk.tool_use_id);
+      const said = String((entry.toolUseResult || {}).message || '') + '\n' + resultText(blk, entry);
+      if (blk.is_error !== true && !userRejected(blk, entry) && st.background.has(id) &&
+          /\bsuccessfully\s+(?:stopped|killed|terminated|cancell?ed)\b/i.test(said)) cancel(st, id);
+      continue;
+    }
 
-      if (blk.type === 'tool_result' && blk.tool_use_id && stopCalls.has(blk.tool_use_id)) {
-        const id = stopCalls.get(blk.tool_use_id);
-        stopCalls.delete(blk.tool_use_id);
-        const said = String((entry.toolUseResult || {}).message || '') + '\n' + resultText(blk, entry);
-        if (blk.is_error !== true && !userRejected(blk, entry) && background.has(id) &&
-            /\bsuccessfully\s+(?:stopped|killed|terminated|cancell?ed)\b/i.test(said)) cancel(id);
-        continue;
-      }
-
-      if (blk.type === 'tool_result' && blk.tool_use_id && pending.has(blk.tool_use_id)) {
-        const rec = pending.get(blk.tool_use_id);
-        pending.delete(blk.tool_use_id);
-        settle(rec, blk, entry);
-      }
+    if (blk.type === 'tool_result' && blk.tool_use_id && st.pending.has(blk.tool_use_id)) {
+      const rec = st.pending.get(blk.tool_use_id);
+      st.pending.delete(blk.tool_use_id);
+      settle(st, rec, blk, entry);
     }
   }
+}
 
-  // A background check stopped with TaskStop never reports back: it is cancelled, neither a
-  // pass nor still running (2026-11-09: two stopped checks stayed "pending" for good and refused
-  // a PR). Only a later pass of the same command clears it here; the push guard also accepts a
-  // later passing evidence receipt of the outgoing tree (lastCancelledVerify).
-  function cancel(id) {
-    const rec = background.get(id);
-    background.delete(id); finishedUncollected.delete(id);
-    const state = verificationStates.get(rec.verifyKey);
-    if (rec.verifySeq !== -1 && state && state.outcome === 'pending' && state.seq === rec.verifySeq) verificationStates.set(rec.verifyKey, { ...state, outcome: 'cancelled' });
-    const provider = providerStates.get(rec.verifyKey);
-    if (rec.providerSeq !== -1 && provider && provider.outcome === 'pending' && provider.seq === rec.providerSeq) providerStates.set(rec.verifyKey, { ...provider, outcome: 'cancelled' });
-  }
+// A background check stopped with TaskStop never reports back: it is cancelled, neither a
+// pass nor still running (2026-11-09: two stopped checks stayed "pending" for good and refused
+// a PR). Only a later pass of the same command clears it here; the push guard also accepts a
+// later passing evidence receipt of the outgoing tree (lastCancelledVerify).
+function cancel(st, id) {
+  const rec = st.background.get(id);
+  st.background.delete(id); st.finishedUncollected.delete(id);
+  const state = st.verificationStates.get(rec.verifyKey);
+  if (rec.verifySeq !== -1 && state && state.outcome === 'pending' && state.seq === rec.verifySeq) st.verificationStates.set(rec.verifyKey, { ...state, outcome: 'cancelled' });
+  const provider = st.providerStates.get(rec.verifyKey);
+  if (rec.providerSeq !== -1 && provider && provider.outcome === 'pending' && provider.seq === rec.providerSeq) st.providerStates.set(rec.verifyKey, { ...provider, outcome: 'cancelled' });
+}
 
-  // Credit a collected result: a tool_result, or a background task's completion.
-  function settle(rec, blk, entry) {
-    if (userRejected(blk, entry)) return;              // nothing ran
-    const isErr = blk.is_error === true;
-    const outcome = verificationResult(blk, entry);
-    // The host names the task in the result's fields or only in its text ("…running in background with ID: b1a2…");
-    // without the id, the finish notice can never be matched and the run stays "running" (2026-11-06).
-    const taskId = entry.toolUseResult?.backgroundTaskId || entry.toolUseResult?.background_task_id || rec.taskId ||
-      (/running in (?:the )?background with ID:\s*([A-Za-z0-9_-]+)/i.exec(resultText(blk, entry)) || [])[1];
-    if (outcome === 'pending' && taskId) background.set(taskId, rec);
-    else if (taskId) background.delete(taskId);
-    if (rec.editSeq !== -1 && !(isErr && rec.verifySeq === -1)) {
-      // An Edit/Write that errored changed nothing; a shell segment that
-      // wrote a file usually did, even if a later segment failed.
-      if (rec.editSeq > res.lastEdit) { res.lastEdit = rec.editSeq; res.lastEditPath = rec.editPath; res.lastGitRepo = GIT_CHANGE.test(rec.editPath) ? rec.gitRepo || '' : ''; }
-      // The last edit that was not a git merge/switch/pull: the same-tree memo falls back to it.
-      if ((rec.nonGitEditSeq ?? -1) > res.lastNonGitEdit) res.lastNonGitEdit = rec.nonGitEditSeq;
-      // The last change that was not a move to a fetched remote ref, and those moves themselves.
-      if ((rec.nonRemoteEditSeq ?? -1) > res.lastNonRemoteEdit) res.lastNonRemoteEdit = rec.nonRemoteEditSeq;
-      for (const c of rec.remotes || []) remoteCheckouts.push(c);
+function creditEdit(st, rec) {
+  const res = st.res;
+  if (rec.editSeq > res.lastEdit) { res.lastEdit = rec.editSeq; res.lastEditPath = rec.editPath; res.lastGitRepo = GIT_CHANGE.test(rec.editPath) ? rec.gitRepo || '' : ''; }
+  // The last edit that was not a git merge/switch/pull: the same-tree memo falls back to it.
+  if ((rec.nonGitEditSeq ?? -1) > res.lastNonGitEdit) res.lastNonGitEdit = rec.nonGitEditSeq;
+  // The last change that was not a move to a fetched remote ref, and those moves themselves.
+  if ((rec.nonRemoteEditSeq ?? -1) > res.lastNonRemoteEdit) res.lastNonRemoteEdit = rec.nonRemoteEditSeq;
+  for (const c of rec.remotes || []) st.remoteCheckouts.push(c);
+}
+
+// Credit a collected result: a tool_result, or a background task's completion.
+function settle(st, rec, blk, entry) {
+  const res = st.res;
+  if (userRejected(blk, entry)) return;              // nothing ran
+  const isErr = blk.is_error === true;
+  const outcome = rec.hidden ? hiddenVerificationResult(blk, entry, rec.hidden) : verificationResult(blk, entry);
+  // The host names the task in the result's fields or only in its text ("…running in background with ID: b1a2…");
+  // without the id, the finish notice can never be matched and the run stays "running" (2026-11-06).
+  const taskId = entry.toolUseResult?.backgroundTaskId || entry.toolUseResult?.background_task_id || rec.taskId ||
+    (/running in (?:the )?background with ID:\s*([A-Za-z0-9_-]+)/i.exec(resultText(blk, entry)) || [])[1];
+  if (outcome === 'pending' && taskId) st.background.set(taskId, rec);
+  else if (taskId) st.background.delete(taskId);
+  // An Edit/Write that errored changed nothing; a shell segment that
+  // wrote a file usually did, even if a later segment failed.
+  if (rec.editSeq !== -1 && !(isErr && rec.verifySeq === -1)) creditEdit(st, rec);
+  if (rec.verifySeq !== -1) {
+    const receipt = rec.evidence ? checkReceipt(blk, entry) : null;
+    const key = receipt?.key || rec.verifyKey;
+    const checkOutcome = rec.evidence && outcome !== 'pending' ? receipt?.outcome || 'failed' : outcome;
+    if (receipt && checkOutcome !== 'pending') {
+      const launch = st.verificationStates.get(rec.verifyKey);
+      if (launch?.outcome === 'pending' && launch.seq === rec.verifySeq) st.verificationStates.delete(rec.verifyKey);
     }
-    if (rec.verifySeq !== -1) {
-      const receipt = rec.evidence ? checkReceipt(blk, entry) : null;
-      const key = receipt?.key || rec.verifyKey;
-      const checkOutcome = rec.evidence && outcome !== 'pending' ? receipt?.outcome || 'failed' : outcome;
-      if (receipt && checkOutcome !== 'pending') {
-        const launch = verificationStates.get(rec.verifyKey);
-        if (launch?.outcome === 'pending' && launch.seq === rec.verifySeq) verificationStates.delete(rec.verifyKey);
-      }
-      const previous = verificationStates.get(key);
-      if (!previous || rec.verifySeq >= previous.seq) verificationStates.set(key, { seq: rec.verifySeq, outcome: checkOutcome, command: rec.command });
-      if (checkOutcome === 'passed') passes.push({ seq: rec.verifySeq, command: rec.command });
+    if (checkOutcome === 'none') {
+      // A hidden exit code and no marker either way proves nothing; its own launch is no longer running (H4).
+      const launch = st.verificationStates.get(key);
+      if (launch?.outcome === 'pending' && launch.seq === rec.verifySeq) st.verificationStates.delete(key);
+    } else {
+      const previous = st.verificationStates.get(key);
+      if (!previous || rec.verifySeq >= previous.seq) st.verificationStates.set(key, { seq: rec.verifySeq, outcome: checkOutcome, command: rec.command });
+      if (checkOutcome === 'passed') st.passes.push({ seq: rec.verifySeq, command: rec.command });
       if (checkOutcome === 'passed') {
         if (receipt && rec.verifySeq > res.lastBoundCheck) { res.completedCheck = receipt.record; res.lastBoundCheck = rec.verifySeq; }
         // Every tree a passing receipt verified: the same tree is the same code wherever it is checked out.
         const tree = receipt && receipt.record && receipt.record.source && String(receipt.record.source.treeAfter || '');
         if (tree && /^[0-9a-f]{40,64}$/i.test(tree) && !res.passedTrees.includes(tree)) res.passedTrees.push(tree);
+        // Every passing receipt, for the push guard: a receipt of the outgoing repository and tree counts
+        // even when a later receipt covered another tree or folder (2026-11-12, audit H8/H15).
+        if (receipt) {
+          const source = receipt.record.source || {};
+          const slash = (v) => typeof v === 'string' ? v.replace(/\\/g, '/') : '';
+          res.passingReceipts.push({ toplevel: slash(source.toplevel), treeBefore: String(source.treeBefore || ''), treeAfter: String(source.treeAfter || ''), cwd: slash(receipt.record.cwd), seq: rec.verifySeq });
+        }
         if (rec.verifySeq > res.lastVerify) res.lastVerify = rec.verifySeq;
-        res.lastVerifyResult = seq;
-      }
-    }
-    if (rec.rangeDiffSeq !== -1 && outcome === 'passed') res.lastRangeDiff = Math.max(res.lastRangeDiff, rec.rangeDiffSeq);
-    if (rec.providerSeq !== -1) {
-      const previous = providerStates.get(rec.verifyKey);
-      if (!previous || rec.providerSeq >= previous.seq) providerStates.set(rec.verifyKey, { seq: rec.providerSeq, outcome });
-      if (outcome === 'passed') {
-        res.lastProviderRun = Math.max(res.lastProviderRun, rec.providerSeq);
-        res.lastProviderResult = seq;
+        res.lastVerifyResult = st.seq;
       }
     }
   }
+  if (rec.rangeDiffSeq !== -1 && outcome === 'passed') res.lastRangeDiff = Math.max(res.lastRangeDiff, rec.rangeDiffSeq);
+  if (rec.providerSeq !== -1) {
+    const previous = st.providerStates.get(rec.verifyKey);
+    if (!previous || rec.providerSeq >= previous.seq) st.providerStates.set(rec.verifyKey, { seq: rec.providerSeq, outcome });
+    if (outcome === 'passed') {
+      res.lastProviderRun = Math.max(res.lastProviderRun, rec.providerSeq);
+      res.lastProviderResult = st.seq;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper agents. Their transcripts sit next to the session's, in
+// <transcript without .jsonl>/subagents/agent-*.jsonl. A helper's code edit changes the code the
+// session ships, so it counts as an edit at its own time (2026-11-12, audit H10: a sonnet-worker's
+// edits were never edits). Only edits: a helper's verdict lines, receipts and check results are not
+// this session's evidence.
+// ---------------------------------------------------------------------------
+
+function helperFolder(transcriptPath) { return String(transcriptPath).replace(/\.jsonl$/i, '') + '/subagents'; }
+
+const HELPER_TOOL = /"name":"(?:Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell)"/;
+function feedHelperLine(st, file, l, pos) {
+  if (l.startsWith('{"type":"api-request')) return;
+  // Only an Edit-like or shell call, or the result of one that edits, can matter here.
+  const call = l.includes('"tool_use"') && HELPER_TOOL.test(l);
+  const ids = l.includes('"tool_result"') ? [...l.matchAll(RESULT_ID)].map((m) => m[1]) : null;
+  if (!call && !(ids && (!ids.length || ids.some((id) => st.helperPending.has(file + '\n' + id))))) return;
+  let entry = null;
+  try { entry = JSON.parse(l); } catch (e) { return; }
+  if (!entry || /^api-request/.test(String(entry.type || '')) || !entry.message || !Array.isArray(entry.message.content)) return;
+  for (const blk of entry.message.content) {
+    if (!blk || typeof blk !== 'object') continue;
+    if (blk.type === 'tool_use' && blk.input && typeof blk.input === 'object' && (EDIT_TOOLS.has(blk.name) || SHELL_TOOLS.has(blk.name))) {
+      const rec = emptyRecord(false);
+      fillToolRecord(rec, blk, entry, 0, true);
+      if (rec.editSeq !== -1) {
+        st.helperPending.set(file + '\n' + blk.id, { editPath: rec.editPath, nonGit: rec.nonGitEditSeq !== -1, nonRemote: rec.nonRemoteEditSeq !== -1,
+          gitRepo: rec.gitRepo, remotes: rec.remotes.map((r) => r.repo), verifies: rec.verifySeq !== -1, at: String(entry.timestamp || '') });
+      }
+    } else if (blk.type === 'tool_result' && blk.tool_use_id && st.helperPending.has(file + '\n' + blk.tool_use_id)) {
+      const key = file + '\n' + blk.tool_use_id;
+      const edit = st.helperPending.get(key);
+      st.helperPending.delete(key);
+      // The same rule as the session's own edits (settle): a rejected or failed edit changed nothing.
+      if (userRejected(blk, entry) || (blk.is_error === true && !edit.verifies)) continue;
+      const t = Date.parse(entry.timestamp || edit.at || '');
+      if (!Number.isFinite(t)) continue;
+      // Kept in time order (then file, then place in the file), so every read order gives the same queue.
+      const item = { t, file, pos, edit };
+      const before = (a, b) => a.t - b.t || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.pos - b.pos;
+      let lo = 0, hi = st.helperEdits.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (before(st.helperEdits[mid], item) <= 0) lo = mid + 1; else hi = mid; }
+      st.helperEdits.splice(lo, 0, item);
+    }
+  }
+}
+
+// Helper edits made before this session entry's time take their place before it. Read order does not
+// matter: the same edits land at the same place however the files grew.
+function placeHelperEdits(st, timestamp) {
+  if (!st.helperEdits.length) return;
+  const t = Date.parse(timestamp || '');
+  if (!Number.isFinite(t)) return;
+  while (st.helperEdits.length && st.helperEdits[0].t < t) creditHelperEdit(st, st.helperEdits.shift());
+}
+function creditHelperEdit(st, { edit }) {
+  const s = ++st.seq;
+  creditEdit(st, { editSeq: s, editPath: edit.editPath, nonGitEditSeq: edit.nonGit ? s : -1, nonRemoteEditSeq: edit.nonRemote ? s : -1,
+    remotes: edit.remotes.map((repo) => ({ seq: s, repo })), gitRepo: edit.gitRepo });
+}
+
+// ---------------------------------------------------------------------------
+// The scan cache: one small file per transcript under <state>/scan-cache/, holding the byte offset
+// already read, the scan state at that offset, and the same for each helper file. It is used only
+// when it is surely the same file and the same code: the transcript is not shorter than the offset,
+// its first and last 4 KB before the offset are unchanged, and the version and the scanner's own
+// files are the same. Anything else, or a cache that does not parse, starts from zero. Writes go
+// through a temp file and a rename, so a reader sees a whole file; two hooks at once: last wins.
+// ---------------------------------------------------------------------------
+
+const SCAN_CACHE_VERSION = 1;
+const MARK_BYTES = 4096;
+const CHECKPOINT_MS = 2000;
+function fileMark(fd, offset) {
+  const crypto = require('crypto');
+  const head = readBytes(fd, 0, Math.min(MARK_BYTES, offset));
+  const edge = readBytes(fd, Math.max(0, offset - MARK_BYTES), Math.min(MARK_BYTES, offset));
+  return crypto.createHash('sha1').update(head).update('|').update(edge).digest('hex');
+}
+// A change to the scanner or the command grammar it uses makes cached decisions stale. With no
+// file to stamp (a test sandbox), nothing is cached.
+function codeStamp() {
+  if (typeof __filename !== 'string' || typeof __dirname !== 'string') return '';
+  try {
+    return [__filename, path.join(__dirname, 'shell-command.cjs'), path.join(__dirname, 'verification-target.cjs')]
+      .map((f) => { const s = fs.statSync(f); return s.size + ':' + s.mtimeMs; }).join('|');
+  } catch (e) { return ''; }
+}
+function cacheFolder() {
+  const state = (proc && proc.env && proc.env.SANAD_STATE_DIR) || path.join(require('os').homedir(), '.claude', 'state');
+  return path.join(state, 'scan-cache');
+}
+function cachedScan(file, transcript, fd, size, stamp) {
+  let c;
+  try { c = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
+  if (!c || c.v !== SCAN_CACHE_VERSION || c.code !== stamp || typeof c.path !== 'string' || c.path.toLowerCase() !== transcript.toLowerCase() ||
+      !Number.isInteger(c.offset) || c.offset < 0 || c.offset > size || !c.helpers || typeof c.helpers !== 'object' || Array.isArray(c.helpers)) return null;
+  for (const h of Object.values(c.helpers)) if (!h || !Number.isInteger(h.offset) || h.offset < 0 || typeof h.mark !== 'string') return null;
+  if (c.offset > 0 && fileMark(fd, c.offset) !== c.mark) return null;
+  const st = restoreState(c.state);
+  return st ? { st, offset: c.offset, helpers: c.helpers } : null;
+}
+function writeCache(file, data) {
+  const tmp = file + '.' + (proc ? proc.pid : 0) + '-' + Math.random().toString(36).slice(2) + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* nothing left to clean */ }
+  }
+}
+// Old sessions' caches go after two weeks; checked when a new cache file is first written.
+function pruneCache(folder) {
+  try {
+    const old = Date.now() - 14 * 24 * 3600 * 1000;
+    for (const name of fs.readdirSync(folder)) {
+      const f = path.join(folder, name);
+      try { if (/\.(?:json|tmp)$/.test(name) && fs.statSync(f).mtimeMs < old) fs.rmSync(f, { force: true }); } catch (e) { /* in use or gone */ }
+    }
+  } catch (e) { /* no folder yet */ }
+}
+
+// Read the new complete lines of each helper file into the state. known: { name: { offset, mark } },
+// updated in place. Returns null when a helper file shrank or was rewritten (its earlier edits are
+// already in the state, so the caller starts over), else { changed, tails } (unfinished last lines).
+function readHelpers(st, transcriptPath, known) {
+  const folder = helperFolder(transcriptPath);
+  let names;
+  try { names = fs.readdirSync(folder).filter((n) => /^agent-[^\\/]+\.jsonl$/i.test(n)).sort(); } catch (e) { names = []; }
+  let changed = false;
+  const tails = [];
+  for (const name of names) {
+    let fd;
+    try { fd = fs.openSync(folder + '/' + name, 'r'); } catch (e) { continue; }
+    try {
+      const size = fs.fstatSync(fd).size;
+      const seen = known[name] || { offset: 0, mark: '' };
+      if (size < seen.offset) return null;
+      if (size === seen.offset) continue;
+      if (seen.offset > 0 && fileMark(fd, seen.offset) !== seen.mark) return null;
+      const { done, tail } = readLines(fd, seen.offset, size, (line, end) => feedHelperLine(st, name, line, end));
+      if (done !== seen.offset) { known[name] = { offset: done, mark: fileMark(fd, done) }; changed = true; }
+      if (tail) tails.push({ name, tail, pos: size });
+    } finally { fs.closeSync(fd); }
+  }
+  return { changed, tails };
+}
+
+function scanTranscript(transcriptPath) {
+  let fd;
+  try { fd = fs.openSync(transcriptPath, 'r'); } catch (e) { return newScanState().res; }
+  try { return scanOpen(String(transcriptPath), fd); } finally { try { fs.closeSync(fd); } catch (e) { /* already closed */ } }
+}
+
+function scanOpen(transcriptPath, fd) {
+  const size = fs.fstatSync(fd).size;
+  const stamp = codeStamp();
+  const transcript = path.resolve(transcriptPath).replace(/\\/g, '/');
+  // The user's own state folder holds caches of real sessions only; anything else (a test's transcript)
+  // is cached only where SANAD_STATE_DIR points.
+  const cacheable = !!stamp && (!!(proc && proc.env && proc.env.SANAD_STATE_DIR) || /\/\.claude\/projects\//i.test(transcript));
+  const file = cacheable ? path.join(cacheFolder(), require('crypto').createHash('sha1').update(transcript.toLowerCase()).digest('hex') + '.json') : '';
+  const cached = file ? cachedScan(file, transcript, fd, size, stamp) : null;
+  let st = cached ? cached.st : newScanState();
+  let offset = cached ? cached.offset : 0;
+  let helpers = cached ? cached.helpers : {};
+  if (file && !cached) pruneCache(path.dirname(file));
+  // A long first read saves its progress every few seconds: if the host stops the hook at its timeout,
+  // the next call continues from there instead of starting over each time (2026-11-12).
+  let saved = cached ? offset : -1, savedAt = Date.now();
+  const save = (at) => {
+    writeCache(file, { v: SCAN_CACHE_VERSION, code: stamp, path: transcript, offset: at, mark: at > 0 ? fileMark(fd, at) : '', helpers, state: saveState(st) });
+    saved = at; savedAt = Date.now();
+  };
+  const checkpoint = (at) => { if (file && Date.now() - savedAt > CHECKPOINT_MS) save(at); };
+  let read = readHelpers(st, transcriptPath, helpers);
+  if (!read) {
+    st = newScanState(); offset = 0; helpers = {};
+    read = readHelpers(st, transcriptPath, helpers) || { changed: true, tails: [] };
+    read.changed = true;
+  }
+  if (read.changed) { saved = -1; checkpoint(offset); }
+  const { done, tail } = readLines(fd, offset, size, (line) => feedLine(st, line), checkpoint);
+  if (file && done !== saved) save(done);
+  // Lines not finished yet (or a file without a final newline) count now and are read again next time.
+  if (tail) feedLine(st, tail);
+  for (const h of read.tails) feedHelperLine(st, h.name, h.tail, h.pos);
+  return finishScan(st);
+}
+
+// The verdicts from a state. Runs on a state that is not saved again.
+function finishScan(st) {
+  // Helper edits later than every session entry read so far happened last.
+  while (st.helperEdits.length) creditHelperEdit(st, st.helperEdits.shift());
+  const res = st.res;
+  const { verificationStates, providerStates, retirements, probes, passes, background, pending, helpersRunning, finishedUncollected, remoteCheckouts, reviews } = st;
   // The same failed check is retired only by its named replacement passing AFTER the line.
   const retired = (state) => retirements.some((r) => r.failed.includes(state.command) && r.seq > state.seq &&
     passes.some((p) => r.replacement.includes(p.command) && p.seq > r.seq));
@@ -854,7 +1488,7 @@ function scanTranscript(transcriptPath) {
 module.exports = {
   EDIT_TOOLS, SHELL_TOOLS,
   isCodePath, splitSegments, tokenize, segmentIsVerify, hasVerify, segmentIsProvider,
-  segmentEditPaths, shellEditPaths, verifyFailed, resultText,
-  readTranscript, scanTranscript,
+  segmentEditPaths, shellEditPaths, shellWriteTargets, verifyFailed, resultText,
+  scanTranscript,
   verificationCommand,
 };

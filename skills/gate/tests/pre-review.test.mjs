@@ -170,6 +170,102 @@ test('a package that lists no lint or type tool owes none', async () => {
   assert.deepEqual(checks.filter(c => / docs/.test(c.name)), []);
 });
 
+// 2026-11-12 (audit C14): with no --lines, --check or --was those parts were left out without a word, and the
+// summary still read "N of N checks passed".
+test('a part left out for a missing option is named as skipped, and is not a failure', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 7;\n');
+  const r = run(repo);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^PRE-REVIEW: 5 of 5 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
+  assert.match(r.stdout, /\n {2}– ticket lines: skipped \(no --lines\)\n {2}– test labels: skipped \(no --check\)\n {2}– size growth: skipped \(no --was\)/);
+  const all = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md', was: 'small' });
+  assert.deepEqual(all.skipped, [], 'every option given: nothing skipped');
+});
+
+test('the project check\'s GAP and NOTE lines show also when it passes', () => {
+  const { repo, write } = fixture({ mechanical: "console.log('GAP — Api/A.cs — new [HttpPost] A.Create has no test naming it'); console.log('NOTE — web/b.ts — read the texts'); console.log('MECHANICAL: 0 bugs, 1 gaps, 1 notes');" });
+  write('web/src/a.ts', 'export const a = 8;\n');
+  const r = run(repo);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /✓ mechanical[^\n]*\n\s+GAP — Api\/A\.cs — new \[HttpPost\] A\.Create has no test naming it\n\s+NOTE — web\/b\.ts — read the texts\n\s+MECHANICAL: 0 bugs, 1 gaps, 1 notes/);
+});
+
+test('a failing check shows every ✗, GAP, BUG, UNTAGGED, UNPROVEN and NOT RUN line, then its last 12 lines', () => {
+  const { repo, write } = fixture({ mechanical: [
+    "console.log('BUG — first.tsx:3 — a value in a title');",
+    "console.log('  ✗ L2 \"a ticket line\" — no test quotes it');",
+    "for (let i = 0; i < 20; i++) console.log('detail ' + i);",
+    "console.log('UNPROVEN: a.test.ts:4 — expect(x).not.toHaveBeenCalled()');",
+    "console.log('MECHANICAL: 1 bugs, 0 gaps, 0 notes');",
+    'process.exit(1);',
+  ].join('\n') });
+  write('web/src/a.ts', 'export const a = 9;\n');
+  const r = run(repo);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const shown = r.stdout.split(/\r?\n/).map((l) => l.trim());
+  for (const l of ['BUG — first.tsx:3 — a value in a title', '✗ L2 "a ticket line" — no test quotes it', 'UNPROVEN: a.test.ts:4 — expect(x).not.toHaveBeenCalled()', 'MECHANICAL: 1 bugs, 0 gaps, 0 notes', 'detail 10', 'detail 19'])
+    assert.equal(shown.filter((s) => s === l).length, 1, l + ' shown once:\n' + r.stdout);
+  assert.equal(shown.includes('detail 9'), false, 'a plain line above the last 12 stays hidden');
+  assert.ok(shown.indexOf('BUG — first.tsx:3 — a value in a title') < shown.indexOf('detail 10'), 'lines keep their order');
+});
+
+// 2026-11-12 (audit C15): types ran only tsconfig.app.json, so vite.config.ts and vitest.config.ts (in
+// tsconfig.node.json) were never type checked, while `tsc -b` in the build checks both.
+test('types run for every project the root tsconfig references, each under its own name', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, git, write } = fixture();
+  const refs = '{\n  // the two projects, as Vite writes them\n  "$schema": "https://json.schemastore.org/tsconfig",\n  "files": [],\n  "references": [\n    { "path": "./tsconfig.app.json" },\n    { "path": "./tsconfig.node.json" },\n  ],\n}\n';
+  write('web/tsconfig.json', refs);
+  write('web/tsconfig.node.json', '{}\n');
+  write('app/package.json', '{"name":"app","devDependencies":{"eslint":"^9.0.0","typescript":"~5.9.0"}}\n');
+  write('app/tsconfig.json', refs);
+  write('app/src/b.ts', 'export const b = 1;\n');
+  git('add', '-A'); git('commit', '-qm', 'two projects'); git('branch', '-f', 'base');
+  write('web/src/a.ts', 'export const a = 10;\n');
+  write('app/src/b.ts', 'export const b = 2;\n');
+  const { checks } = planChecks({ repo, base: 'base', node: process.execPath, remote: { host: 'pc2', repo: 'C:/r/App', node: 'node' } });
+  const here = checks.filter((c) => c.name.startsWith('types web'));
+  assert.deepEqual(here.map((c) => c.name), ['types web (app)', 'types web (node)']);
+  assert.deepEqual(here.map((c) => c.args[c.args.indexOf('-p') + 1]), ['tsconfig.app.json', 'tsconfig.node.json']);
+  assert.notEqual(here[0].args.at(-1), here[1].args.at(-1), 'each project keeps its own build info');
+  const there = checks.filter((c) => c.name.startsWith('types app'));
+  assert.deepEqual(there.map((c) => c.name), ['types app (app, on pc2)', 'types app (node, on pc2)']);
+  assert.match(there[1].args.at(-1), /tsc -p tsconfig\.node\.json --noEmit/);
+  const r = run(repo);
+  assert.match(r.stdout, /✓ types web \(app\)/);
+  assert.match(r.stdout, /✓ types web \(node\)/);
+  // tsconfig is JSON with comments: a BOM, a // inside a string, a block comment and trailing commas.
+  const { readJsonc } = await import('../scripts/pre-review.mjs');
+  const jsonc = path.join(repo, 'web', 'odd.json');
+  fs.writeFileSync(jsonc, String.fromCharCode(0xfeff) + '{"a": "x // y", /* note, */ "b": [1, 2,], // end\n}');
+  assert.deepEqual(readJsonc(jsonc), { a: 'x // y', b: [1, 2] });
+  assert.equal(readJsonc(path.join(repo, 'web', 'missing.json')), null);
+});
+
+test('ESLint fails on a warning, and the C# format check also gets changed project files', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, git, write } = fixture();
+  write('Api/.config/dotnet-tools.json', '{"tools":{"csharpier":{"version":"1.3.0","commands":["csharpier"]}}}\n');
+  write('Api/Api.csproj', '<Project />\n');
+  write('Api/Directory.Build.props', '<Project />\n');
+  write('Api/Build.targets', '<Project />\n');
+  write('Api/A.cs', 'class A {}\n');
+  git('add', '-A'); git('commit', '-qm', 'api'); git('branch', '-f', 'base');
+  write('Api/Api.csproj', '<Project>\n</Project>\n');
+  write('Api/Directory.Build.props', '<Project>\n</Project>\n');
+  write('Api/Build.targets', '<Project>\n</Project>\n');
+  write('web/src/a.ts', 'export const a = 11;\n');
+  const { checks } = planChecks({ repo, base: 'base', node: process.execPath, remote: null });
+  const lint = checks.find((c) => c.name.startsWith('lint web'));
+  assert.equal(lint.args.includes('--max-warnings'), false, 'old warnings in a touched file must not fail the task');
+  const format = checks.filter((c) => c.name.startsWith('format'));
+  assert.equal(format.length, 1);
+  assert.deepEqual(format[0].args, ['csharpier', 'check', 'Api.csproj', 'Build.targets', 'Directory.Build.props']);
+  assert.equal(format[0].name, 'format Api (3 project files)');
+});
+
 // The clone on the test machine is one folder: a sync while another task's check runs there would change
 // the code under that check.
 test('another task whose check runs on the test machine now is seen; this task, a finished or a dead one is not', async () => {

@@ -183,3 +183,21 @@ Red gate → back to Step 3, fix, re-gate. Never carry a red gate forward.
 ## Step 5 — Ask to ship
 
 Present the teach-back brief and ask, per `/ship` — it owns the brief, the draft-PR flow and the integration-branch rule. **Wait for the explicit yes.** No yes → the loop ends with the brief on the table. A "yes" to the task was never a "yes" to the push. After the push, log the task line in `memory/task-metrics.md` (blockers found after push start at 0 and are the quality metric).
+
+## Tool behavior since 2026-11-12 (release sanad-batch1-wrong-results)
+
+The full check of 2026-11-12 found places where a tool said "passed" when it had not. The tools changed; work with them like this.
+
+- **One clone on the test machine.** Every worktree of a repository shares it. `remote-sync.sh` answers `REMOTE-BUSY` (exit 11) while another folder's check runs in that clone or another folder's browser-check app is served from it: wait for it, or stop that app (`remote-web.sh stop` in its folder). `REMOTE-DIRTY` also counts files there that are not in git. A check run over ssh in the clone (`evidence.mjs`) first asks the clone which code it holds: other code → the command does not start ("run remote-sync.sh, then the check again"); code swapped during the run → the receipt fails.
+- **red-proof.mjs.**
+  - `RED-PROOF: ENVIRONMENT ✗` (exit 6): the database or the machine failed, not the tests. Fix the machine (`remote-preflight.sh --db`) and run the same proof again; do not touch the tests.
+  - The old code is RED only when a named test fails. A run with no test, or a runner whose failures are not named, is NOT RED. A failure by a product error counts and the line says so: check it is the bug.
+  - `BREAK INVALID ✗`: the break does not compile or run, or changes nothing. Write a break that changes one rule.
+  - A `mustFail` text is part of a test's OWN title (not a describe or file name), and every test with that text must fail.
+  - `--files` names product files only; a product file that differs from `--old` and is missing there is named in a WARNING.
+  - `--log` is emptied at the start; its first line names the code the proof ran on.
+  - The proof record credits a "nothing happens" check only when its own test file holds a test that a caught break named. A proof with no breaks records nothing.
+- **review-brief.mjs.** Give `--proof-log` once per proof (server and page). The brief lists every changed file, new ones not yet in git included. The size used is the larger of `--size` and the measured one.
+- **size-check.mjs.** Callers are counted by the declaring type (C#) and by the import path (JS), and signals read code only (no comments, no text keys). A change in a file named like an access file, or under an Auth or Security folder, is an access change.
+- **pre-review.mjs.** A ticket line quoted only in an older, unchanged test fails ("quoted only in an older test"): quote it above a test this change adds or edits. A quote or a `[Cn]` tag on a skipped test does not count. Checks left out for a missing option are listed as "skipped".
+- **Stop and push guards.** A check whose exit code is hidden (`| head`, `| grep`, `; echo`, `$(…)`) counts only when its output shows the runner's own pass line; run checks plainly. Edits by helper agents, deleted code files and formatter runs count as edits. A command sent through ssh or a here-document is read like a local one: a push or a destructive command inside it asks first.
