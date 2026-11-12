@@ -19,7 +19,11 @@ import path from 'node:path';
 const [top, host, remoteRepo] = process.argv.slice(2);
 if (!top || !host || !remoteRepo) process.exit(0);
 const flat = (text) => String(text || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-const same = (a, b) => flat(path.resolve(String(a))) === flat(path.resolve(String(b)));
+// Two names of one folder are the same folder: the 8.3 short name of a temp folder (C:\Users\RUNNER~1\…,
+// seen on the CI machine the day this shipped), a link, another letter case. The real path decides; a
+// folder that is gone keeps its written name.
+const real = (p) => { try { return fs.realpathSync.native(String(p)); } catch { return path.resolve(String(p)); } };
+const same = (a, b) => flat(real(a)) === flat(real(b));
 const alive = (pid) => { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 const state = process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state');
 const lockDir = process.env.SANAD_CHECK_LOCK_DIR || path.join(state, 'check-locks');
