@@ -7,7 +7,9 @@
 //   - exactly one commit (none yet passes, with a note: the check runs again before the push)
 //   - its subject is a Conventional Commit: type(scope): text, at most 72 characters
 //   - the subject ends with exactly one ticket ID in brackets, e.g. (TUW-225): one task per PR
-// A repository without tickets turns the ID part off: git config sanad.ticketRequired false.
+// A repository without tickets turns the ID part off: git config sanad.ticketRequired false. One task the
+// user called "no ticket" turns it off for its branch: git config branch.<branch>.sanadNoTicket true
+// (lines.mjs --no-ticket writes it).
 //
 // Usage: node check-commits.mjs [--repo <path>] [--base <ref>]
 // Exit 0: all clear. 1: a rule is broken (each printed). 2: usage error.
@@ -46,7 +48,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const from = git(top, ['merge-base', base, 'HEAD']);
   if (!from) { console.error('check-commits: no merge base with ' + base); process.exit(2); }
   const commits = (git(top, ['rev-list', '--reverse', `${from}..HEAD`]) || '').split(/\r?\n/).filter(Boolean);
-  const ticketRequired = git(top, ['config', '--get', 'sanad.ticketRequired']) !== 'false';
+  // A task the user called "no ticket" (lines.mjs --no-ticket marks its branch, 2026-11-13): said once, the
+  // check does not ask again.
+  const branch = git(top, ['symbolic-ref', '--short', '-q', 'HEAD']) || '';
+  const noTicket = !!branch && git(top, ['config', '--get', `branch.${branch}.sanadNoTicket`]) === 'true';
+  const ticketRequired = !noTicket && git(top, ['config', '--get', 'sanad.ticketRequired']) !== 'false';
   const problems = [];
   if (commits.length > 1) problems.push(`${commits.length} commits since ${base}: squash them into one before the push (one task, one commit per PR)`);
   for (const c of commits) for (const p of subjectProblems(git(top, ['log', '-1', '--format=%s', c]) || '', { ticketRequired })) problems.push(`${c.slice(0, 10)}: ${p}`);

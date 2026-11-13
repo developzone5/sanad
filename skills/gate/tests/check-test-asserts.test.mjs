@@ -60,6 +60,28 @@ test('the command: an unproven "nothing happens" check fails until a break run p
   assert.match(r.stdout, /UNTAGGED: check line C2 has no new test tagged \[C2\]/);
 });
 
+// 2026-11-13: run before the proof, the check skips only the proof part: tags, ranges and non-null reads
+// are still judged, so a label fixed now does not void a proof already run.
+test('the command with --before-proof: an unproven "nothing happens" check passes; an untagged check line still fails', () => {
+  const repo = fs.mkdtempSync(path.join(root, 'before-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid'); git('config', 'core.autocrlf', 'false');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n'); git('add', '-A'); git('commit', '-qm', 'base');
+  fs.mkdirSync(path.join(repo, 'src'));
+  fs.writeFileSync(path.join(repo, 'src/form.test.ts'), "it('[C1] saves nothing', () => { expect(api.create).not.toHaveBeenCalled(); });\n");
+  const check = path.join(repo, '..', 'before-check.md'); fs.writeFileSync(check, '- saves nothing\n');
+  const run = (...extra) => spawnSync(process.execPath, [script, '--repo', repo, '--base', 'main', '--check', check, ...extra], { encoding: 'utf8', windowsHide: true, env: process.env });
+  assert.equal(run().status, 1, 'without the flag the proof part still fails');
+  let r = run('--before-proof');
+  assert.equal(r.status, 0, r.stdout);
+  assert.doesNotMatch(r.stdout, /UNPROVEN/);
+  assert.match(r.stdout, /TEST ASSERTS: none \(1 "nothing happens" check\(s\): proof judged after the proof run\)/);
+  fs.writeFileSync(check, '- saves nothing\n- shows once\n');
+  r = run('--before-proof');
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /UNTAGGED: check line C2 has no new test tagged \[C2\]/);
+});
+
 // 2026-11-12 (S4/C5/S8): one record cleared every "nothing happens" check of both stacks; a frontend
 // proof cleared backend checks, and a product change after the proof kept clearing them.
 test('the command: a check counts as proven only when its own test file is in a current entry; a changed break target voids the entry', () => {

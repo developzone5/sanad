@@ -46,3 +46,26 @@ test('the command: no commit yet passes, one clean commit passes, two commits or
   git('reset', '-q', '--soft', 'HEAD~2'); git('commit', '-qm', 'docs: no ticket here');
   assert.equal(run().status, 0, 'a repository without tickets can turn the ID part off');
 });
+
+// 2026-11-13: a task the user called "no ticket" failed this check, and was told to it by hand.
+test('the command: a branch marked no-ticket by lines.mjs needs no ticket ID; another branch still does', () => {
+  const repo = fs.mkdtempSync(path.join(root, 'noticket-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid');
+  const commit = (file, subject) => { fs.writeFileSync(path.join(repo, file), file); git('add', '-A'); git('commit', '-qm', subject); };
+  commit('base.txt', 'chore: base');
+  git('switch', '-q', '-c', 'fix/no-ticket');
+  commit('a.txt', 'fix(exams): name the right section in the notice');
+  const run = () => spawnSync(process.execPath, [script, '--repo', repo, '--base', 'main'], { encoding: 'utf8', windowsHide: true });
+  assert.equal(run().status, 1, 'before the mark the ID is asked for');
+  const words = path.join(repo, '..', 'noticket-words.txt');
+  fs.writeFileSync(words, 'The notice can name the wrong section.\n');
+  const lines = spawnSync(process.execPath, [path.join(path.dirname(script), 'lines.mjs'), '--from', words, '--out', path.join(repo, '..', 'noticket-notes', 'lines.md'), '--no-ticket', '--repo', repo], { encoding: 'utf8', windowsHide: true });
+  assert.equal(lines.status, 0, lines.stdout + lines.stderr);
+  assert.match(lines.stdout, /^NO TICKET: branch fix\/no-ticket/m);
+  const r = run();
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /COMMITS: one clean commit/);
+  git('switch', '-q', '-c', 'fix/other');
+  assert.equal(run().status, 1, 'the mark belongs to its own branch only');
+});

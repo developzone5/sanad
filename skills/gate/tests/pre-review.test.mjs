@@ -98,6 +98,20 @@ test('places: the list is searched again first, every place needs an outcome, an
   assert.deepEqual(check.args.slice(1), ['--refresh', list, '--repo', repo, '--check', list, '--check-lines', 'c.md']);
 });
 
+// 2026-11-13: before the proof, the test asserts check skips only its proof part.
+test('--before-proof passes the flag to the test asserts check only, and labels the summary', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 2;\n');
+  const before = planChecks({ repo, base: 'base', node: process.execPath, remote: null, beforeProof: true }).checks;
+  assert.ok(before.find(c => c.name === 'test asserts').args.includes('--before-proof'));
+  assert.ok(before.filter(c => c.name !== 'test asserts').every(c => !(c.args || []).includes('--before-proof')));
+  const after = planChecks({ repo, base: 'base', node: process.execPath, remote: null }).checks;
+  assert.ok(!after.find(c => c.name === 'test asserts').args.includes('--before-proof'));
+  const r = run(repo, ['--before-proof']);
+  assert.match(r.stdout, /^PRE-REVIEW \(before the proof\): /);
+});
+
 // 2026-11-10 (PR #767): two C# files from an earlier commit failed CI's format check after the push.
 test('changed C# files get the project CSharpier check, from the folder whose tool manifest lists it', async () => {
   const { planChecks } = await import('../scripts/pre-review.mjs');

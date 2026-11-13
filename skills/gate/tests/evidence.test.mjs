@@ -98,6 +98,8 @@ test('a source-bound run holds a lock on its repository while it runs, and relea
   assert.equal(seen[0].runId, bound.runId);
   assert.ok(Number.isInteger(seen[0].pid));
   assert.ok(Date.parse(seen[0].expiresAt) > Date.parse(seen[0].startedAt));
+  // 2026-11-13: the lock names when its process started, so a later process given the same id is told apart.
+  assert.ok(Date.parse(seen[0].pidStartedAt) <= Date.parse(seen[0].startedAt), 'the lock names its process start: ' + JSON.stringify(seen[0]));
   assert.deepEqual(fs.readdirSync(lockDir), [], 'released when the run ends');
   const failed = await runCommand({ executable: process.execPath, args: ['-e', 'process.exitCode = 3'], cwd: repo, outputRoot: root });
   assert.equal(failed.status, 'failed');
@@ -145,6 +147,23 @@ test('CLI returns the native exit instead of its summary exit', () => {
   fs.writeFileSync(spec, JSON.stringify({ executable: process.execPath, args: ['-e', 'console.log("before failure");process.exitCode=9'], cwd: root, outputRoot: root }));
   const run = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/evidence.mjs', import.meta.url)), '--spec', spec], { encoding: 'utf8', windowsHide: true });
   assert.equal(run.status, 9); assert.match(run.stdout, /CHECK_COMPLETED/);
+});
+// 2026-11-13: a full suite's output was cut in the middle, and its failing test could not be seen.
+test('CLI: a failed check prints its totals and failing tests above the receipt line', () => {
+  const spec = path.join(root, 'spec-summary.json');
+  const body = 'for (let i = 0; i < 400; i++) console.log("  ok " + i); console.log(" FAIL  src/a.test.ts > [C1] names the part"); console.log(" Test Files  1 failed | 9 passed (10)"); process.exitCode = 1';
+  fs.writeFileSync(spec, JSON.stringify({ executable: process.execPath, args: ['-e', body], cwd: root, outputRoot: root }));
+  const script = fileURLToPath(new URL('../scripts/evidence.mjs', import.meta.url));
+  const failed = spawnSync(process.execPath, [script, '--spec', spec], { encoding: 'utf8', windowsHide: true });
+  assert.equal(failed.status, 1);
+  const lines = failed.stdout.trim().split(/\r?\n/);
+  assert.match(lines[0], /^CHECK_SUMMARY — full output: .+stdout\.log$/);
+  // This folder is no git repository, so the run also names that reason; the runner's lines follow it.
+  assert.deepEqual(lines.slice(1, 4), ['  reason: Cannot bind source: cwd is not an accessible Git repository.',
+    '  Test Files  1 failed | 9 passed (10)', '  FAIL  src/a.test.ts > [C1] names the part']);
+  assert.ok(!lines.some(l => /ok 3\d\d/.test(l)), 'the 400 passing lines are not repeated');
+  assert.match(lines[lines.length - 1], /^CHECK_COMPLETED \{/, 'the receipt stays the last line');
+  // A passed check prints no summary: run-summary.test.mjs (summaryLines of a passed receipt is empty).
 });
 test('HTTP asserts expected rejection, code and persisted state and rejects false smoke success', async () => {
   let stored = 'hidden';

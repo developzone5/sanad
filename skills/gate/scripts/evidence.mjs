@@ -119,14 +119,16 @@ function sourceTree(toplevel) {
 // and voids the whole run (2026-11-05: a full suite was lost twice that way). The
 // run holds a lock file for that time; hooks/check-lock-guard.js reads the same
 // folder and refuses such an edit. A lock is a guard rail, never a reason to
-// refuse the check, so any lock error is ignored.
+// refuse the check, so any lock error is ignored. `pidStartedAt` is when this process started (2026-11-13:
+// on a CI runner a finished check's process id went to the next process at once, and its lock looked
+// alive): the guard reads when the process now holding that id started, and a later start is another process.
 export function checkLockDir() { return process.env.SANAD_CHECK_LOCK_DIR || path.join(os.homedir(), '.claude', 'state', 'check-locks'); }
 function takeLock(receipt, timeoutMs) {
   try {
     const dir = checkLockDir();
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, receipt.runId + '.json');
-    fs.writeFileSync(file, JSON.stringify({ toplevel: receipt.source.toplevel, pid: process.pid, runId: receipt.runId, startedAt: receipt.startedAt,
+    fs.writeFileSync(file, JSON.stringify({ toplevel: receipt.source.toplevel, pid: process.pid, pidStartedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(), runId: receipt.runId, startedAt: receipt.startedAt,
       expiresAt: new Date(Date.now() + timeoutMs + 60000).toISOString(), command: [receipt.executable, ...receipt.args].join(' ').slice(0, 300) }), { flag: 'wx' });
     return file;
   } catch { return null; }
@@ -282,6 +284,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const spec = path.resolve(process.argv[3]);
     if (fs.statSync(spec).size > 64000) throw new Error('Verification specification exceeds 64 KB.');
     const result = await runCommand(JSON.parse(fs.readFileSync(spec, 'utf8')));
+    // A failed check names its totals and failing tests here, read from its saved logs (run-summary.mjs,
+    // 2026-11-13); the receipt line stays last and unchanged.
+    const { summaryLines } = await import('./run-summary.mjs');
+    for (const line of summaryLines(result)) process.stdout.write(redact(line) + '\n');
     process.stdout.write('CHECK_COMPLETED ' + JSON.stringify(result) + '\n');
     process.exitCode = result.status === 'passed' ? 0 : result.nativeExitCode || 1;
   } catch (error) { process.stderr.write('CHECK_FAILED ' + redact(error.message) + '\n'); process.exitCode = 1; }

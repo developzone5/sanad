@@ -29,7 +29,10 @@
 // A part left out because its option is missing (--lines, --check, --was) is printed as skipped.
 // A .NET change is built and tested by the test step, not here.
 //
-// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--node <path>]
+// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--node <path>] [--before-proof]
+//   --before-proof (2026-11-13): run right before red-proof.mjs. Everything runs except the proof part of
+//   the test asserts check. A label, quote or commit fixed now does not void a proof; run it again after the
+//   proof (Step 3.5), where every part runs.
 //   --base defaults to origin/<sanad.integration | staging>; --node (or `git config sanad.node`)
 //   is the Node that runs the package tools.
 // Exit 0: every check passed. 1: a check failed. 2: usage error.
@@ -145,7 +148,7 @@ function remoteLine(remote, rel, words) {
 const sshArgs = (remote, line) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=30', remote.host, line];
 
 // `remote`: the test machine (remoteOf); undefined reads it from git config, null means none.
-export function planChecks({ repo, base, was, lines, check, places, node, remote }) {
+export function planChecks({ repo, base, was, lines, check, places, node, remote, beforeProof }) {
   const files = changedFiles(repo, base);
   const checks = [];
   if (remote === undefined) remote = remoteOf(repo);
@@ -202,7 +205,7 @@ export function planChecks({ repo, base, was, lines, check, places, node, remote
     checks.push({ name: `format ${name} (${what})`, cmd: 'dotnet', args: ['csharpier', 'check', ...list], cwd: dir });
   }
   if (lines) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
-  checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : [])], cwd: repo });
+  checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : []), ...(beforeProof ? ['--before-proof'] : [])], cwd: repo });
   checks.push({ name: 'commits', cmd: process.execPath, args: [path.join(here, 'check-commits.mjs'), '--repo', repo, '--base', base], cwd: repo });
   checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : [])], cwd: repo, show: true });
   // 2026-11-12: the list is searched again in this folder before the check, so a place that appeared after
@@ -303,7 +306,8 @@ export async function preReview(opts) {
     if (owed.skipped) skipped.push(owed.skipped); else results.push(owed.result);
   }
   const skippedText = skipped.length ? ` · ${skipped.length} skipped: ${skipped.map(s => s.name).join(', ')}` : '';
-  const lines = [`PRE-REVIEW: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed${skippedText} · ${files.length} changed file(s) · ${opts.repo}`];
+  const label = opts.beforeProof ? 'PRE-REVIEW (before the proof)' : 'PRE-REVIEW';
+  const lines = [`${label}: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed${skippedText} · ${files.length} changed file(s) · ${opts.repo}`];
   if (synced) lines.push(synced);
   for (const r of results) {
     lines.push(`  ${r.code === 0 ? '✓' : '✗'} ${r.name}${r.notRun ? ' — NOT RUN' : ` (${(r.ms / 1000).toFixed(1)} s)`}`);
@@ -320,6 +324,7 @@ function parse(argv) {
   const o = {};
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
+    if (k === '--before-proof') { o.beforeProof = true; continue; }
     if (!['--repo', '--base', '--was', '--lines', '--check', '--places', '--node'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
@@ -333,11 +338,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (!repo) throw new Error('not inside a git repository: ' + (o.repo || process.cwd()));
     const integration = git(repo, ['config', '--get', 'sanad.integration']) || 'staging';
     const node = o.node || git(repo, ['config', '--get', 'sanad.node']) || process.execPath;
-    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), node });
+    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), node, beforeProof: !!o.beforeProof });
     process.stdout.write(text + '\n');
     process.exitCode = ok ? 0 : 1;
   } catch (error) {
-    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--node <path>]\n');
+    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--node <path>] [--before-proof]\n');
     process.exitCode = 2;
   }
 }

@@ -366,17 +366,36 @@ const SHARED = /^\s*(?:export\b|(?:public|internal|protected)\b)/;
 // (2026-11-12: the rest were dropped without a word).
 const MAX_SYMBOLS = 12;
 export function changedSymbols(repo, files) { return allChangedSymbols(repo, files).slice(0, MAX_SYMBOLS); }
-function allChangedSymbols(repo, files) {
-  const names = new Map();
-  const keep = (n, f, line, at) => { if (n && !names.has(n)) names.set(n, { file: f.name, shared: SHARED.test(line), at }); };
+// `moved` collects the changed functions whose body moved into a new function (movedTo): they are not kept.
+function allChangedSymbols(repo, files, moved = []) {
+  const names = new Map(), judged = new Map();
+  let added = null;
+  const addedOnce = () => (added ||= addedFunctions(repo, files));
+  const keep = (n, f, line, at) => {
+    if (!n) return;
+    const key = f.name + ':' + at;
+    if (!judged.has(key)) {
+      const to = movedTo(repo, f, at, addedOnce);
+      judged.set(key, to);
+      if (to) moved.push({ name: n, file: f.name, to });
+    }
+    if (!judged.get(key) && !names.has(n)) names.set(n, { file: f.name, shared: SHARED.test(line), at });
+  };
   for (const f of files) {
     if (KIND(f.name) !== 'code' || !CODE.test(f.name)) continue;
     const lines = fileText(repo, f.name).split(/\r?\n/);
+    // C# reads a signature over several lines and an expression body (wide), and an attribute line belongs to
+    // the method under it (2026-11-13: CSharpier's long signatures hid the method and its callers).
+    const cs = CS.test(f.name);
     for (const h of f.hunks) {
       if (commentOnlyHunk(repo, f, h)) continue;
       const from = Math.max(0, h.start - 1), to = Math.min(lines.length, from + Math.max(h.count, 1));
-      for (let i = from; i < to; i++) keep(defName(lines[i]), f, lines[i], i);
-      const around = enclosingDef(lines, from, to);
+      for (let i = from; i < to; i++) {
+        keep(defName(lines[i]), f, lines[i], i);
+        const under = cs ? attributeTarget(lines, i) : -1;
+        if (under >= 0) keep(defName(lines[under]), f, lines[under], under);
+      }
+      const around = enclosingDef(lines, from, to, { wide: cs });
       if (around.name) keep(around.name, f, lines[around.at], around.at);
     }
   }
@@ -388,9 +407,9 @@ function allChangedSymbols(repo, files) {
  * there (brackets opened since its line are not all closed). Scanned to the top of the file, so a change deep
  * in a large component still names that component; a sibling helper that ended before is skipped.
  * `{ name, at }`, or `{ name: '', at: -1 }` at the top level. Extracted from allChangedSymbols unchanged
- * (2026-11-12), so places.mjs names the function a hit sits in the same way. `wide` (places.mjs only; off for
- * the size check, whose answers stay as they were) also reads a signature over several lines and an
- * expression body (bodyAfterSignature).
+ * (2026-11-12), so places.mjs names the function a hit sits in the same way. `wide` (places.mjs, and the size
+ * check for C# since 2026-11-13) also reads a signature over several lines and an expression body
+ * (bodyAfterSignature).
  */
 function enclosingDef(lines, from, to, { wide = false } = {}) {
   // s[j] = brackets opened from line j down to the lines and still open there. A bracket opened on line j
@@ -432,13 +451,20 @@ function parenBalance(line) {
 // (2026-11-12: the three EnsurePublishInput calls of AssignmentService.cs sat in three such methods).
 function bodyAfterSignature(lines, i) {
   let open = 0;
+  const name = defName(lines[i]);
   for (let k = i; k < Math.min(lines.length, i + 40); k++) {
+    const before = open;
     open += parenBalance(lines[k]);
     if (open > 0) continue;
     const t = String(lines[k] || '').replace(/\/\/.*$/, '').trim(), next = String(lines[k + 1] || '').trim();
     if (t.endsWith('{')) return { block: k };
     if (next === '{') return { block: k + 1 };
-    const arrow = /=>/.test(t.slice(Math.max(0, t.lastIndexOf(')')))) ? k : next.startsWith('=>') ? k + 1 : -1;
+    // `=>` right after the parameter list (a return type or a C# `where` between), or after the line's last `)`
+    // as before (a return type with `{ … }` in it). 2026-11-13: `… Shift(DateTime at) => Clock.Round(at)` with
+    // `.AddMinutes(…)` on the next line has its last `)` inside the body.
+    const rest = afterParameters(k === i && name ? t.slice(Math.max(0, t.indexOf(name))) : t, before);
+    const arrowHere = /^\s*(?:(?::|where\b)[^{;]*?)?=>/.test(rest) || /=>/.test(t.slice(Math.max(0, t.lastIndexOf(')'))));
+    const arrow = arrowHere ? k : next.startsWith('=>') ? k + 1 : -1;
     if (arrow < 0) return null;
     let depth = 0;
     for (let m = arrow; m < Math.min(lines.length, arrow + 60); m++) {
@@ -448,6 +474,182 @@ function bodyAfterSignature(lines, i) {
     return null;
   }
   return null;
+}
+
+// The text after the `)` that closes a parameter list on this line; `open` = parentheses still open before it.
+function afterParameters(line, open) {
+  const code = String(line || '').replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '');
+  for (let c = 0, seen = open > 0; c < code.length; c++) {
+    if (code[c] === '(') { open++; seen = true; } else if (code[c] === ')' && --open === 0 && seen) return code.slice(c + 1);
+  }
+  return '';
+}
+
+// C#: the line of the definition that an attribute line (`[HttpPost("x")]`, one of several stacked, or the first
+// line of one that runs over several lines) sits above; -1 when line i is no attribute or no definition follows.
+function attributeTarget(lines, i) {
+  let depth = 0;
+  for (let k = i; k < Math.min(lines.length, i + 30); k++) {
+    const line = String(lines[k] || '');
+    if (depth === 0) {
+      if (k > i && defName(line)) return k;
+      if (!/^\s*\[/.test(line)) return -1;
+    }
+    for (const c of codeOnly(line)) { if (c === '[') depth++; else if (c === ']') depth--; }
+  }
+  return -1;
+}
+
+// A moved body is not a change (2026-11-13, PR #773: HomeworkLifecycle.MinuteOf became a one-line call to a new
+// ApiInstant.MinuteOf holding the same code; counted as a change, such a method brings all its callers). Code is
+// read as tokens: words, numbers, whole strings and single marks; spaces and comments are dropped.
+const TOKEN = /\s+|\/\/[^\n]*|\/\*[\s\S]*?\*\/|(?:\$@|@\$|\$|@)?"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`|@?[A-Za-z_$][\w$]*|\d[\w.]*|=>|\?\.|\S/g;
+const WORD = /^@?[A-Za-z_$][\w$]*$/;
+const tokenize = text => [...String(text).matchAll(TOKEN)].filter(m => !/^(?:\s|\/[/*])/.test(m[0]));
+function closing(tk, at) {
+  const open = tk[at], close = { '(': ')', '[': ']', '{': '}' }[open];
+  for (let k = at, d = 0; k < tk.length; k++) { if (tk[k] === open) d++; else if (tk[k] === close && --d === 0) return k; }
+  return -1;
+}
+// Tokens split at their top-level commas (generic `<…>` counts as a bracket: `Dictionary<string, int> map`).
+function splitTop(tk) {
+  if (!tk.length) return [];
+  const parts = [[]];
+  let d = 0;
+  for (const t of tk) {
+    if (t === '(' || t === '[' || t === '{' || t === '<') d++; else if (t === ')' || t === ']' || t === '}' || t === '>') d--;
+    if (t === ',' && d === 0) parts.push([]); else parts[parts.length - 1].push(t);
+  }
+  return parts;
+}
+// Parameter names: C# names a parameter last (`[FromBody] Dto request`, `this DateTime at`, `int x = 1`), JS and TS
+// first (`...rest`, `value?: Date`). null for a parameter that has no plain name (a destructured one).
+function parameterNames(tk, cs) {
+  const names = [];
+  for (let part of splitTop(tk)) {
+    const eq = part.indexOf('=');
+    if (eq >= 0) part = part.slice(0, eq);
+    let name;
+    if (cs) name = part.filter(t => WORD.test(t)).pop();
+    else { let i = 0; while (part[i] === '.' || /^(?:public|private|protected|readonly|override)$/.test(part[i] || '')) i++; name = part[i]; }
+    if (!name || !WORD.test(name)) return null;
+    names.push(name);
+  }
+  return names;
+}
+// The function defined on line `at`: its parameter names, its signature (the tokens before its body), its body (the
+// tokens inside its braces, or after `=>` up to its `;`) and the line its body ends on; null when it does not read
+// as one (an interface member, a body that never closes).
+function functionParts(lines, at, cs) {
+  const name = defName(lines[at]);
+  if (!name) return null;
+  const text = lines.slice(at, at + 400).join('\n');
+  const found = tokenize(text), tk = found.map(m => m[0]);
+  const named = tk.indexOf(name);
+  let p = named, q, params;
+  if (p < 0) return null;
+  while (p < tk.length && !['(', '=>', '{', ';'].includes(tk[p])) p++;
+  if (tk[p] === '(') {
+    const close = closing(tk, p);
+    if (close < 0) return null;
+    params = parameterNames(tk.slice(p + 1, close), cs);
+    q = close + 1;
+  } else if (tk[p] === '=>' && p - 1 > named && WORD.test(tk[p - 1])) { params = [tk[p - 1]]; q = p; } // `const f = a => …`
+  if (!params) return null;
+  // The body opens at the first `{` or `=>` after the parameters (a return type, `where` or `: base(…)` between).
+  for (let d = 0; q < tk.length; q++) {
+    if (d === 0 && (tk[q] === '{' || tk[q] === '=>')) break;
+    if (tk[q] === '(') d++; else if (tk[q] === ')') d--; else if (tk[q] === ';' && d === 0) return null;
+  }
+  if (q >= tk.length) return null;
+  const signature = tk.slice(0, q);
+  if (tk[q] === '=>' && tk[q + 1] === '{') q++;
+  const start = q + 1;
+  let end = start;
+  if (tk[q] === '{') end = closing(tk, q);
+  else {
+    for (let d = 0; end < tk.length; end++) {
+      const t = tk[end];
+      if (t === '(' || t === '[' || t === '{') d++;
+      else if (t === ')' || t === ']' || t === '}') { if (--d < 0) break; }
+      else if (t === ';' && d === 0) break;
+    }
+  }
+  if (end < 0 || end >= tk.length) return null;
+  return { params, signature, body: tk.slice(start, end), lastLine: at + (text.slice(0, found[end].index).match(/\n/g) || []).length };
+}
+// A body that only calls one function: `return X(args);`, `X(args);` or `=> X(args)`, X maybe qualified
+// (`ApiInstant.MinuteOf`) or awaited. `{ callee: [words], args: [[tokens], …] }`, else null.
+function delegateCall(body) {
+  const b = body[body.length - 1] === ';' ? body.slice(0, -1) : body;
+  let k = 0;
+  if (b[k] === 'return') k++;
+  if (b[k] === 'await') k++;
+  if (!WORD.test(b[k] || '')) return null;
+  const callee = [b[k++]];
+  while (b[k] === '.' && WORD.test(b[k + 1] || '')) { callee.push(b[k + 1]); k += 2; }
+  if (b[k] === '<') {
+    const g = b.indexOf('>', k);
+    if (g < 0 || b.slice(k, g).some(t => ['(', ')', ';', '{', '}'].includes(t))) return null;
+    k = g + 1;
+  }
+  if (b[k] !== '(' || closing(b, k) !== b.length - 1) return null;
+  return { callee, args: splitTop(b.slice(k + 1, -1)) };
+}
+// A body with its parameters numbered (a member name after `.` stays): the same code under other parameter names.
+const canonical = (tk, params) => tk.map((t, i) => tk[i - 1] !== '.' && tk[i - 1] !== '?.' && params.includes(t) ? '\u0001' + params.indexOf(t) : t).join('\u0000');
+// The C# and JS/TS functions this diff adds whole: definition and body all on added lines.
+function addedFunctions(repo, files) {
+  const out = [];
+  for (const f of files) {
+    if (KIND(f.name) !== 'code' || !(CS.test(f.name) || JS.test(f.name))) continue;
+    const lines = fileText(repo, f.name).split(/\r?\n/), added = new Set();
+    for (const h of f.hunks) for (let i = h.start - 1; i < h.start - 1 + h.count; i++) added.add(i);
+    for (const i of added) {
+      const name = defName(lines[i]);
+      const parts = name ? functionParts(lines, i, CS.test(f.name)) : null;
+      if (!parts) continue;
+      let whole = true;
+      for (let k = i; k <= parts.lastLine && whole; k++) whole = added.has(k);
+      if (whole) out.push({ file: f.name, at: i, name, parts });
+    }
+  }
+  return out;
+}
+/**
+ * The file of the new function that the changed function on line `at` of f moved into, or ''. Moved: its signature
+ * is unchanged; its new body only passes its own parameters, in order, to a function this diff adds whole; that
+ * function's body is this function's old body (spaces, comments and parameter names aside); and the call reaches it
+ * (C#: through its class, or within the same class; JS/TS: the same file, or a file this one imports). Anything
+ * else is a change (2026-11-13).
+ */
+function movedTo(repo, f, at, added) {
+  const cs = CS.test(f.name);
+  if (!cs && !JS.test(f.name)) return '';
+  const lines = fileText(repo, f.name).split(/\r?\n/), name = defName(lines[at]);
+  const now = functionParts(lines, at, cs);
+  const call = now && delegateCall(now.body);
+  if (!call || call.args.length !== now.params.length || call.args.some((a, i) => a.length !== 1 || a[0] !== now.params[i])) return '';
+  const callee = call.callee[call.callee.length - 1], qualifier = call.callee.slice(0, -1);
+  const self = !qualifier.length || (qualifier.length === 1 && qualifier[0] === 'this');
+  if (self && callee === name) return '';
+  const old = oldText(repo, f).split(/\r?\n/), sig = now.signature.join('\u0000');
+  let before = null;
+  for (let i = 0; i < old.length && !before; i++) {
+    if (defName(old[i]) !== name) continue;
+    const p = functionParts(old, i, cs);
+    if (p && p.signature.join('\u0000') === sig) before = p;
+  }
+  if (!before) return '';
+  const body = canonical(before.body, before.params);
+  for (const h of added()) {
+    if (h.name !== callee || (h.file === f.name && h.at === at) || canonical(h.parts.body, h.parts.params) !== body) continue;
+    if (cs) {
+      const type = declaringType(fileText(repo, h.file).split(/\r?\n/), h.at).name;
+      if (self ? h.file === f.name && type === declaringType(lines, at).name : qualifier[qualifier.length - 1] === type) return h.file;
+    } else if (h.file === f.name ? self : importsFile(repo, f.name, h.file)) return h.file;
+  }
+  return '';
 }
 
 // The function line `at` (0-based) belongs to: the one it defines, else the one it sits in; '' at the top
@@ -567,7 +769,12 @@ export function callers(repo, symbols) {
     // C#: only files that name the declaring type count, and a call through another type that declares the
     // same name (`HomeworkSettingsRules.Apply(`) is that type's. An extension method (`this` first
     // parameter) is called on any value, so it keeps the plain name search.
+    // Another file whose own class declares a method of this name calls that method when it names it bare (or
+    // through `this.`/`base.`), as C# binds it (2026-11-13, PR #773: the new ApiInstant.MinuteOf was charged with
+    // the 14 bare MinuteOf( calls of HomeworkLifecycle and AssignmentPublishRules, each with its own MinuteOf: big).
+    // The method's own file keeps every bare call.
     let others = null;
+    const ownFiles = new Set();
     const defLines = CS.test(file) ? fileText(repo, file).split(/\r?\n/) : [];
     const type = shared ? declaringType(defLines, at) : { name: '', names: [] };
     const extension = type.name && /\(\s*this\s|^\s*this\s/.test(defLines[at] + '\n' + (defLines[at + 1] || ''));
@@ -580,7 +787,7 @@ export function callers(repo, symbols) {
       for (const r of all) {
         if (!CS.test(r.file) || defName(r.text) !== name) continue;
         const t = declaringType(fileText(repo, r.file).split(/\r?\n/), r.line - 1).name;
-        if (t && !type.names.includes(t)) otherTypes.add(t);
+        if (t && !type.names.includes(t)) { otherTypes.add(t); ownFiles.add(r.file); }
       }
       if (otherTypes.size) others = new RegExp(`\\b(?:${[...otherTypes].map(escapeRe).join('|')})\\s*\\.\\s*$`);
     }
@@ -595,6 +802,7 @@ export function callers(repo, symbols) {
       for (const m of text.matchAll(word)) {
         const before = text.slice(0, m.index);
         if (before.endsWith('</') || (others && others.test(before))) continue;
+        if (r.file !== file && ownFiles.has(r.file) && (!/\.\s*$/.test(before) || /\b(?:this|base)\s*\.\s*$/.test(before))) continue;
         n++;
       }
       return n;
@@ -640,12 +848,13 @@ export function sizeTask({ repo, base, files: planned }) {
   const extra = { renamed: [], binary: [] };
   const files = plan ? planned.map(n => ({ name: n.replace(/\\/g, '/'), added: [], removed: [], hunks: [] })) : readDiff(root, base, extra);
   const found = signals(files, { plan, repo: root });
-  const symbols = plan ? [] : allChangedSymbols(root, files);
+  const moved = [];
+  const symbols = plan ? [] : allChangedSymbols(root, files, moved);
   const callerRows = callers(root, symbols.slice(0, MAX_SYMBOLS));
   const { size, lines, codeFiles } = decide(found, callerRows, files);
   let stack = null; try { stack = readStack(root); } catch { /* not fatal */ }
   return { mode: plan ? 'plan' : 'diff', size, stack: stack && stack.line, signals: Object.fromEntries(found), roles: roles(size, found), callers: callerRows,
-    moreSymbols: Math.max(0, symbols.length - MAX_SYMBOLS), files: files.length, codeFiles, lines, renamed: extra.renamed, binary: extra.binary };
+    moreSymbols: Math.max(0, symbols.length - MAX_SYMBOLS), moved, files: files.length, codeFiles, lines, renamed: extra.renamed, binary: extra.binary };
 }
 
 export function format(r, was) {
@@ -657,6 +866,7 @@ export function format(r, was) {
   const named = r.callers.filter(c => c.count || c.tests).map(c => `${c.name} ×${c.count}${c.tests ? ` (+${c.tests} in tests)` : ''}${c.where.length ? ' [' + c.where.join(', ') + ']' : ''}`);
   if (r.moreSymbols) named.push(`+${r.moreSymbols} more changed functions not counted`);
   if (named.length) out.push('  callers: ' + named.join('; '));
+  if (r.moved && r.moved.length) out.push('  moved, callers not counted: ' + r.moved.map(m => `${m.name} (${m.file} → ${m.to})`).join(', '));
   if (r.mode === 'diff') out.push(`  files: ${r.files} (${r.codeFiles} code, ${r.lines} code lines changed)`);
   if (r.renamed && r.renamed.length) out.push('  renamed: ' + r.renamed.join(', '));
   if (r.binary && r.binary.length) out.push('  binary: ' + r.binary.join(', '));
