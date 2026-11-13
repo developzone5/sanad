@@ -32,15 +32,69 @@ function fixture({ mechanical } = {}) {
   return { repo, git, write };
 }
 const run = (repo, args = []) => spawnSync(process.execPath, [script, '--repo', repo, '--base', 'base', ...args], { encoding: 'utf8', env, windowsHide: true });
+const placesScript = path.join(path.dirname(script), 'places.mjs');
+// The places list for `names` in `repo`, outside it, every place given an outcome unless `open` (2026-11-12).
+function placesFor(repo, names = 'a', { open = false } = {}) {
+  const out = path.join(fs.mkdtempSync(path.join(root, 'notes-')), 'places.md');
+  const made = spawnSync(process.execPath, [placesScript, '--repo', repo, '--names', names, '--out', out], { encoding: 'utf8', windowsHide: true });
+  assert.equal(made.status, 0, made.stdout + made.stderr);
+  if (!open) fs.writeFileSync(out, fs.readFileSync(out, 'utf8').replace(/→ $/gm, '→ none: unchanged on purpose in this fixture'));
+  return out;
+}
 
-test('every check passes: lint, types, size and the project check, with one summary', () => {
+test('every check passes: lint, types, size, places and the project check, with one summary', () => {
   const { repo, write } = fixture({ mechanical: "console.log('MECHANICAL: 0 bugs'); process.argv.includes('--repo') || process.exit(9);" });
   write('web/src/a.ts', 'export const a = 2;\n');
+  const r = run(repo, ['--places', placesFor(repo)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /PRE-REVIEW: 7 of 7 checks passed/);
+  for (const name of ['lint web \\(1 file\\)', 'types web', 'test asserts', 'commits', 'size', 'places', 'mechanical']) assert.match(r.stdout, new RegExp('✓ ' + name));
+  assert.match(r.stdout, /✓ places[^\n]*\n\s+PLACES: 1 place\(s\), 0 open/, 'the count shows also when it passes');
+  assert.match(r.stdout, /MECHANICAL: 0 bugs/, 'the project check got --repo');
+});
+
+// 2026-11-12: rule 1 ("list every place that uses what you change, by search") was text and was skipped; a
+// date rule was fixed on the "schedule" path and missed on the "publish now" path.
+test('places: a code change with no --places is NOT RUN and fails, with the command that makes the list', () => {
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 12;\n');
+  const r = run(repo);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^PRE-REVIEW: 5 of 6 checks passed · 3 skipped/m);
+  const cmd = `node ${placesScript.replace(/\\/g, '/')} --repo ${repo.replace(/\\/g, '/')} --names <names> --out <notes>/places.md`;
+  assert.ok(r.stdout.includes(`  ✗ places — NOT RUN\n      list every place that uses what you change: ${cmd}`), r.stdout);
+});
+
+test('places: a text-only change needs no list, and says so as skipped', () => {
+  const { repo, write } = fixture();
+  write('README.md', 'y\n');
   const r = run(repo);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /PRE-REVIEW: 6 of 6 checks passed/);
-  for (const name of ['lint web \\(1 file\\)', 'types web', 'test asserts', 'commits', 'size', 'mechanical']) assert.match(r.stdout, new RegExp('✓ ' + name));
-  assert.match(r.stdout, /MECHANICAL: 0 bugs/, 'the project check got --repo');
+  assert.match(r.stdout, /^PRE-REVIEW: 3 of 3 checks passed · 4 skipped: ticket lines, test labels, size growth, places · /m);
+  assert.match(r.stdout, /\n {2}– places: skipped \(a text-only change\)/);
+});
+
+test('places: the list is searched again first, every place needs an outcome, and --check numbers the check lines', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 13;\n');
+  const list = placesFor(repo, 'a', { open: true });
+  const open = run(repo, ['--places', list]);
+  assert.equal(open.status, 1, open.stdout);
+  assert.match(open.stdout, /✗ places[^\n]*\n\s+OPEN: P1 · a · web\/src\/a\.ts · \(file\)\n\s+PLACES: 1 place\(s\), 1 open/);
+  fs.writeFileSync(list, fs.readFileSync(list, 'utf8').replace(/→ $/m, '→ C1'));
+  // A place that appears after the list was written (a new caller in an untracked file) cannot be missed.
+  write('web/src/b.ts', "import { a } from './a';\n");
+  const late = run(repo, ['--places', list]);
+  assert.equal(late.status, 1, late.stdout);
+  assert.match(late.stdout, /OPEN: P2 · a · web\/src\/b\.ts · \(file\)/);
+  assert.match(fs.readFileSync(list, 'utf8'), /^P2 \(new\) · a · web\/src\/b\.ts · \(file\) · lines 1 → $/m, 'the list itself was refreshed');
+  fs.writeFileSync(list, fs.readFileSync(list, 'utf8').replace(/→ $/m, '→ none: imports it only to re-export it'));
+  const ok = run(repo, ['--places', list]);
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.match(ok.stdout, /✓ places/);
+  const check = planChecks({ repo, base: 'base', node: process.execPath, remote: null, places: list, check: 'c.md' }).checks.find(c => c.name === 'places');
+  assert.deepEqual(check.args.slice(1), ['--refresh', list, '--repo', repo, '--check', list, '--check-lines', 'c.md']);
 });
 
 // 2026-11-10 (PR #767): two C# files from an earlier commit failed CI's format check after the push.
@@ -91,7 +145,7 @@ test('ticket lines run when a lines file is given, and --was fails a grown chang
   write('web/src/a.ts', 'export const a = 4;\n');
   const lines = path.join(root, 'lines.md');
   fs.writeFileSync(lines, '- The total shows once\n');
-  const ok = run(repo, ['--lines', lines, '--was', 'small']);
+  const ok = run(repo, ['--lines', lines, '--was', 'small', '--places', placesFor(repo)]);
   assert.equal(ok.status, 0, ok.stdout);
   assert.match(ok.stdout, /✓ ticket lines/);
   write('Api/Migrations/20260101_X.cs', 'public class X : Migration { }\n');
@@ -176,18 +230,18 @@ test('a part left out for a missing option is named as skipped, and is not a fai
   const { planChecks } = await import('../scripts/pre-review.mjs');
   const { repo, write } = fixture();
   write('web/src/a.ts', 'export const a = 7;\n');
-  const r = run(repo);
+  const r = run(repo, ['--places', placesFor(repo)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PRE-REVIEW: 5 of 5 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
+  assert.match(r.stdout, /^PRE-REVIEW: 6 of 6 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
   assert.match(r.stdout, /\n {2}– ticket lines: skipped \(no --lines\)\n {2}– test labels: skipped \(no --check\)\n {2}– size growth: skipped \(no --was\)/);
-  const all = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md', was: 'small' });
+  const all = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md', was: 'small', places: 'p.md' });
   assert.deepEqual(all.skipped, [], 'every option given: nothing skipped');
 });
 
 test('the project check\'s GAP and NOTE lines show also when it passes', () => {
   const { repo, write } = fixture({ mechanical: "console.log('GAP — Api/A.cs — new [HttpPost] A.Create has no test naming it'); console.log('NOTE — web/b.ts — read the texts'); console.log('MECHANICAL: 0 bugs, 1 gaps, 1 notes');" });
   write('web/src/a.ts', 'export const a = 8;\n');
-  const r = run(repo);
+  const r = run(repo, ['--places', placesFor(repo)]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /✓ mechanical[^\n]*\n\s+GAP — Api\/A\.cs — new \[HttpPost\] A\.Create has no test naming it\n\s+NOTE — web\/b\.ts — read the texts\n\s+MECHANICAL: 0 bugs, 1 gaps, 1 notes/);
 });

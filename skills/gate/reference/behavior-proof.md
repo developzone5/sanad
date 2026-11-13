@@ -1,7 +1,6 @@
 # Evidence that catches bugs after a green build
 
-Use this reference for a behavior change, and read the project's relevant
-`memory/missed-bugs.md` entries. More reviewers do not replace a missing check.
+Use this reference for a behavior change. More reviewers do not replace a missing check.
 
 ## Define the outcome before implementing
 

@@ -2,13 +2,17 @@
 // review-brief.mjs — the task's briefs, from a fixed template, so nothing is copied by hand.
 //
 //   <out>          the framed brief: the Test designer and the whole-diff reviewer read it (changed
-//                  files, ticket, numbered Check lines, callers, known items, the proof run's result, the rules).
+//                  files, ticket, numbered Check lines, callers, the places list, known items, the proof
+//                  run's result, the rules).
 //   <out>-fresh.md the unframed brief for the fresh-eyes reviewers (Claude and Codex): the ticket,
-//                  the pinned diff and the changed files (new untracked ones marked), the project's
-//                  missed-bug classes, the known items and the rules, and nothing the author wrote
-//                  (no Check lines, no callers, no proof result).
+//                  the pinned diff and the changed files (new untracked ones marked), the places list, the
+//                  known items and the rules, and no other author text (no Check lines, no callers, no
+//                  proof result). 2026-11-12 (user: the workflow must not depend on a list of old bugs):
+//                  the missed-bug classes left this brief; --missed is accepted and ignored.
 //   launch.md      the exact launch lines for the designer and the reviewers, next to <out>: three
-//                  reviewers, or on a tiny or small change only the Claude fresh eyes (2026-11-11).
+//                  reviewers on a big change (or a size not known); on a tiny, small or medium change only
+//                  the Claude fresh eyes (tiny and small 2026-11-11; medium 2026-11-12, user-approved sizes).
+//                  A medium change keeps the full brief, and its one review gets the checklist sentence.
 //
 // 2026-11-07: a brief copied by hand from the last round lacked the newest rule; the designer got
 // other lines than the reviewers; launch prompts drifted between rounds; the diff named a moving
@@ -22,14 +26,20 @@
 // no source, stops the brief. Cases outside the ticket are not Check lines: reviewers and the Test
 // designer list them as EXTRA TEST lines for the user to decide at the end.
 //
+// 2026-11-12: rule 1 ("before code, list every place that uses the rule or data you change, by search") was
+// text and was skipped: a date rule was fixed on the "schedule" path and missed on the "publish now" path. A
+// change the size check does not measure tiny (text only) gets no brief until its places list (places.mjs)
+// exists and every place on it has an outcome; the list is searched again here first.
+//
 // Usage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file>
-//          [--repo <path>] [--base <ref>] [--outside <file>] [--missed <file>] [--size <size>] [--proof-log <file>]
+//          [--repo <path>] [--base <ref>] [--outside <file>] [--places <file>] [--size <size>] [--proof-log <file>]
 //   --ticket     the ticket and QA text, verbatim
 //   --lines      every requirement line of the ticket, one per line (the check-ticket-lines file)
 //   --check      what must hold, one line each, each starting with its source tag; numbered C1..Cn
 //                here, and each needs a test tagged [Cn]
 //   --outside    the project's outside list (default: `git config sanad.outsideList`)
-//   --missed     the project's missed-bugs list (default: `git config sanad.missedBugs`)
+//   --places     the places list from places.mjs; required unless the measured size is tiny
+//   --missed     accepted and ignored (2026-11-12)
 //   --size       the routed size (tiny, small, medium or big); the larger of it and the size check's
 //                answer is used, and tiny or small adds the focused budget and the one-review launch
 //   --proof-log  a red-proof.mjs --log file; give it once per proof (server, page); the result lines of
@@ -42,6 +52,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readLines } from './check-ticket-lines.mjs';
 import { treeId } from './red-proof.mjs';
+import { refreshPlaces, checkPlaces, placeLine } from './places.mjs';
 
 // The sizes in order, as size-check.mjs names them (kept here: that script runs as a child process).
 const SIZES = ['tiny', 'small', 'medium', 'big'];
@@ -127,20 +138,6 @@ export function checkLines(text) {
   return String(text).split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => l.replace(/^(?:[-*•]|\d+[.)])\s+/, '').replace(/^C\d+\.\s+/, ''));
 }
 
-// "CLASS: x · ... · CATCH: y" from each missed-bug line, short. The file's own "Format:" line is the
-// template, not a bug (2026-11-12: "<short class>" was listed as a class the project missed).
-export function missedClasses(text) {
-  const out = [];
-  for (const line of String(text).split(/\r?\n/)) {
-    if (/^\s*(?:[-*]\s+)?Format:/i.test(line)) continue;
-    const cls = /CLASS:\s*([^·]+)/.exec(line), catcher = /CATCH:\s*([^·]+)/.exec(line);
-    if (!cls) continue;
-    const item = (cls[1].trim() + (catcher ? ' — catch: ' + catcher[1].trim() : '')).slice(0, 180);
-    if (!out.includes(item)) out.push(item);
-  }
-  return out;
-}
-
 // The size check's lines that the brief carries: stack, size and callers. A crash or a timeout is `failed`
 // (its first error line), so the brief says SIZE CHECK FAILED (2026-11-12: it said "Callers: none yet").
 export function sizeFacts(repo, base, { script = path.join(here, 'size-check.mjs'), timeout = 60000 } = {}) {
@@ -158,11 +155,16 @@ export function sizeFacts(repo, base, { script = path.join(here, 'size-check.mjs
   return { stack: line(/^Stack:/), size, callers: line(/^\s*callers:/).replace(/^callers:\s*/, ''), failed };
 }
 
+// The size the size check measured ('' when it failed or printed none).
+export function measuredSize(facts) {
+  const m = /^SIZE:\s*(\w+)|^SIZE GREW:\s*\w+\s*→\s*(\w+)/.exec((facts && facts.size) || '') || [];
+  return SIZES.includes(m[1] || m[2]) ? (m[1] || m[2]) : '';
+}
+
 // The size the briefs and launch.md use: the larger of the routed size (--size) and the measured one, so a
 // change routed small that measures big gets the full round (2026-11-12, audit C8a: --size beat the measure).
 export function chooseSize(facts, routed) {
-  const m = /^SIZE:\s*(\w+)|^SIZE GREW:\s*\w+\s*→\s*(\w+)/.exec((facts && facts.size) || '') || [];
-  const measured = SIZES.includes(m[1] || m[2]) ? (m[1] || m[2]) : '';
+  const measured = measuredSize(facts);
   const asked = SIZES.includes(routed) ? routed : '';
   const size = asked && measured ? SIZES[Math.max(SIZES.indexOf(asked), SIZES.indexOf(measured))] : asked || measured;
   return { size, note: asked && measured && asked !== measured ? `size: routed ${asked}, measured ${measured} → using ${size}` : '' };
@@ -221,7 +223,36 @@ export function proofLines(logs, currentTree = '') {
   return out;
 }
 
-export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines = [], checks, outside, facts, size, proof = [], changed }) {
+// The places list (places.mjs) in both briefs, with the two lines that make a reviewer check it, not trust
+// it (2026-11-12: a fix reached the "schedule" path and not the "publish now" path).
+const PLACES_RULES = [
+  'For each `none:` line, read that place and check the reason; a place that needs the change and has none is a Bug.',
+  'Search yourself for a place this list misses; a missing place is a Bug.',
+];
+function placesBlock(list) {
+  if (!list) return [];
+  const order = p => list.names.indexOf(p.name) * 1e6 + p.n;
+  return ['## Places that use what this change touches', '', ...PLACES_RULES, '',
+    `Names searched (whole words): ${list.names.join(', ')}`, '',
+    ...[...list.places].sort((a, b) => order(a) - order(b)).map(p => '- ' + placeLine(p)),
+    ...list.names.map(n => `- Tests that mention ${n}: ${((list.tests && list.tests.get(n)) || []).join(', ') || 'none'}`), ''];
+}
+
+// Why the brief is refused for its places ('' = not refused). A change measured tiny (text only) needs no
+// list; any other change needs one, searched again now, with no open place.
+export function placesRefusal({ measured, list, file, checkCount, repo }) {
+  if (measured === 'tiny') return '';
+  if (!list) {
+    const cmd = `node ${path.join(here, 'places.mjs')} --repo ${repo} --names <names> --out <notes>/places.md`.replace(/\\/g, '/');
+    return `no --places: ${measured ? `a ${measured} change` : 'a change of unknown size (the size check failed)'} needs the list of every place that uses what it changes: ${cmd}`;
+  }
+  const { open } = checkPlaces(list, { checkCount });
+  if (!open.length) return '';
+  const named = open.map(({ p, why }) => `P${p.n}${why === 'no outcome' ? '' : ' — ' + why}`).join(', ');
+  return `places: ${open.length} open place(s) in ${file} (${named}): write C<n> or none: <reason> after each →, then run this again`;
+}
+
+export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines = [], checks, outside, facts, size, proof = [], changed, places = null }) {
   return tidy([
     ROLE, '', diffLine({ repo, branch, base, mergeBase }), '',
     facts.stack || 'Stack: unknown', facts.size || '', callersLine(facts), '',
@@ -230,6 +261,7 @@ export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines 
     ...(ticketLines.length ? ['## Ticket lines — every one has a Check line', '', ...ticketLines.map((t, i) => `- T${i + 1}. ${t}`), ''] : []),
     '## Check — each line names its source ([Tn] a ticket line, [change], [rule: ...]); its tests carry the tag [Cn]', '',
     ...checks.map((c, i) => `- C${i + 1}. ${c}`), '',
+    ...placesBlock(places),
     ...known(outside),
     ...(proof.length ? ['## Proof run (red-proof.mjs)', '', ...proof.map(p => '    ' + p), ''] : []),
     '## Rules', '', ...RULES, '',
@@ -237,13 +269,13 @@ export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines 
   ]);
 }
 
-export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, missed, facts, size, changed }) {
+export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size, changed, places = null }) {
   return tidy([
     ROLE.replace('You are a code reviewer.', 'You are a code reviewer with fresh eyes: judge the change only against the ticket and the code.'), '',
     diffLine({ repo, branch, base, mergeBase }), '', facts.stack || 'Stack: unknown', '',
     ...changedBlock(changed),
     '## Ticket (verbatim)', '', ticket.trim(), '',
-    ...(missed.length ? ['## Bug classes this project missed before — check the change for each', '', ...missed.map(m => '- ' + m), ''] : []),
+    ...placesBlock(places),
     ...known(outside),
     '## Rules', '', ...RULES, '',
     ...(isFocused(facts, size) ? focusedBlock.map(l => l.replace(', each caller and each Check line', ' and every place that uses the changed code')) : []),
@@ -252,18 +284,27 @@ export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside
 
 // A tiny or small change gets ONE review, the Claude fresh eyes (user rule 2026-11-11: "yes skip codex on
 // small fixes"; TUW-242, a one-method fix, was heading to ~25 minutes, half of it three reviews). pre-review
-// checks each Check line's test mechanically, the job the small whole-diff pass had.
+// checks each Check line's test mechanically, the job the small whole-diff pass had. 2026-11-12 (user-approved
+// sizes: Small and Medium get one fresh-eyes review, only Big the full round): a medium change gets the same
+// one review, with the full brief and the checklist sentence the whole-diff pass carried.
 const WHOLE_DIFF_FULL = 'Fill the coverage checklist lines that apply (CLIENT STATE, NEW BLOCKS, FAILURES / LOCALES, USERS FOUND BY SEARCH, TESTS CAN FAIL).';
+const ONE_REVIEW = {
+  tiny: '(A tiny or small change: only this one review, user rule 2026-11-11.)',
+  small: '(A tiny or small change: only this one review, user rule 2026-11-11.)',
+  medium: '(A medium change: one review, with the full brief; user-approved sizes 2026-11-12.)',
+};
 
-export function buildLaunch({ brief, fresh, repo, branch, focused = false, sizeNote = '' }) {
+// `size`: the size used (chooseSize); big or an unknown size gets the full round.
+export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '' }) {
+  const one = ONE_REVIEW[size];
   return [
     '# Launch lines (copy as they are)', '',
     ...(sizeNote ? [sizeNote, ''] : []),
     '## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
     `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. Area: <the files and the field or endpoint — author fills>. Deliver per your guide.`, '',
     '## Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', '',
-    `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits.`, '',
-    ...(focused ? ['(A tiny or small change: only this one review, user rule 2026-11-11.)', ''] : [
+    `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}Read-only: no builds, no tests, no edits.`, '',
+    ...(one ? [one, ''] : [
       '## Whole diff (Claude) — Agent routine-reviewer, run_in_background', '',
       `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${WHOLE_DIFF_FULL} Read-only: no builds, no tests, no edits.`, '',
       // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
@@ -277,7 +318,7 @@ function parse(argv) {
   const o = {};
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
-    if (!['--out', '--ticket', '--lines', '--check', '--repo', '--base', '--outside', '--missed', '--size', '--proof-log'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
+    if (!['--out', '--ticket', '--lines', '--check', '--repo', '--base', '--outside', '--places', '--missed', '--size', '--proof-log'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     // --proof-log may come more than once: a server proof and a page proof give two logs.
     if (k === '--proof-log') (o['proof-log'] ||= []).push(argv[++i]);
     else o[k.slice(2)] = argv[++i];
@@ -308,22 +349,28 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const changed = changedFiles.map(f => f.name);
     const outsideText = listFile(o.outside, 'sanad.outsideList');
     const outside = { ...splitOutside(outsideItems(outsideText), changed), decided: decidedItems(outsideText) };
-    const missed = missedClasses(listFile(o.missed, 'sanad.missedBugs'));
     const logs = (o['proof-log'] || []).filter(f => fs.existsSync(f)).map(f => ({ name: path.basename(f), text: fs.readFileSync(f, 'utf8') }));
     const proof = proofLines(logs, logs.length ? treeId(repo) : '');
     const facts = sizeFacts(repo, base);
+    // The places list is searched again in this folder first, so a place that appeared after it was written
+    // is on it (and open) before any brief is written.
+    const placesFile = o.places && path.resolve(o.places);
+    const places = placesFile ? refreshPlaces(placesFile, { repo }) : null;
+    const refusal = placesRefusal({ measured: measuredSize(facts), list: places, file: placesFile, checkCount: checks.length, repo });
+    if (refusal) throw new Error(refusal);
+    const placesState = places && checkPlaces(places, { checkCount: checks.length });
     const branch = git(repo, ['branch', '--show-current']) || '(detached)';
     const ticket = fs.readFileSync(o.ticket, 'utf8');
     const out = path.resolve(o.out), fresh = out.replace(/(\.md)?$/, '-fresh.md'), launch = path.join(path.dirname(out), 'launch.md');
     const chosen = chooseSize(facts, o.size);
-    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof, changed: changedFiles }));
-    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, missed, facts, size: o.size, changed: changedFiles }));
-    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, focused: isFocused(facts, o.size), sizeNote: chosen.note }));
+    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof, changed: changedFiles, places }));
+    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size: o.size, changed: changedFiles, places }));
+    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, size: chosen.size, sizeNote: chosen.note }));
     process.stdout.write((chosen.note ? chosen.note + '\n' : '') + (facts.failed ? `SIZE CHECK FAILED: ${facts.failed}\n` : '') +
-      `BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.failed ? 'SIZE CHECK FAILED' : facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'} · ${changedFiles.length} changed file(s), ${changedFiles.length - tracked.length} new untracked\n` +
-      `FRESH: ${fresh} · ${missed.length} missed-bug class(es)\nLAUNCH: ${launch}\n`);
+      `BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.failed ? 'SIZE CHECK FAILED' : facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'} · ${changedFiles.length} changed file(s), ${changedFiles.length - tracked.length} new untracked · places: ${placesState ? `${placesState.count}, ${placesState.open.length} open` : 'none (text-only change)'}\n` +
+      `FRESH: ${fresh}\nLAUNCH: ${launch}\n`);
   } catch (error) {
-    process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--missed <file>] [--size <size>] [--proof-log <file>]\n');
+    process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--places <file>] [--size <size>] [--proof-log <file>]\n');
     process.exitCode = 2;
   }
 }

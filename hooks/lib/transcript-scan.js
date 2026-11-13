@@ -739,8 +739,10 @@ function userRejected(block, entry) {
 // file that does not end with a newline) for the caller to judge.
 const READ_CHUNK = 8 * 1024 * 1024;
 // The host's copies of API requests are most of a long transcript's bytes and never events (see
-// feedLine): such a line is passed over before it is even decoded.
+// feedLine): such a line is passed over before it is even decoded. So are its backups of edited files
+// (`file-history-snapshot` / `-delta`: no message, never an event; 2026-11-12: 256 of a 450 MB session).
 const REQUEST_COPY = Buffer.from('{"type":"api-request');
+const HISTORY_COPY = Buffer.from('{"type":"file-history-');
 // onChunk(done), when given, runs after each chunk, when every line before done has been judged.
 function readLines(fd, start, end, onLine, onChunk) {
   const buf = Buffer.allocUnsafe(Math.max(1, Math.min(READ_CHUNK, end - start)));
@@ -756,6 +758,7 @@ function readLines(fd, start, end, onLine, onChunk) {
       from = nl + 1;
       done = pos + from;
       if (bytes.length >= REQUEST_COPY.length && bytes.compare(REQUEST_COPY, 0, REQUEST_COPY.length, 0, REQUEST_COPY.length) === 0) continue;
+      if (bytes.length >= HISTORY_COPY.length && bytes.compare(HISTORY_COPY, 0, HISTORY_COPY.length, 0, HISTORY_COPY.length) === 0) continue;
       onLine(bytes.toString('utf8'), done);
     }
     if (from < n) pieces.push(Buffer.from(data.subarray(from)));   // the buffer is reused: keep a copy
@@ -783,8 +786,13 @@ function readBytes(fd, start, length) {
 
 // A line can matter only if it holds one of these. Plain substring searches: one regex alternation
 // over long result lines cost seconds on a 449 MB session (2026-11-12).
-const MAYBE_PARTS = ['"tool_use"', '"tool_result"', 'GATE:', 'REVIEW:', 'CHECK RETIRED:', 'PROBE EXPECTED:', '"commandMode":"task-notification"', '<task-notification>'];
+// The last four (2026-11-12): a reviewer's hand-back, a NOTE outcome line, and a push command handed over
+// in a code block (see "Reviewer notes" below). A report's RECOMMEND line is in a tool result: it passes already.
+const MAYBE_PARTS = ['"tool_use"', '"tool_result"', 'GATE:', 'REVIEW:', 'CHECK RETIRED:', 'PROBE EXPECTED:', '"commandMode":"task-notification"', '<task-notification>',
+  'Subagent hand-back', 'NOTE ', 'git push', 'gh pr create'];
 const maybeLine = (l) => MAYBE_PARTS.some((part) => l.includes(part));
+// A message the user may have typed: a user entry, or a prompt the host queued while the assistant worked.
+const maybeHuman = (l) => l.includes('"type":"user"') || l.includes('"commandMode":"prompt"');
 const GATE_RE = /^GATE:\s*(PASS|FAIL)\b/gm;
 const REVIEW_RE = /^REVIEW:\s*(PASS|FAIL)\b/gm;
 // An explicit, auditable retirement of a completed failed check that cannot
@@ -883,7 +891,9 @@ function parseNotification(text) {
   const id = field('task-id');
   if (!id) return null;
   const exit = /\(exit code (-?\d+)\)/.exec(field('summary') || '');
-  return { id, status: field('status') || '', exitCode: exit ? Number(exit[1]) : undefined, file: field('output-file') };
+  // An agent's finish notice also carries its final report (2026-11-12: the reviewer's notes are read from it).
+  const from = text.indexOf('<result>'), to = text.lastIndexOf('</result>');
+  return { id, status: field('status') || '', exitCode: exit ? Number(exit[1]) : undefined, file: field('output-file'), summary: field('summary') || '', result: from !== -1 && to > from ? text.slice(from + 8, to) : '' };
 }
 
 // The host delivers a completion notice as its own attachment entry, or, when
@@ -904,11 +914,246 @@ function taskNotifications(entry) {
   return [...text.matchAll(NOTE_RE)].map(m => parseNotification(m[1])).filter(Boolean);
 }
 
+// ---------------------------------------------------------------------------
+// Reviewer notes (2026-11-12). Rule 5: every note a second AI reviewer writes is fixed, or the user
+// decides it; the author never decides alone. As text only, the rule did not hold: three reviewer notes
+// were dropped without being shown to the user, and a teammate then reported the same things as bugs.
+// A note is a finding line in a reviewer report. It stays open until a later assistant text line says
+//   NOTE <n>: fixed — <what changed and its test>
+//   NOTE <n>: user — "<words the user typed after that report>"
+// The stop gate refuses a passing verdict, and the push guard a push, while a note is open.
+// ---------------------------------------------------------------------------
+
+// A finding line: an optional list marker, optional bold, then the kind and its separator. "No Blocker
+// or Bug found" and "Bugs: none" do not start with a kind followed by its separator, so they are no note.
+// A short qualifier may sit before the separator: real reports write `Gap (low) —`, `Bug (rare race) —`
+// and `EXTRA TEST (optional): …` (2026-11-12, 19 such findings in one session would have been dropped).
+const QUALIFIER = '(?:\\*\\*|__)?(?:\\s*\\([^()\\n]{1,80}\\))?(?:\\*\\*|__)?';
+const NOTE_LINE = new RegExp('^(\\s*)((?:[-*•]|\\d{1,3}[.)])\\s+)?(?:(?:\\*\\*|__)\\s*)?' +
+  '(?:(Blocker|Bug|Gap|Question)' + QUALIFIER + '(?:\\s+[—–](?:\\s|$)|\\s+-(?:\\s|$)|\\s*:)|(EXTRA TEST)' + QUALIFIER + ':)');
+const FENCE_LINE = /^\s*(```|~~~)/;
+const NOTE_CHARS = 300;
+// Each note of a report, in order: { kind, text }. Text: the line without its list marker, plus its
+// more-indented continuation lines, cut to 300 characters. A note with nothing after its separator
+// (`EXTRA TEST:` over a list) takes the lines below it up to a blank line. Lines in a code block are examples.
+function reportNotes(report) {
+  const rows = String(report || '').replace(/\r/g, '').split('\n');
+  const indent = (l) => /^\s*/.exec(l)[0].length;
+  const notes = [];
+  let fence = '';
+  for (let i = 0; i < rows.length; i++) {
+    const f = FENCE_LINE.exec(rows[i]);
+    if (f) { if (!fence) fence = f[1]; else if (f[1] === fence) fence = ''; continue; }
+    if (fence) continue;
+    const m = NOTE_LINE.exec(rows[i]);
+    if (!m) continue;
+    const parts = [rows[i].slice(m[1].length + (m[2] || '').length)];
+    const said = rows[i].slice(m[0].length).trim();
+    for (let j = i + 1; j < rows.length; j++) {
+      const next = rows[j];
+      if (!next.trim() || NOTE_LINE.test(next) || FENCE_LINE.test(next) || (said && indent(next) <= indent(rows[i]))) break;
+      parts.push(next);
+    }
+    notes.push({ kind: m[3] || m[4], text: parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, NOTE_CHARS) });
+  }
+  return notes;
+}
+
+// A helper's hand-back: { id, report } or null. The host writes it twice in one session: queued (an
+// attachment that starts with `<agent-message from="…">`) and delivered (a user entry that starts with
+// "Another Claude session sent a message:"); the newest host also puts an indented note above the frame
+// (2026-11-12: 66 of 125 reviewer runs had only the delivered copy). The frame line is at column zero
+// and the agent's tag comes before it; every report line is indented by two spaces, so the first line
+// at column zero (the closing tag) ends the report, and a report cannot forge a frame of its own.
+const HAND_BACK = '[Subagent hand-back]';
+const HAND_BACK_FRAME = /^\[Subagent hand-back\]/m;
+function handBack(text) {
+  const s = String(text || '');
+  const frame = HAND_BACK_FRAME.exec(s);
+  const tag = frame ? /<agent-message from="([^"]+)">/.exec(s.slice(0, frame.index)) : null;
+  if (!tag) return null;
+  const start = s.indexOf('\n', frame.index);
+  const out = [];
+  if (start !== -1) {
+    for (const line of s.slice(start + 1).split('\n')) {
+      if (line.startsWith('  ')) out.push(line.slice(2));
+      else if (!line.trim()) out.push('');
+      else break;
+    }
+  }
+  return { id: tag[1], report: out.join('\n') };
+}
+
+// A finish notice sent while the agent still waits on its own background work: it has not reported, so
+// it neither completes the review nor carries a report (2026-11-12, seen in a real session). Matched where
+// the host writes it (the start of the result, or the summary), so a report that quotes the words still counts.
+const INTERIM_RESULT = /^\s*This agent has not reported yet\b/i;
+const INTERIM_SUMMARY = /\bis waiting on its own background work\b/i;
+const interimNotice = (note) => INTERIM_RESULT.test(note.result || '') || INTERIM_SUMMARY.test(note.summary || '');
+// A reviewer run is complete: credit it for the push gate and the task timer.
+function creditReviewer(st, agent, seq, at) {
+  reviewDone(st, agent.at, String(at || ''));
+  if (agent.launch > st.res.lastReviewerRun) { st.res.lastReviewerRun = agent.launch; st.res.lastReviewerResult = seq; }
+}
+
+// The other engine's report is read from a file: a tool result with a line that starts with its
+// verdict. The report runs from that line on. The Read tool shows a number and a tab before each line.
+const RECOMMEND_LINE = /^RECOMMEND: (?:PASS|FAIL)(?![|\w])/m;
+const READ_NUMBERED = /^\s*\d+[\t→]RECOMMEND: (?:PASS|FAIL)(?![|\w])/m;
+function recommendReport(text) {
+  let s = String(text || '');
+  if (!s.includes('RECOMMEND: ')) return '';
+  if (!RECOMMEND_LINE.test(s) && READ_NUMBERED.test(s)) s = s.split('\n').map((l) => l.replace(/^\s*\d+[\t→]/, '')).join('\n');
+  const m = RECOMMEND_LINE.exec(s);
+  return m ? s.slice(m.index) : '';
+}
+
+// key: one reviewer run ('<agent id>@<launch seq>'). A run can reach the transcript twice, as its
+// hand-back and in its finish notice; the notice may hold the same report, or only a pointer to the
+// hand-back ("…delivered to you as a message…", "…has not reported yet…"), and either can come first.
+// So a later copy adds only the notes that run has not given yet (reportKeys: '<key>#<note number>').
+// A report without a key (a file the author shows) adds only notes whose text is new in the session,
+// so the same file shown twice gives each note once.
+// at: the entry's time. A report from before the lock's start time (st.since) gives no notes at all, so a
+// running session is not blocked by its history; a report with no time counts (follow-up A).
+function addReport(st, report, key, seq, at) {
+  if (typeof st.since === 'number') { const t = Date.parse(at || ''); if (Number.isFinite(t) && t < st.since) return; }
+  const notes = st.res.reviewNotes;
+  for (const note of reportNotes(report)) {
+    const seen = key ? st.reportKeys.some((k) => k.startsWith(key + '#') && (notes[Number(k.slice(key.length + 1)) - 1] || {}).text === note.text)
+      : notes.some((n) => n.text === note.text);
+    if (seen) continue;
+    notes.push({ n: notes.length + 1, kind: note.kind, text: note.text, outcome: null });
+    st.noteSeqs.push(seq);
+    if (key) st.reportKeys.push(key + '#' + notes.length);
+  }
+}
+
+// What the user typed, compared without case and with spaces collapsed (curly quotes made straight).
+function userText(s) {
+  return String(s).replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+// The words of a message the user typed, or null. This host marks the user's own turns with
+// origin.kind "human" (queued while the assistant worked: humanTurn). Tool results, hook messages,
+// system reminders, notices and a helper's hand-back are not the user. An older host writes no origin:
+// then a message the host or a tool wrote starts with a tag or a fixed phrase.
+const HOST_BLOCKS = /<(task-notification|system-reminder)>[\s\S]*?<\/\1>/g;
+function humanWords(entry) {
+  const a = entry.attachment;
+  if (a && typeof a === 'object') {
+    if (a.type !== 'queued_command' || a.commandMode !== 'prompt' || a.isMeta || typeof a.prompt !== 'string') return null;
+    const human = a.origin && typeof a.origin === 'object' ? a.origin.kind === 'human' : a.humanTurn === true;
+    return human && !a.prompt.startsWith('<agent-message') ? a.prompt.replace(HOST_BLOCKS, '').trim() || null : null;
+  }
+  if (entry.type !== 'user' || !entry.message || entry.message.role !== 'user' || entry.isMeta || entry.isCompactSummary || entry.isVisibleInTranscriptOnly) return null;
+  const c = entry.message.content;
+  const text = typeof c === 'string' ? c
+    : Array.isArray(c) && c.length && c.every((b) => b && (b.type === 'text' || b.type === 'image')) ? c.filter((b) => b.type === 'text').map((b) => String(b.text || '')).join('\n')
+    : null;
+  if (text === null) return null;
+  const own = text.replace(HOST_BLOCKS, '').trim();
+  if (entry.origin && typeof entry.origin === 'object') return entry.origin.kind === 'human' && own ? own : null;
+  return own && !/^(?:<|\[Request interrupted|Stop hook feedback|Caveat:)/.test(own) && !HAND_BACK_FRAME.test(own) ? own : null;
+}
+
+// The oldest report that still has an open note: only the user's words after it can close a note.
+function oldestOpenReport(st) {
+  let from = Infinity;
+  st.res.reviewNotes.forEach((n, i) => { if (!n.outcome && st.noteSeqs[i] < from) from = st.noteSeqs[i]; });
+  return from;
+}
+// The user's words are kept only while a note is open, and at most about 60 000 characters (the
+// newest), so the saved scan state stays small.
+const USER_WORDS_CHARS = 60000;
+function pruneUserWords(st) {
+  const from = oldestOpenReport(st);
+  st.userWords = from === Infinity ? [] : st.userWords.filter((w) => w.seq > from);
+  let total = 0;
+  for (let i = st.userWords.length - 1; i >= 0; i--) {
+    total += st.userWords[i].text.length;
+    if (total > USER_WORDS_CHARS) { st.userWords = st.userWords.slice(i + 1); break; }
+  }
+}
+function humanTurn(st, words) {
+  const seq = ++st.seq;
+  st.res.turnClaim = false;
+  if (oldestOpenReport(st) === Infinity) return;
+  st.userWords.push({ seq, text: userText(words).slice(0, USER_WORDS_CHARS) });
+  pruneUserWords(st);
+}
+
+// An outcome line in an assistant text (code blocks already removed): optional list marker, bold or
+// backtick, then `NOTE <n>: fixed|user —`.
+const OUTCOME_RE = /^[ \t]*(?:[-*•][ \t]+)?(?:\*\*|`)?NOTE[ \t]+(\d{1,4})[ \t]*:[ \t]*(fixed|user|Fixed|User|FIXED|USER)\b(?:\*\*)?[ \t]*[—–-][ \t]*(.*)$/gm;
+const FENCED = /```[\s\S]*?```|~~~[\s\S]*?~~~/g;
+// Each outcome line of a text (code blocks removed) on notes; seqs: each note's report seq; words: the
+// user's words kept for open notes. A note already closed stays as it is, so applying twice changes nothing.
+function applyOutcomes(notes, seqs, words, plain) {
+  if (!notes.length || !/NOTE[ \t]+\d/.test(plain)) return false;
+  for (const m of plain.matchAll(OUTCOME_RE)) applyOutcome(notes, seqs, words, Number(m[1]), m[2], m[3]);
+  return true;
+}
+// The notes still open once the final text's own outcome lines count: the host hands the stop gate that
+// text before the transcript may hold it (2026-11-12, follow-up C). The scan result is not changed.
+function openNotesAfter(r, text) {
+  const notes = (r && Array.isArray(r.reviewNotes) ? r.reviewNotes : []).map((n) => ({ ...n }));
+  applyOutcomes(notes, (r && r.reviewNoteSeqs) || [], (r && r.reviewUserWords) || [], String(text || '').replace(FENCED, ''));
+  return notes.filter((n) => !n.outcome);
+}
+function applyOutcome(notes, seqs, words, n, kind, rest) {
+  const note = notes[n - 1];
+  if (!note || note.outcome) return;
+  const said = String(rest).replace(/[`*\s]+$/, '').trim();
+  if (kind.toLowerCase() === 'fixed') {
+    // `<what changed and its test>` is the format example, not an answer.
+    if (said.length >= 12 && !/^<[^>]*>$/.test(said)) { note.outcome = 'fixed'; delete note.problem; }
+    else note.problem = 'a fixed line must say what changed and its test (12 characters or more)';
+    return;
+  }
+  const q = /["“]([^"“”]*)["”]/.exec(said);
+  const quote = q ? userText(q[1]) : '';
+  if (quote.length < 8) { note.problem = 'a user line needs the user\'s exact words in quotes (8 characters or more)'; return; }
+  const after = seqs[n - 1];
+  if (words.some((w) => w.seq > after && w.text.includes(quote))) { note.outcome = 'user'; delete note.problem; }
+  else note.problem = 'the quoted words are not in a message the user typed after this report';
+}
+
+// The final text claims the review passed: a line that starts with `REVIEW: PASS` or `GATE: PASS`
+// (code blocks included: shown to the user, it still reads as a pass), or a code block with a command
+// that runs `git push` or `gh pr create` (the user pushes by hand when the author hands one over).
+const CLAIM_LINE = /^[ \t]*(?:REVIEW|GATE):[ \t]*PASS\b/m;
+const CODE_BLOCK = /(```|~~~)[^\n]*\n([\s\S]*?)\1/g;
+const PUSH_COMMAND = /(?:^|[\s;&|(])git(?:\.exe)?(?:\s+-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+))*\s+push\b|(?:^|[\s;&|(])gh(?:\.exe)?\s+pr\s+create\b/m;
+function claimsReview(text) {
+  const s = String(text || '');
+  if (CLAIM_LINE.test(s)) return true;
+  for (const m of s.matchAll(CODE_BLOCK)) if (PUSH_COMMAND.test(m[2])) return true;
+  return false;
+}
+
+// The open notes as the stop gate and the push guard show them; at most 40 lines of notes.
+const SHOWN_NOTES = 40;
+function openNotesMessage(open) {
+  const list = Array.isArray(open) ? open : [];
+  if (!list.length) return '';
+  const rows = list.slice(0, SHOWN_NOTES).map((n) => 'NOTE ' + n.n + ' (' + n.kind + '): ' + String(n.text).slice(0, 140) + (n.problem ? ' — still open: ' + n.problem : ''));
+  if (list.length > SHOWN_NOTES) rows.push('… and ' + (list.length - SHOWN_NOTES) + ' more open notes, up to NOTE ' + list[list.length - 1].n + '.');
+  const k = list[0].n;
+  return 'Reviewer notes without an outcome (rule 5: every reviewer note is fixed, or the user decides it):\n' + rows.join('\n') + '\n' +
+    'To ask the user about a note, stop with the question and no verdict line or push command.\n' +
+    'Answer each one in your next message, on its own line: `NOTE ' + k + ': fixed — <what changed and its test>` or `NOTE ' + k + ': user — "<the user\'s exact words>"`. A note is never closed by the author\'s own judgement.';
+}
+
 // The reducer state of one scan: plain data only (Maps and Sets become arrays in the cache), so a
 // later call continues where the last one stopped (2026-11-12, audit H17).
 function newScanState() {
   return {
-    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1 },
+    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1,
+      // Reviewer notes: { n, kind, text, outcome: null | 'fixed' | 'user', problem? }; the open ones are set by
+      // finishScan. turnClaim: an assistant text since the user's last message has a REVIEW/GATE: PASS line or a
+      // handed-over push (the stop gate's answer when the host does not send the last message).
+      // reviewerLaunched: this session launched an independent reviewer (a report in a tool result counts only then).
+      reviewNotes: [], openReviewNotes: [], turnClaim: false, reviewerLaunched: false },
     seq: 0,
     pending: new Map(), // tool_use_id -> { editSeq, editPath, verifySeq }
     background: new Map(), // task id -> originating command (not its polling command)
@@ -932,13 +1177,17 @@ function newScanState() {
     remoteCheckouts: [],       // moves to a fetched remote ref: { seq, repo }
     helperEdits: [],           // helper agents' edits not yet placed in time: { t, file, pos, edit }
     helperPending: new Map(),  // '<helper file>\n<tool_use id>' -> a helper's edit awaiting its result
+    noteSeqs: [],              // the seq of the report each reviewer note came in (same order as res.reviewNotes)
+    reportKeys: [],            // each note a reviewer run gave: '<agent id>@<launch seq>#<note number>' (see addReport)
+    userWords: [],             // what the user typed while a note was open: { seq, text } (see pruneUserWords)
   };
 }
 const STATE_MAPS = ['pending', 'background', 'verificationStates', 'providerStates', 'reviewerCalls', 'reviewerAgents', 'reviewerAt', 'helperCalls', 'helpersRunning', 'stopCalls', 'helperPending'];
-const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'helperEdits'];
+const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'helperEdits', 'noteSeqs', 'reportKeys', 'userWords'];
 function saveState(st) {
   const o = { ...st, finishedUncollected: [...st.finishedUncollected] };
   for (const k of STATE_MAPS) o[k] = [...st[k]];
+  delete o.since;   // the start time belongs to the cache record, which is used only with the same one
   return o;
 }
 // A cached state of any other shape is ignored (the scan starts from zero).
@@ -1029,15 +1278,35 @@ function feedLine(st, l) {
   // results and verdicts again, out of order. Copies are not events (2026-11-09: copied
   // launches stayed "pending" and refused a PR; a copied old pass could follow a newer edit).
   if (l.startsWith('{"type":"api-request')) return;
-  if (!maybeLine(l)) return;
+  if (!maybeLine(l) && !maybeHuman(l)) return;
   // A result no recorded call waits for changes nothing (most of a long session: Read, Grep and the
-  // like), so it is not parsed (2026-11-12: the first read of a 449 MB session).
-  if (l.includes('"type":"tool_result"') && !answersAny(l, [st.pending, st.helperCalls, st.reviewerCalls, st.stopCalls])) return;
+  // like), so it is not parsed (2026-11-12: the first read of a 449 MB session). One with a reviewer
+  // report's RECOMMEND line still counts: its notes need an outcome.
+  if (l.includes('"type":"tool_result"') && !answersAny(l, [st.pending, st.helperCalls, st.reviewerCalls, st.stopCalls]) && !l.includes('RECOMMEND: ')) return;
   let entry = null;
   try { entry = JSON.parse(l); } catch (e) { return; }
   if (!entry || /^api-request/.test(String(entry.type || ''))) return;
   placeHelperEdits(st, entry.timestamp);
   const res = st.res;
+  // The user's own words: a later `NOTE n: user — "…"` line must quote them (2026-11-12).
+  const words = humanWords(entry);
+  if (words !== null) humanTurn(st, words);
+  // A reviewer's final report handed back by the host, queued or delivered (see handBack). It is also
+  // the run's finish: an agent that hands back has reported (2026-11-12, follow-up E).
+  const a = entry.attachment && typeof entry.attachment === 'object' ? entry.attachment : null;
+  const c = entry.message && entry.message.content;
+  const handedText = a && typeof a.prompt === 'string' ? a.prompt
+    : entry.type === 'user' ? (typeof c === 'string' ? c : Array.isArray(c) && c.length && c.every((b) => b && b.type === 'text') ? c.map((b) => String(b.text || '')).join('\n') : '') : '';
+  const handed = handedText.includes(HAND_BACK) ? handBack(handedText) : null;
+  if (handed) {
+    const agent = st.reviewerAgents.get(handed.id);
+    if (agent) {
+      const seq = ++st.seq;
+      addReport(st, handed.report, handed.id + '@' + agent.launch, seq, entry.timestamp);
+      creditReviewer(st, agent, seq, entry.timestamp);
+    }
+    return;
+  }
   const notes = taskNotifications(entry);
   if (notes.length > 0) {
     for (const note of notes) {
@@ -1053,10 +1322,14 @@ function feedLine(st, l) {
           { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } } });
       } else if (st.background.has(note.id)) st.finishedUncollected.add(note.id);
       if (st.helpersRunning.has(note.id) && /^(?:completed|failed|killed|cancelled|canceled|stopped)$/.test(note.status)) st.helpersRunning.delete(note.id);
-      // An independent reviewer agent finished: credit the run it completed.
+      // An independent reviewer agent finished: credit the run it completed. A notice sent while it still
+      // waits on its own background work is no finish (2026-11-12, follow-up E: such a run counted as a
+      // completed review before its report existed); its hand-back or a later notice finishes it.
       const agent = st.reviewerAgents.get(note.id);
-      if (agent && note.status === 'completed') reviewDone(st, agent.at, String(entry.timestamp || ''));
-      if (agent && note.status === 'completed' && agent.launch > res.lastReviewerRun) { res.lastReviewerRun = agent.launch; res.lastReviewerResult = st.seq; }
+      const finished = !!agent && note.status === 'completed' && !interimNotice(note);
+      // Its finish notice can carry its report too (see addReport: each note counts once per run).
+      if (finished && note.result) addReport(st, note.result, note.id + '@' + agent.launch, st.seq, entry.timestamp);
+      if (finished) creditReviewer(st, agent, st.seq, entry.timestamp);
     }
     // A bundled notice shares the entry with the user's own words; nothing else there is scanned.
     return;
@@ -1094,7 +1367,18 @@ function feedLine(st, l) {
           }
         } catch (e) { /* a malformed probe declaration covers nothing */ }
       }
+      // Reviewer notes (2026-11-12): what this turn claims, and each note's outcome line.
+      if (claimsReview(blk.text)) res.turnClaim = true;
+      if (applyOutcomes(res.reviewNotes, st.noteSeqs, st.userWords, plain)) pruneUserWords(st);
       continue;
+    }
+
+    // A reviewer report in a tool result: the other engine's report read from a file (2026-11-12). Only in
+    // a session that launched an independent reviewer: an old report file or a test fixture read during
+    // other work is no review (follow-up D).
+    if (blk.type === 'tool_result' && res.reviewerLaunched && !(blk.tool_use_id && st.reviewerCalls.has(blk.tool_use_id)) && l.includes('RECOMMEND: ')) {
+      const report = recommendReport(resultText(blk, null));
+      if (report) addReport(st, report, '', seq, entry.timestamp);
     }
 
     if (blk.type === 'tool_use' && blk.input && typeof blk.input === 'object') {
@@ -1106,6 +1390,7 @@ function feedLine(st, l) {
       } else if (blk.name === 'Agent' && REVIEWER_PROMPT.test(String(blk.input.prompt || ''))) {
         st.reviewerCalls.set(blk.id, seq);                  // agent id arrives with the result
         st.reviewerAt.set(blk.id, String(entry.timestamp || ''));
+        res.reviewerLaunched = true;
       } else if (blk.name === 'SendMessage' && st.reviewerAgents.has(String(blk.input.to || ''))) {
         st.reviewerAgents.get(String(blk.input.to)).launch = seq;   // a follow-up review run
         st.reviewerAgents.get(String(blk.input.to)).at = String(entry.timestamp || '');
@@ -1134,7 +1419,8 @@ function feedLine(st, l) {
       st.reviewerAt.delete(blk.tool_use_id);
       if (id && blk.is_error !== true) st.reviewerAgents.set(id, { launch, at });
       if (id && t.status === 'completed') reviewDone(st, at, String(entry.timestamp || ''));
-      // A synchronous reviewer returns its finished report in this result.
+      // A synchronous reviewer returns its finished report in this result: its notes count (2026-11-12).
+      if (id && t.status === 'completed' && blk.is_error !== true) addReport(st, resultText(blk, null), id + '@' + launch, seq, entry.timestamp);
       if (id && t.status === 'completed' && launch > res.lastReviewerRun) { res.lastReviewerRun = launch; res.lastReviewerResult = seq; }
       continue;
     }
@@ -1326,14 +1612,40 @@ function codeStamp() {
       .map((f) => { const s = fs.statSync(f); return s.size + ':' + s.mtimeMs; }).join('|');
   } catch (e) { return ''; }
 }
-function cacheFolder() {
-  const state = (proc && proc.env && proc.env.SANAD_STATE_DIR) || path.join(require('os').homedir(), '.claude', 'state');
-  return path.join(state, 'scan-cache');
+// The hooks' state folder: the scan cache, the notes lock's start time, the stop gate's block counter.
+function stateFolder() {
+  return (proc && proc.env && proc.env.SANAD_STATE_DIR) || path.join(require('os').homedir(), '.claude', 'state');
 }
-function cachedScan(file, transcript, fd, size, stamp) {
+// The user's own state folder is written for real sessions only (a transcript under .claude/projects);
+// anything else (a test's transcript) only where SANAD_STATE_DIR points.
+function stateAllowed(transcriptPath) {
+  return !!(proc && proc.env && proc.env.SANAD_STATE_DIR) || /\/\.claude\/projects\//i.test(path.resolve(String(transcriptPath || '')).replace(/\\/g, '/'));
+}
+function cacheFolder() { return path.join(stateFolder(), 'scan-cache'); }
+
+// The notes lock's start time (2026-11-12, follow-up A): reports that arrived before it give no notes, so
+// a session already running when the lock came is not blocked by its history (one had 232 old notes).
+// The time is kept in <state>/review-notes-since; the first scan without it writes the current time. A
+// file that cannot be read or holds no time means no start time: every report counts (the lock stays shut).
+const SINCE_FILE = 'review-notes-since';
+function readSince(file) { const t = String(fs.readFileSync(file, 'utf8')).trim(); return Number.isFinite(Date.parse(t)) ? t : ''; }
+function notesSince() {
+  const file = path.join(stateFolder(), SINCE_FILE);
+  try { return readSince(file); } catch (e) { if (!e || e.code !== 'ENOENT') return ''; }
+  try {
+    const now = new Date().toISOString();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, now + '\n', { flag: 'wx' });
+    return now;
+  } catch (e) {
+    try { return readSince(file); } catch (e2) { return ''; }   // another hook wrote it first, or it cannot be written
+  }
+}
+// since: part of the cache's validity, so a cached state never mixes two start times.
+function cachedScan(file, transcript, fd, size, stamp, since) {
   let c;
   try { c = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
-  if (!c || c.v !== SCAN_CACHE_VERSION || c.code !== stamp || typeof c.path !== 'string' || c.path.toLowerCase() !== transcript.toLowerCase() ||
+  if (!c || c.v !== SCAN_CACHE_VERSION || c.code !== stamp || c.since !== since || typeof c.path !== 'string' || c.path.toLowerCase() !== transcript.toLowerCase() ||
       !Number.isInteger(c.offset) || c.offset < 0 || c.offset > size || !c.helpers || typeof c.helpers !== 'object' || Array.isArray(c.helpers)) return null;
   for (const h of Object.values(c.helpers)) if (!h || !Number.isInteger(h.offset) || h.offset < 0 || typeof h.mark !== 'string') return null;
   if (c.offset > 0 && fileMark(fd, c.offset) !== c.mark) return null;
@@ -1399,10 +1711,15 @@ function scanOpen(transcriptPath, fd) {
   const transcript = path.resolve(transcriptPath).replace(/\\/g, '/');
   // The user's own state folder holds caches of real sessions only; anything else (a test's transcript)
   // is cached only where SANAD_STATE_DIR points.
-  const cacheable = !!stamp && (!!(proc && proc.env && proc.env.SANAD_STATE_DIR) || /\/\.claude\/projects\//i.test(transcript));
+  const allowed = stateAllowed(transcript);
+  const cacheable = !!stamp && allowed;
+  // The notes lock's start time; a transcript that may not use the state folder has none (every report counts).
+  const since = allowed ? notesSince() : '';
+  const sinceMs = since ? Date.parse(since) : null;
   const file = cacheable ? path.join(cacheFolder(), require('crypto').createHash('sha1').update(transcript.toLowerCase()).digest('hex') + '.json') : '';
-  const cached = file ? cachedScan(file, transcript, fd, size, stamp) : null;
+  const cached = file ? cachedScan(file, transcript, fd, size, stamp, since) : null;
   let st = cached ? cached.st : newScanState();
+  st.since = sinceMs;
   let offset = cached ? cached.offset : 0;
   let helpers = cached ? cached.helpers : {};
   if (file && !cached) pruneCache(path.dirname(file));
@@ -1410,13 +1727,13 @@ function scanOpen(transcriptPath, fd) {
   // the next call continues from there instead of starting over each time (2026-11-12).
   let saved = cached ? offset : -1, savedAt = Date.now();
   const save = (at) => {
-    writeCache(file, { v: SCAN_CACHE_VERSION, code: stamp, path: transcript, offset: at, mark: at > 0 ? fileMark(fd, at) : '', helpers, state: saveState(st) });
+    writeCache(file, { v: SCAN_CACHE_VERSION, code: stamp, since, path: transcript, offset: at, mark: at > 0 ? fileMark(fd, at) : '', helpers, state: saveState(st) });
     saved = at; savedAt = Date.now();
   };
   const checkpoint = (at) => { if (file && Date.now() - savedAt > CHECKPOINT_MS) save(at); };
   let read = readHelpers(st, transcriptPath, helpers);
   if (!read) {
-    st = newScanState(); offset = 0; helpers = {};
+    st = newScanState(); st.since = sinceMs; offset = 0; helpers = {};
     read = readHelpers(st, transcriptPath, helpers) || { changed: true, tails: [] };
     read.changed = true;
   }
@@ -1482,6 +1799,11 @@ function finishScan(st) {
   const stuck = (rec) => { if (rec.verifySeq > res.lastStuckVerifyStop) { res.lastStuckVerifyStop = rec.verifySeq; res.lastStuckVerifyStopCommand = rec.command || ''; } };
   for (const [id, rec] of background) { holdStop(rec); if (finishedUncollected.has(id)) stuck(rec); }
   for (const rec of pending.values()) if (rec.background) { holdStop(rec); stuck(rec); }
+  // Reviewer notes with no outcome yet: the stop gate and the push guard refuse while any is open (2026-11-12).
+  // The report seqs and the user's kept words let the stop gate apply the final text's outcome lines too.
+  res.openReviewNotes = res.reviewNotes.filter((n) => !n.outcome);
+  res.reviewNoteSeqs = st.noteSeqs;
+  res.reviewUserWords = st.userWords;
   return res;
 }
 
@@ -1491,4 +1813,5 @@ module.exports = {
   segmentEditPaths, shellEditPaths, shellWriteTargets, verifyFailed, resultText,
   scanTranscript,
   verificationCommand,
+  reportNotes, claimsReview, openNotesMessage, openNotesAfter, stateFolder, stateAllowed,
 };

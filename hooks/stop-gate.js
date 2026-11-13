@@ -14,6 +14,10 @@
  *  - a verify: a completed build/test/typecheck command whose recorded result did
  *    NOT fail (non-zero exit, "Build FAILED", "error CS…", "Failed!", "N
  *    failed", npm ERR!, …). A failing build is not verification.
+ *  - an open reviewer note (2026-11-12): a final text that says REVIEW/GATE: PASS
+ *    or hands over a push command blocks, even in a chat-only turn, until each
+ *    note is fixed or the user decided it (see transcript-scan.js "Reviewer notes").
+ *    With the host's final text this holds on repeated stops too (5 in a row at most).
  *
  * Deterministic, no LLM. Fail-OPEN: any error → allow silently.
  *
@@ -27,14 +31,22 @@ const path = require('path');
 // A stop that goes through starts the task timer's idle wait (lib/timer-idle.cjs); a blocked stop does not.
 // A GATE: PASS after the last code edit ends the task timer first (lib/timer-idle.cjs autoEnd, 2026-11-11).
 var lastScan = null, stopBusy = false; // stopBusy: a check or helper of this work still runs (not idle time)
+// Open reviewer notes (2026-11-12, rule 5): notesBlock turns this stop into a block (joined to any other
+// block reason); notesWarn is only a warning (the runaway guard, or an older host's repeated stop).
+var notesBlock = '', notesWarn = '';
 function markIdle() {
   try { if (lastScan) require('./lib/timer-idle.cjs').sideReviews(input, lastScan); } catch (e) { /* the timer never blocks a stop */ }
   try { if (lastScan) require('./lib/timer-idle.cjs').autoEnd(input, lastScan); } catch (e) { /* the timer never blocks a stop */ }
   // Busy: a check or helper of the work still runs, whichever verdict this stop gets (lastScan.workRunning).
   try { require('./lib/timer-idle.cjs').idle(input, undefined, { busy: stopBusy || !!(lastScan && lastScan.workRunning) }); } catch (e) { /* the timer never blocks a stop */ }
 }
-function out(obj) { if (!obj || obj.decision !== 'block') markIdle(); process.stdout.write(JSON.stringify(obj)); process.exit(0); }
-function allow() { markIdle(); process.exit(0); }
+function out(obj) {
+  if (notesBlock) obj = obj && obj.decision === 'block' ? { ...obj, reason: obj.reason + '\n\n' + notesBlock } : { decision: 'block', reason: notesBlock };
+  else if (notesWarn && !(obj && obj.decision === 'block')) obj = { ...(obj || {}), systemMessage: (obj && obj.systemMessage ? obj.systemMessage + '\n' : '') + notesWarn };
+  if (!obj || obj.decision !== 'block') markIdle();
+  process.stdout.write(JSON.stringify(obj)); process.exit(0);
+}
+function allow() { if (notesBlock || notesWarn) out({}); markIdle(); process.exit(0); }
 
 function readStdin() {
   try {
@@ -61,8 +73,57 @@ try { r = scan.scanTranscript(transcriptPath); } catch (e) { allow(); }
 if (!r) allow();
 lastScan = r;
 
+// Rule 5 as a lock (2026-11-12): the author dropped three reviewer notes without showing them to the
+// user. While a reviewer note has no outcome, a final text that says `REVIEW: PASS` / `GATE: PASS`, or
+// hands over a push command in a code block, is blocked with the open notes. Other stops are untouched;
+// with no reviewer report in the session there are no notes. Any error: no lock.
+//  - The host sends the final text (last_assistant_message). Its own `NOTE n: …` lines count at once:
+//    the transcript may not hold it yet (follow-up C). The lock then holds on every such stop, also a
+//    repeated one, so the author cannot get past it by saying PASS twice (follow-up B); the way out is to
+//    answer the notes, or to stop with a question to the user and no verdict or push command.
+//  - Runaway guard: after 5 such blocks in a row in one session the 6th only warns and the count starts
+//    again; any stop that passes this check clears the count. A count that cannot be kept (no state
+//    folder for this transcript) falls back to the older rule below.
+//  - Without the final text (an older host), this turn's own verdict lines decide: block once, then warn.
+const NOTES_BLOCKS_FILE = 'review-notes-blocks.json', NOTES_BLOCKS_MAX = 5;
+// update(count) gives the new count; returns the count read, or null when it cannot be kept.
+function notesBlockCount(update) {
+  try {
+    if (!scan.stateAllowed(transcriptPath)) return null;
+    const file = path.join(scan.stateFolder(), NOTES_BLOCKS_FILE);
+    const key = String(input.session_id || transcriptPath).toLowerCase();
+    let counts = {};
+    try { counts = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { counts = {}; }
+    if (!counts || typeof counts !== 'object' || Array.isArray(counts)) counts = {};
+    const count = Number.isInteger(counts[key]) && counts[key] > 0 ? counts[key] : 0;
+    const next = update(count);
+    if (next !== count) {
+      if (next > 0) counts[key] = next; else delete counts[key];
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(counts));
+    }
+    return count;
+  } catch (e) { return null; }
+}
+try {
+  const last = typeof input.last_assistant_message === 'string' ? input.last_assistant_message : null;
+  const open = last !== null ? scan.openNotesAfter(r, last) : (Array.isArray(r.openReviewNotes) ? r.openReviewNotes : []);
+  const said = open.length > 0 && (last !== null ? scan.claimsReview(last) : r.turnClaim === true);
+  if (said) {
+    const list = scan.openNotesMessage(open);
+    let hold = !input.stop_hook_active;
+    if (last !== null) {
+      const count = notesBlockCount((n) => (n >= NOTES_BLOCKS_MAX ? 0 : n + 1));
+      if (count !== null) hold = count < NOTES_BLOCKS_MAX;
+    }
+    if (hold) notesBlock = list; else notesWarn = '⛔ ' + list;
+  } else {
+    notesBlockCount(() => 0);
+  }
+} catch (e) { notesBlock = ''; notesWarn = ''; }
+
 /* ---------------------------------------------------------------------------
- * Verdict — exactly one of six exits:
+ * Verdict — exactly one of six exits (open reviewer notes, above, turn any of them into a block):
  *   1. no code edit this session               → allow silently
  *   2. PASSING verify ran after the last edit  → allow + confirmation note
  *   3. a helper or a background check of this

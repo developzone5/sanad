@@ -49,6 +49,8 @@ export const SIGNALS = {
   concurrencyUi: { size: 'medium', seat: 'Skeptic', label: 'timers or cross-tab state in the client' },
   infra: { size: 'medium', seat: 'deploy check', label: 'infrastructure or startup config' },
   split: { size: 'medium', seat: 'PR plan: split it', label: 'more than 400 logic lines or 30 files' },
+  // 2026-11-12 (three sizes, user-approved): Small is one side only. Logic on both sides is Medium.
+  bothSides: { size: 'medium', seat: 'the page rule and the server rule agree (the same cases tested on both)', label: 'server and page code in one change' },
   // Does not raise the size; adds the Client state lens (the seat on a panel, its checks in every review brief).
   clientState: { size: 'small', seat: 'Client state checks (the Client state seat on a panel)', label: 'client state (URL, cache, storage)' },
 };
@@ -194,8 +196,11 @@ export function readDiff(repo, base, extra = {}) {
 const KIND = name => TEST_FILE.test(name) ? 'test' : DOC.test(name) ? 'doc' : LOCALE.test(name) ? 'locale' : STYLE.test(name) ? 'style' : 'code';
 
 // Signal → list of "file:hint" pieces of evidence.
+// Page code: what runs in the browser. Server TypeScript (route handlers, "use server") is the server side.
+const PAGE_CODE = /\.(?:[cm]?[jt]sx?|vue|svelte)$/i;
 export function signals(files, { plan = false, repo } = {}) {
   const found = new Map();
+  const sides = { server: '', page: '' };
   const add = (key, where) => { if (!found.has(key)) found.set(key, []); if (found.get(key).length < 3) found.get(key).push(where); };
   for (const f of files) {
     const kind = KIND(f.name);
@@ -209,6 +214,8 @@ export function signals(files, { plan = false, repo } = {}) {
     if (RE.lockfile.test(f.name) || ((/package\.json$|\.csproj$/i.test(f.name)) && (plan || lines.some(l => RE.depLine.test(l))))) add('dependency', base);
     if (RE.infra.test(f.name)) add('infra', base);
     if (kind !== 'code') continue;
+    if (server) sides.server ||= base;
+    else if (PAGE_CODE.test(f.name)) sides.page ||= base;
     if (RE.schemaPath.test(f.name) || hit(RE.schemaLine, RAW.schema)) add('schema', base);
     if (!plan && repo && DB_FILE.test(fileText(repo, f.name)) && queryChanged(repo, f)) add('query', base);
     if (RE.contractPath.test(f.name) || hit(RE.contractLine)) add('contract', base);
@@ -228,6 +235,7 @@ export function signals(files, { plan = false, repo } = {}) {
     if (!server && hit(RE.clientState)) add('clientState', base);
     if (hit(RE.money) || hit(RE.tax)) add('money', base);
   }
+  if (sides.server && sides.page) found.set('bothSides', [sides.server, sides.page]);
   return found;
 }
 
@@ -368,32 +376,84 @@ function allChangedSymbols(repo, files) {
       if (commentOnlyHunk(repo, f, h)) continue;
       const from = Math.max(0, h.start - 1), to = Math.min(lines.length, from + Math.max(h.count, 1));
       for (let i = from; i < to; i++) keep(defName(lines[i]), f, lines[i], i);
-      // The enclosing function: the nearest definition above whose body is still open at the hunk
-      // (brackets opened since its line are not all closed). Scanned to the top of the file, so a
-      // change deep in a large component still names that component; a sibling helper that ended
-      // before the hunk is skipped.
-      // s[j] = brackets opened from line j down to the hunk and still open there. A bracket opened
-      // on line j (or up to two lines below a definition, for a brace on its own line) holds the
-      // hunk when s[j] is above every s[k] below it.
-      let first = from; while (first < to - 1 && !String(lines[first] || '').trim()) first++;
-      const depth = indent(lines[first]);
-      const s = new Map(), maxBelow = new Map();
-      let sum = 0, best = 0;
-      for (let i = from - 1; i >= 0; i--) {
-        maxBelow.set(i, best);
-        sum += bracketBalance(lines[i]);
-        s.set(i, sum);
-        best = Math.max(best, sum);
-        const n = defName(lines[i]);
-        if (!n || depth <= indent(lines[i])) continue;
-        // A lone `{` one or two lines down is this definition's body (a brace on its own line).
-        const opener = [i, i + 1, i + 2].filter(j => j === i || String(lines[j] || '').trim() === '{');
-        const holds = opener.some(j => j < from && s.get(j) > maxBelow.get(j));
-        if (holds) { keep(n, f, lines[i], i); break; }
-      }
+      const around = enclosingDef(lines, from, to);
+      if (around.name) keep(around.name, f, lines[around.at], around.at);
     }
   }
   return [...names.entries()].map(([name, v]) => ({ name, ...v }));
+}
+
+/**
+ * The enclosing function of lines[from..to) (0-based): the nearest definition above whose body is still open
+ * there (brackets opened since its line are not all closed). Scanned to the top of the file, so a change deep
+ * in a large component still names that component; a sibling helper that ended before is skipped.
+ * `{ name, at }`, or `{ name: '', at: -1 }` at the top level. Extracted from allChangedSymbols unchanged
+ * (2026-11-12), so places.mjs names the function a hit sits in the same way. `wide` (places.mjs only; off for
+ * the size check, whose answers stay as they were) also reads a signature over several lines and an
+ * expression body (bodyAfterSignature).
+ */
+function enclosingDef(lines, from, to, { wide = false } = {}) {
+  // s[j] = brackets opened from line j down to the lines and still open there. A bracket opened on line j
+  // (or up to two lines below a definition, for a brace on its own line) holds them when s[j] is above every
+  // s[k] below it.
+  let first = from; while (first < to - 1 && !String(lines[first] || '').trim()) first++;
+  const depth = indent(lines[first]);
+  const s = new Map(), maxBelow = new Map();
+  let sum = 0, best = 0;
+  for (let i = from - 1; i >= 0; i--) {
+    maxBelow.set(i, best);
+    sum += bracketBalance(lines[i]);
+    s.set(i, sum);
+    best = Math.max(best, sum);
+    const n = defName(lines[i]);
+    if (!n || depth <= indent(lines[i])) continue;
+    // A lone `{` one or two lines down is this definition's body (a brace on its own line).
+    const opener = [i, i + 1, i + 2].filter(j => j === i || String(lines[j] || '').trim() === '{');
+    const holds = opener.some(j => j < from && s.get(j) > maxBelow.get(j));
+    if (holds) return { name: n, at: i };
+    if (!wide) continue;
+    const body = bodyAfterSignature(lines, i);
+    if (body && body.block !== undefined && body.block < from && s.get(body.block) > maxBelow.get(body.block)) return { name: n, at: i };
+    if (body && body.expr && from >= body.expr[0] && from <= body.expr[1]) return { name: n, at: i };
+  }
+  return { name: '', at: -1 };
+}
+
+// Parentheses opened minus closed on one line, strings and line comments left out.
+function parenBalance(line) {
+  const code = String(line || '').replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '').replace(/\/\/.*$/, '');
+  let n = 0;
+  for (const c of code) { if (c === '(') n++; else if (c === ')') n--; }
+  return n;
+}
+// The body of the definition on line i when its signature runs over several lines, as CSharpier writes a long
+// one (`CreateAsync(`, the parameters, `)` alone, `{` alone): `{ block: <line of its {> }`, or for an
+// expression body (`=> …;`) `{ expr: [<line of =>>, <line of its ;>] }`; null when neither is found
+// (2026-11-12: the three EnsurePublishInput calls of AssignmentService.cs sat in three such methods).
+function bodyAfterSignature(lines, i) {
+  let open = 0;
+  for (let k = i; k < Math.min(lines.length, i + 40); k++) {
+    open += parenBalance(lines[k]);
+    if (open > 0) continue;
+    const t = String(lines[k] || '').replace(/\/\/.*$/, '').trim(), next = String(lines[k + 1] || '').trim();
+    if (t.endsWith('{')) return { block: k };
+    if (next === '{') return { block: k + 1 };
+    const arrow = /=>/.test(t.slice(Math.max(0, t.lastIndexOf(')')))) ? k : next.startsWith('=>') ? k + 1 : -1;
+    if (arrow < 0) return null;
+    let depth = 0;
+    for (let m = arrow; m < Math.min(lines.length, arrow + 60); m++) {
+      depth += bracketBalance(lines[m]);
+      if (depth <= 0 && /;\s*$/.test(String(lines[m] || '').replace(/\/\/.*$/, ''))) return { expr: [arrow, m] };
+    }
+    return null;
+  }
+  return null;
+}
+
+// The function line `at` (0-based) belongs to: the one it defines, else the one it sits in; '' at the top
+// level (a module line, a class field, an attribute). For places.mjs (2026-11-12).
+export function enclosingFunction(lines, at) {
+  return defName(lines[at]) || enclosingDef(lines, at, at + 1, { wide: true }).name;
 }
 
 // A JavaScript or TypeScript export is reached only through an import of its own file. A same-named
@@ -560,12 +620,13 @@ export function decide(found, callerRows, files) {
 
 // The reviewers each size gets are the ones review-brief.mjs writes into launch.md: a tiny or small change
 // gets ONE review, the Claude fresh eyes (user rule 2026-11-11). 2026-11-12: these lines still said "no
-// reviewer" for tiny and three reviewers for small.
+// reviewer" for tiny and three reviewers for small. 2026-11-12 (three sizes, user-approved): Medium also
+// gets one review, with the full brief; the boss, the panel and the full round are for Big.
 export function roles(size, found) {
   const seats = [...new Set([...found.keys()].map(k => SIGNALS[k].seat))];
   const reviewers = 'reviewers: whole-diff (Sonnet), fresh eyes (Opus), other engine (Codex)';
   if (size === 'tiny' || size === 'small') return ['one review: fresh eyes (Opus)', ...seats.map(s => '+ ' + s)];
-  if (size === 'medium') return ['boss answers the open question first (boss-only)', reviewers, ...seats.map(s => '+ ' + s)];
+  if (size === 'medium') return ['one review: fresh eyes (Opus), full brief', ...seats.map(s => '+ ' + s)];
   return ['boss + expert panel before code (Pragmatist + a seat per open question)', ...seats.map(s => '+ ' + s), 'risk reviewer (Opus) on the risk files', reviewers];
 }
 

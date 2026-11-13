@@ -92,15 +92,26 @@ Then restart Claude Code and check `/hooks` and `/help`.
 
 ## The loop
 
+Six rules hold on every task, whatever its size:
+
+1. Before code, list every place that uses the rule or data the change touches. The list comes from a search.
+2. A test for every ticket line and every place.
+3. Every new test fails on the old code.
+4. Tests, lint, types and the suite pass on the final code.
+5. A second AI reviews. Every note it writes is fixed, or the user decides it. The author never closes a note alone.
+6. The user checks in the browser and pushes.
+
+Rules 1, 2, 4 and 5 are locks: a program refuses the next step until the rule holds. A size check picks the depth, not the author: **Small** (one side, no risk signal: no experts, one quick review), **Medium** (both sides, a query or the shared API: one full review and the full suite), **Big** (access, money, migrations, concurrency: experts plan first, then the full review round).
+
 A substantive change runs six steps. Each step has exactly one exit rule, and there is no next step without it.
 
 | # | Step | Exit rule |
 |---|---|---|
-| 1 | **Understand** | `Done means`: 3–8 checkable results in your words, including what must NOT change. |
+| 1 | **Understand** | The ticket's lines, the list of places with every place closed, and the check lines (`Done means`), including what must NOT change. |
 | 2 | **Check the facts** | Every outside fact the design depends on is proven with a real sample, or listed as an open assumption you accept. |
-| 3 | **Design** | The smallest change that meets `Done means`, plus the list of files to touch. Bounded work goes direct; risky work gets a braintrust. |
+| 3 | **Design** | The smallest change that covers every place on the list. Small work has no design step; a changed query gets a database seat; big work gets a braintrust. |
 | 4 | **Build and prove** | Red before green for a bug. Tests through the public entry point. The real provider when data writes change. Real output for every claim. |
-| 5 | **Independent review** | Pass A traces sensitive files and their callers; Pass B covers the whole diff. Routine changes need only Pass B. Fixes receive a fresh scoped re-check. Exit: `REVIEW: PASS`. |
+| 5 | **Independent review** | Small and Medium: one fresh-eyes review. Big: the risk files, the whole diff, fresh eyes and the other engine, at once. Every note is answered `NOTE n: fixed — …` or `NOTE n: user — "…"`. Fixes receive a fresh scoped re-check. Exit: `REVIEW: PASS`. |
 | 6 | **Gate and ship** | `/gate` verifies the final source with real quoted output. Then a short ship brief and your explicit yes, before any push or **draft PR to the integration branch**. Exit: `GATE: PASS`. |
 
 The ship ask is the hard stop. No stage, effort level or mode removes it. Production branches are blocked by default; the human may explicitly designate an integration branch as described below. Sanad never merges or deploys.

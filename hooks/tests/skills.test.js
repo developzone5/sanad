@@ -44,6 +44,31 @@ test('pinned agent types exist with their model, xhigh effort and no write tools
     assert.match(front, /^disallowedTools: .*\bWrite\b.*\bEdit\b/m, name);
   }
 });
+// 2026-11-12: the loop is one short page. It had grown to 63 KB in 18 dated layers with rules that
+// contradicted each other, and rules written there were skipped. These lines keep it one page: the six
+// rules, the three sizes, every step, no history and no list of old bugs.
+test('the loop is one short page: six rules, three sizes, every step, no bug list', () => {
+  const dir = path.join(canonicalRoot, 'sanad/reference');
+  const loop = fs.readFileSync(path.join(dir, 'loop.md'), 'utf8');
+  assert.ok(Buffer.byteLength(loop) < 14000, 'loop.md is ' + Buffer.byteLength(loop) + ' bytes: keep it one page; detail belongs in loop-rare-cases.md');
+  for (const rule of ['1. **Places first.**', '2. **A test for every ticket line and every place.**', '3. **Every new test fails on the old code.**',
+    '4. **Tests, lint, types and the suite pass on the final code.**', '5. **A second AI reviews.', '6. **The user checks in the browser and pushes.**']) assert.ok(loop.includes(rule), rule);
+  for (const size of ['- **Small**', '- **Medium**', '- **Big**']) assert.ok(loop.includes(size), size);
+  for (const step of ['## Step 1 —', '## Step 1.5 —', '## Step 2 —', '## Step 3 —', '## Step 3.5 —', '## Step 4 —', '## Step 5 —']) assert.ok(loop.includes(step), step);
+  for (const tool of ['places.mjs', 'red-proof.mjs', 'pre-review.mjs', 'review-brief.mjs', 'size-check.mjs', '--places <notes>/places.md']) assert.ok(loop.includes(tool), tool);
+  assert.match(loop, /NOTE <n>: fixed — /);
+  assert.match(loop, /NOTE <n>: user — "/);
+  assert.match(loop, /^ {3}`REVIEW: PASS\|FAIL — bugs <found>\/<fixed>, goals tested <k>\/<k> ✓, untested <n>, open: <none\|list>`$/m);
+  assert.doesNotMatch(loop, /missed-bug|20\d\d-\d\d-\d\d/i, 'no bug list and no dated history in the loop');
+  for (const file of ['review-checklist.md', 'loop-rare-cases.md']) {
+    assert.ok(loop.includes('(' + file + ')'), file + ' is linked from the loop');
+    assert.doesNotMatch(fs.readFileSync(path.join(dir, file), 'utf8'), /missed-bug/i, file);
+  }
+  // Every local link in the three files points at a file that exists.
+  for (const file of ['loop.md', 'review-checklist.md', 'loop-rare-cases.md']) {
+    for (const [, target] of fs.readFileSync(path.join(dir, file), 'utf8').matchAll(/\]\(([^)#]+\.md)\)/g)) assert.ok(fs.existsSync(path.join(dir, target)), file + ' → ' + target);
+  }
+});
 test('sonnet-worker is pinned to Sonnet, cannot spawn agents, and is limited to mechanical edits', () => {
   const agentRoot = path.join(claudeRoot, 'agents');
   const text = fs.readFileSync(path.join(agentRoot, 'sonnet-worker.md'), 'utf8');
@@ -56,12 +81,17 @@ test('sonnet-worker is pinned to Sonnet, cannot spawn agents, and is limited to 
 });
 test('review template and evidence rules carry entry points, metric meaning, hygiene and CI-skipped proof', () => {
   const agentRoot = path.join(claudeRoot, 'agents');
-  const loop = fs.readFileSync(path.join(canonicalRoot, 'sanad/reference/loop.md'), 'utf8');
-  for (const line of ['ENTRY POINTS:', 'MEANING:', 'HYGIENE:', 'CI-SKIPPED:']) assert.ok(loop.includes('- `' + line + '`'), line);
-  assert.match(loop, /one unit = <before> → <after>/);
+  // 2026-11-12: the reviewers' checklist moved out of the loop into its own file.
+  const checklist = fs.readFileSync(path.join(canonicalRoot, 'sanad/reference/review-checklist.md'), 'utf8');
+  for (const line of ['ENTRY POINTS:', 'MEANING:', 'HYGIENE:', 'CI-SKIPPED:', 'USERS FOUND BY SEARCH:']) assert.ok(checklist.includes('- `' + line + '`'), line);
+  assert.match(checklist, /one unit = <before> → <after>/);
   for (const name of ['independent-reviewer', 'routine-reviewer']) {
     const text = fs.readFileSync(path.join(agentRoot, name + '.md'), 'utf8');
-    assert.match(text, /CALLERS, ENTRY POINTS, REMOVED, WRITERS, MEANING, FAILURES \/ LOCALES, HYGIENE, CI-SKIPPED, MISSED-BUG CLASSES/, name);
+    assert.match(text, /CALLERS, ENTRY POINTS, REMOVED, WRITERS, MEANING, FAILURES \/ LOCALES, HYGIENE, CI-SKIPPED, USERS FOUND BY SEARCH/, name);
+    assert.match(text, /sanad\/reference\/review-checklist\.md/, name);
+    assert.match(text, /EXTRA TEST: /, name);
+    // The workflow no longer reads a list of old bugs (user 2026-11-12).
+    assert.doesNotMatch(text, /missed-bug/i, name);
   }
   const proof = fs.readFileSync(path.join(canonicalRoot, 'gate/reference/behavior-proof.md'), 'utf8');
   assert.match(proof, /\*\*Metric, ranking or threshold:\*\*/);
