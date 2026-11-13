@@ -17,7 +17,9 @@
 // a break the tests did not catch, an invalid break, or a red green run; 2 = usage or restore problem,
 // or the run was stopped (Ctrl-C, SIGTERM, Ctrl-Break: files restored); 3 = SETUP (a
 // test failed for a setup reason: element not found, type or build error, timeout; or the fixed tree
-// does not compile); 4 = REMOTE-DOWN (the test machine does not answer); 5 = TIMEOUT (a run passed
+// does not compile. After a passing green run, an element not found on the old code or under a break
+// is the product's failure, caught, not SETUP: green found it with the same query); 4 = REMOTE-DOWN
+// (the test machine does not answer); 5 = TIMEOUT (a run passed
 // --timeout-min: it and every process it started were stopped, files restored, the run named);
 // 6 = ENVIRONMENT (a run failed on the database or the test host, not on the tests).
 //
@@ -66,7 +68,13 @@
 // under test, writing only the files that differ. MSBuild then rebuilds only the projects whose files
 // changed. Build output copied in from another folder would not help: a build at a new path
 // recompiles every project (MSBuild hashes the full reference paths). A copy's first proof is cold;
-// a run stopped at the time limit drops its copy. --drop-copies deletes the kept copies (on the test
+// a run stopped at the time limit drops its copy. Build once (2026-11-13: each sync to the test machine
+// is a new commit, and the SDK writes the commit id into every assembly, so every copy recompiled every
+// project at every proof, about 5 minutes a copy): a dotnet run in a copy builds without the commit id
+// (copyRunEnv); dotnet runs go only to copies that built before (the first, which the compile check
+// builds, and those an earlier proof or --warm built), one run after another in each, so each run
+// compiles only what its change touched; a copy that never built sits out. Other commands never take
+// a copy a dotnet command built. --drop-copies deletes the kept copies (on the test
 // machine, run it there).
 //
 // Compile check (2026-11-09: a missing `using` failed all 6 copies after full builds): a `dotnet test`
@@ -105,6 +113,11 @@ const SETUP_ERR = /TestingLibraryElementError|Unable to find (?:an? )?(?:accessi
 // exceptions (2026-11-12: with the old code red only by an assertion, these must read as one).
 const ASSERT_ERR = /AssertionError|\bexpected\b.*\bto\b|Assert\.\w+\(\) Failure|Xunit\.Sdk\.\w+Exception|AssertFailedException|Shouldly|^Expected:|^(?:Error:\s*)?expect\(\w*\)\.(?:not\.)?\w+\(|MockException|ReceivedCallsException/i;
 const SETUP_OUTPUT = /\berror (?:CS|TS)\d{3,5}\b|Build FAILED|Failed to resolve import|Cannot find module|SyntaxError/;
+// A Testing Library query that found no element (or not the one element it wants). After a passing green run
+// the same query found its element on the fixed tree, so on the old code (or under a break) this is the
+// product's own failure, not a broken test (2026-11-13: the old code did not render the notice the fix
+// renders, and the proof stopped as SETUP).
+const ELEMENT_ERR = /TestingLibraryElementError|Unable to find (?:an? |a label )?(?:accessible )?(?:element|role|label)\b|Unable to find role=/;
 // The machine, not the tests (2026-11-12, S2): a stopped database or a crashed test host failed every
 // red run, and the proof read PROVED. ENV_ERR reads a failing test's reason; ENV_OUTPUT the whole output
 // of a failed run (a host crash names no test). A MySqlException counts only with a connection reason:
@@ -347,11 +360,29 @@ export function hider(values) {
   return (text) => list.reduce((t, s) => t.split(s).join('***'), String(text));
 }
 
+// A `dotnet` command: its executable is dotnet or dotnet.exe, by any path.
+export function isDotnetCommand(command) {
+  return /^dotnet(?:\.exe)?$/i.test(String(command[0] || '').split(/[\\/]/).pop());
+}
+
+// The environment of a dotnet run in a kept copy (2026-11-13). The SDK writes the commit id into every
+// assembly ("1.0.0+<commit>"), and each sync to the test machine is a new commit, so every copy recompiled
+// every project at every proof, about 5 minutes a copy (checked on a two-project build: a new commit with no
+// file change recompiled both). Built without it, a new commit recompiles nothing, and a change recompiles
+// only its project and those that depend on it. A value the env file or the machine sets is kept. Other
+// runners, and the working folder, are left alone.
+const SOURCE_REVISION = 'IncludeSourceRevisionInInformationalVersion';
+export function copyRunEnv(command, env, platform = process.platform) {
+  if (!isDotnetCommand(command)) return env;
+  const same = (k) => (platform === 'win32' ? k.toUpperCase() === SOURCE_REVISION.toUpperCase() : k === SOURCE_REVISION);
+  if (Object.keys(env).some(same)) return env;
+  return { ...env, [SOURCE_REVISION]: 'false' };
+}
+
 // A `dotnet test` command's compile check: the same command listing its tests instead of running
 // them, so it builds the tree once. Other runners have none (null).
 export function compileCheckCommand(command) {
-  const exe = String(command[0] || '').split(/[\\/]/).pop();
-  if (!/^dotnet(?:\.exe)?$/i.test(exe) || command[1] !== 'test' || command.includes('--list-tests') || command.includes('-t')) return null;
+  if (!isDotnetCommand(command) || command[1] !== 'test' || command.includes('--list-tests') || command.includes('-t')) return null;
   const dash = command.indexOf('--', 2);
   return dash < 0 ? [...command, '--list-tests'] : [...command.slice(0, dash), '--list-tests', ...command.slice(dash)];
 }
@@ -452,6 +483,10 @@ async function main() {
     if (!pid) { try { return Date.now() - fs.statSync(lock).mtimeMs > 10000 ? null : -1; } catch { return null; } }
     return alive(pid) ? pid : null;
   };
+  // A copy a dotnet command has built in (its first build there compiled the whole solution): a marker in the
+  // copy's .git folder, which a sync never touches; dropping the copy drops it.
+  const builtIn = (copy) => fs.existsSync(path.join(copy, '.git', 'red-proof-built'));
+  const markBuilt = (copy) => { try { fs.writeFileSync(path.join(copy, '.git', 'red-proof-built'), new Date().toISOString() + '\n'); } catch { /* not a copy */ } };
   function dropCopy(dir) {
     if (!fs.existsSync(dir)) return false;
     // Links into the working folder's node_modules go first, so removing a copy never reaches through them.
@@ -750,14 +785,15 @@ async function main() {
   }
   const cwdHere = opt('--cwd') ? path.resolve(opt('--cwd')) : repo;
   // One process: no typed input (2026-11-09: an open input pipe let cmd.exe wait for ever), the env
-  // file's variables, and the time limit, past which it and every process it started are stopped.
-  function runProcess(argv, cwd) {
+  // file's variables (a kept copy's run: copyRunEnv), and the time limit, past which it and every process it
+  // started are stopped.
+  function runProcess(argv, cwd, env = runEnv) {
     return new Promise((resolve) => {
       let stdout = '', stderr = '', settled = false, timedOut = false, grace = null, timer = null;
       const end = (r) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(grace); resolve({ stdout, stderr, timedOut, ...r }); };
       let child;
       try {
-        child = spawn(argv[0], argv.slice(1), { cwd, env: runEnv, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+        child = spawn(argv[0], argv.slice(1), { cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
       } catch (error) { end({ status: null, error }); return; }
       if (child.pid) { running.add(child.pid); child.on('close', () => running.delete(child.pid)); }
       timer = setTimeout(() => { timedOut = true; stopTree(child.pid); }, limitMs);
@@ -796,7 +832,7 @@ async function main() {
       finish(3);
     }
   }
-  function showWhy(r) { for (const w of r.why.slice(0, 12)) say(`  ${w.kind === 'assert' ? '✓ assert' : w.kind === 'setup' ? '✗ setup ' : w.kind === 'env' ? '✗ env   ' : '? other '}  ${w.name}${w.why ? ' — ' + w.why : ''}`); }
+  function showWhy(r) { for (const w of r.why.slice(0, 12)) say(`  ${w.kind === 'assert' ? '✓ assert' : w.kind === 'setup' ? '✗ setup ' : w.kind === 'env' ? '✗ env   ' : w.kind === 'missing' ? '? missing' : '? other '}  ${w.name}${w.why ? ' — ' + w.why : ''}`); }
 
   // The DisplayName ↔ method pairs of the C# files that hold a mustFail part (see survivors).
   function namePairs() {
@@ -819,7 +855,8 @@ async function main() {
     const tree = treeUnderTest();
     const cwdRel = path.relative(repo, cwdHere);
     const check = compileCheckCommand(command);
-    const slots = Array.from({ length: parallel }, takeSlot);
+    const dotnet = isDotnetCommand(command);
+    const slots = Array.from({ length: parallel }, () => takeSlot(dotnet));
     say(`RED-PROOF: warming ${slots.length} kept cop${slots.length === 1 ? 'y' : 'ies'}${check ? ', each built once' : ''}`);
     const lines = await Promise.all(slots.map(async (copy, k) => {
       const t0 = Date.now();
@@ -827,9 +864,10 @@ async function main() {
       try { syncCopy(copy, tree.head, tree.dirty, tree.commonDir); }
       catch (e) { return `  copy ${k}: could not prepare — ${e.message}`; }
       if (!check) return `  copy ${k}: ready (${secs()})`;
-      const r = await runProcess(check, path.join(copy, cwdRel));
+      const r = await runProcess(check, path.join(copy, cwdRel), copyRunEnv(command, runEnv));
       logs.push(`===== warm copy ${k} =====\n${hide((r.stdout || '') + (r.stderr || ''))}`);
       if (r.timedOut || r.error) { try { dropCopy(copy); } catch { /* the next sync clones it again */ } }
+      else markBuilt(copy);
       return `  copy ${k}: ${r.timedOut ? 'stopped at the time limit' : r.error ? 'could not build' : r.status === 0 ? 'built' : `build failed (exit ${r.status}); the proof will show why`} (${secs()})`;
     }));
     lines.forEach(l => say(l));
@@ -876,12 +914,12 @@ async function main() {
 
   // A `dotnet test` command builds the fixed tree once before any run (2026-11-09: a missing `using`
   // failed all 6 copies after full builds). A build error stops here: SETUP, with the compiler lines.
-  async function compileCheck(cwd) {
+  async function compileCheck(cwd, env = runEnv) {
     const check = compileCheckCommand(command);
     if (!check) return;
     const started = Date.now();
     say('RED-PROOF: compile check — the fixed tree builds once (--list-tests) before any run');
-    const r = await runProcess(check, cwd);
+    const r = await runProcess(check, cwd, env);
     const output = (r.stdout || '') + (r.stderr || '');
     logs.push(`===== compile check =====\n${hide(output)}`);
     if (r.timedOut) { say(`RED-PROOF: TIMEOUT ✗ — the compile check ran past ${timeoutMin} min; it and every process it started were stopped. No run started.`); finish(5); }
@@ -915,12 +953,24 @@ async function main() {
       .filter(m => { try { return fs.lstatSync(path.join(repo, m)).isDirectory(); } catch { return false; } });
     const cwdRel = path.relative(repo, cwdHere);
     const width = Math.min(parallel, list.length);
-    const slots = Array.from({ length: width }, takeSlot);
+    const dotnet = isDotnetCommand(command);
+    const env = copyRunEnv(command, runEnv);
+    let slots = Array.from({ length: width }, () => takeSlot(dotnet));
     if (compileCheckCommand(command)) {
       try { syncCopy(slots[0], head, dirty, commonDir); }
       catch (e) { say('RED-PROOF: could not prepare a copy for the compile check — ' + e.message); finish(2); }
-      await compileCheck(path.join(slots[0], cwdRel));
+      await compileCheck(path.join(slots[0], cwdRel), env);
+      markBuilt(slots[0]);
     }
+    // Build once (2026-11-13): a dotnet build in a folder that never built compiles the whole solution, and
+    // build output copied in from another folder does not help (checked: MSBuild hashes the full reference
+    // paths, so every project recompiled). So dotnet runs go only to copies that built before (the first,
+    // which the compile check just built, and copies an earlier proof or --warm built), one run after another
+    // in each; there a change recompiles only its project and those that depend on it. A copy that never
+    // built is handed back unused.
+    const sitOut = dotnet ? slots.slice(1).filter(c => !builtIn(c)) : [];
+    for (const c of sitOut) releaseSlot(c);
+    slots = slots.filter(c => !sitOut.includes(c));
     const out = new Array(list.length);
     let next = 0;
     // Green first, in the first copy (the one the compile check warmed); the other runs start when it
@@ -928,7 +978,8 @@ async function main() {
     const order = [...list.keys()].sort((a, b) => Number(list[b].kind === 'green') - Number(list[a].kind === 'green'));
     let releaseGreen = () => {}, stopped = false;
     const greenGate = list.some(j => j.kind === 'green') ? new Promise(r => { releaseGreen = r; }) : null;
-    say(`RED-PROOF: ${list.length} run(s), ${width} at a time, each in its own copy${greenGate ? '; green first' : ''}`);
+    say(`RED-PROOF: ${list.length} run(s), ${slots.length} at a time, each in its own copy${greenGate ? '; green first' : ''}` +
+      (sitOut.length ? `; ${sitOut.length} cop${sitOut.length === 1 ? 'y' : 'ies'} never built here sit out (a first build in a new folder compiles the whole solution; --warm builds them before the next proof)` : ''));
     async function worker(copy) {
       while (next < list.length) {
         const i = order[next++];
@@ -946,7 +997,8 @@ async function main() {
             if (text === null) { if (fs.existsSync(target)) fs.rmSync(target); }
             else { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, text); }
           }
-          out[i] = await runProcess(command, path.join(copy, cwdRel));
+          out[i] = await runProcess(command, path.join(copy, cwdRel), env);
+          if (dotnet && !out[i].timedOut && !out[i].error) markBuilt(copy);
         } catch (e) {
           out[i] = e.noop ? { status: null, stdout: '', stderr: '', noop: true, why: e.message } : { status: null, stdout: '', stderr: '', error: e };
         } finally {
@@ -965,14 +1017,16 @@ async function main() {
   }
 
   // A kept copy for this proof: the first slot no running proof holds (its lock names this process,
-  // released when this process ends).
-  function takeSlot() {
+  // released when this process ends). A dotnet command takes a copy it built in first (2026-11-13: there its
+  // next build compiles only what changed); any other command never takes one, so a page proof that runs
+  // beside a server proof leaves the built copies to it.
+  function takeSlot(dotnet = false) {
     fs.mkdirSync(slotsRoot, { recursive: true });
     if (!takeSlot.held) {
       takeSlot.held = [];
       process.on('exit', () => { for (const l of takeSlot.held) { try { fs.rmSync(l, { force: true }); } catch { /* gone */ } } });
     }
-    for (let k = 0; ; k++) {
+    const take = (k) => {
       const lock = path.join(slotsRoot, `${k}.lock`);
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
@@ -980,11 +1034,28 @@ async function main() {
           takeSlot.held.push(lock);
           return path.join(slotsRoot, String(k));
         } catch (e) {
-          if (e.code !== 'EEXIST' || lockOwner(lock)) break; // in use: the next slot
-          try { fs.rmSync(lock, { force: true }); } catch { break; } // a stale lock: take it over
+          if (e.code !== 'EEXIST' || lockOwner(lock)) return null; // in use: the next slot
+          try { fs.rmSync(lock, { force: true }); } catch { return null; } // a stale lock: take it over
         }
       }
+      return null;
+    };
+    if (dotnet) {
+      const built = fs.readdirSync(slotsRoot).filter(n => /^\d+$/.test(n)).map(Number).sort((a, b) => a - b)
+        .filter(k => builtIn(path.join(slotsRoot, String(k))));
+      for (const k of built) { const copy = take(k); if (copy) return copy; }
     }
+    for (let k = 0; ; k++) {
+      if (!dotnet && builtIn(path.join(slotsRoot, String(k)))) continue;
+      const copy = take(k);
+      if (copy) return copy;
+    }
+  }
+  // A copy this proof took but will not use goes back at once, so another proof can take it.
+  function releaseSlot(copy) {
+    const lock = copy + '.lock';
+    takeSlot.held = takeSlot.held.filter(l => l !== lock);
+    try { fs.rmSync(lock, { force: true }); } catch { /* gone */ }
   }
   // Brings a kept copy to the tree under test (HEAD plus the folder's uncommitted files). Only files
   // that differ are written, so an unchanged file keeps its time and MSBuild skips its project.
@@ -1041,6 +1112,17 @@ async function main() {
     say('RED-PROOF: NOT PROVED ✗ — the fixed tree fails its own tests, so the red runs were skipped. An older test may still expect the old behavior: fix the tests or the code, then run again; files restored.');
     finish(1);
   }
+  // Green passed (when it ran): every test of the command passed on the fixed tree. A test that then fails on
+  // the old code, or under a break, because a Testing Library query found no element is caught: the query is
+  // proven, the element is what the old code lacks. Read as 'missing'; without a green run it stays SETUP.
+  const greenPassed = green && !runFailed(results[greenAt]);
+  const foundByGreen = (r) => {
+    if (!greenPassed) return 0;
+    let n = 0;
+    for (const w of r.why) if (w.kind === 'setup' && ELEMENT_ERR.test(w.why)) { w.kind = 'missing'; n++; }
+    return n;
+  };
+  const missingNote = (n) => (n ? `${n} by another error (an element green found on the fixed tree is missing)` : '');
   let ok = true;
   // 0. A run past the time limit proves nothing: named first, the others still read.
   const late = jobs.filter((j, i) => results[i]?.timedOut);
@@ -1051,6 +1133,7 @@ async function main() {
     const r = reads[0];
     if (results[0].timedOut) ok = false;
     else if (r.code !== 0) {
+      const missing = foundByGreen(r);
       setupStop(r, true); showWhy(r);
       const asserts = r.why.filter((w) => w.kind === 'assert').length;
       // A NAMED test that fails by a product error (an exception the old code throws) is the bug too. It
@@ -1058,11 +1141,12 @@ async function main() {
       // broken test. Setup and environment failures never reach this line.
       const others = r.why.filter((w) => w.kind === 'other').length;
       const none = NO_TESTS.exec(r.output);
-      if (asserts || others) say(`RED-PROOF: RED ✓ — the tests fail on ${oldLabel} for ${(oldPlan ? oldNames : oldRun).join(', ')} (exit ${r.code}; ${asserts} of ${r.why.length} failing test(s) by an assertion${others ? `, ${others} by another error: check above that it is the bug` : ''}); files restored.`);
+      const extra = [others ? `${others} by another error` : '', missingNote(missing)].filter(Boolean).join(', ');
+      if (asserts || others || missing) say(`RED-PROOF: RED ✓ — the tests fail on ${oldLabel} for ${(oldPlan ? oldNames : oldRun).join(', ')} (exit ${r.code}; ${asserts} of ${r.why.length} failing test(s) by an assertion${extra ? `, ${extra}: check above that it is the bug` : ''}); files restored.`);
       else if (none) say(`RED-PROOF: NOT RED ✗ — no test ran on ${oldLabel} (exit ${r.code}: "${none[0]}"); check the test command and its file filter; files restored.`);
       else if (!r.why.length) say(`RED-PROOF: NOT RED ✗ — the run fails on ${oldLabel} (exit ${r.code}), but no failing test was named (failure reasons not read from this runner); a crash or a run with no test proves nothing. Run the tests with a runner that names its failures (vitest, dotnet test); files restored.`);
       else say(`RED-PROOF: NOT RED ✗ — ${r.why.length} test(s) fail on ${oldLabel} (exit ${r.code}), but none by an assertion (${[...new Set(r.why.map(w => w.kind))].join(', ')}); a crash proves nothing. Make the test assert the behavior; files restored.`);
-      if (!asserts && !others) ok = false;
+      if (!asserts && !others && !missing) ok = false;
     } else {
       say(`RED-PROOF: NOT RED ✗ — the tests pass on ${oldLabel}, so they do not prove the fix; files restored.`); ok = false;
       const kept = plan ? (Array.isArray(plan.kept) ? plan.kept : []) : keptAtFix.map(k => k.file);
@@ -1097,7 +1181,11 @@ async function main() {
     if (b.single) {
       const none = r.code !== 0 && NO_TESTS.exec(r.output);
       if (none) { say(`RED-PROOF: NOT RED ✗ — no test ran with ${b.file} broken (exit ${r.code}: "${none[0]}"); check the test command; files restored.`); ok = false; }
-      else if (r.code !== 0) { setupStop(r); showWhy(r); say(`RED-PROOF: RED ✓ — the test fails with ${b.file} broken (exit ${r.code}); files restored.`); }
+      else if (r.code !== 0) {
+        const missing = foundByGreen(r);
+        setupStop(r); showWhy(r);
+        say(`RED-PROOF: RED ✓ — the test fails with ${b.file} broken (exit ${r.code}${missing ? `; ${missingNote(missing)}: check above that it is the bug` : ''}); files restored.`);
+      }
       else { say(`RED-PROOF: NOT RED ✗ — the test passes with ${b.file} broken, so it does not check that code; files restored.`); ok = false; }
       continue;
     }

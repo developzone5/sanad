@@ -300,8 +300,10 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
   return [
     '# Launch lines (copy as they are)', '',
     ...(sizeNote ? [sizeNote, ''] : []),
-    '## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
-    `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. Area: <the files and the field or endpoint — author fills>. Deliver per your guide.`, '',
+    // The Test designer is a Big-task seat (loop-rare-cases.md, the expert panel); a tiny, small or medium change
+    // listed it too, and the line looked like a step to run (2026-11-13).
+    ...(one ? [] : ['## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
+    `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. Area: <the files and the field or endpoint — author fills>. Deliver per your guide.`, '']),
     '## Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', '',
     `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}Read-only: no builds, no tests, no edits.`, '',
     ...(one ? [one, ''] : [

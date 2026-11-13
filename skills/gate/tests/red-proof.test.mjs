@@ -137,6 +137,43 @@ test('a test that fails because an element is missing is SETUP (exit 3), not pro
   assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before, 'files are restored on SETUP too');
 });
 
+// 2026-11-13: a page proof stopped as SETUP because the old code did not render the notice the fix renders
+// ("Unable to find an element with the text"). Green had passed with the same query, so the query works;
+// on the old code the missing element is the product's own failure.
+test('after a passing green run, an element the old code does not render is RED; without green it stays SETUP', () => {
+  const { repo } = fixture();
+  runnerOutput(repo, [' FAIL  src/a.test.tsx > notice > shows the saved notice', 'TestingLibraryElementError: Unable to find an element with the text: Saved. This could be because the text is broken up by multiple elements.']);
+  const before = fs.readFileSync(path.join(repo, 'app.cjs'));
+  const red = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--then-green', '--', process.execPath, 'check.cjs']);
+  assert.equal(red.status, 0, red.stdout);
+  assert.match(red.stdout, /\? missing\s+src\/a\.test\.tsx > notice > shows the saved notice — TestingLibraryElementError: Unable to find an element/);
+  assert.match(red.stdout, /RED ✓ — the tests fail on HEAD for app\.cjs \(exit 1; 0 of 1 failing test\(s\) by an assertion, 1 by another error \(an element green found on the fixed tree is missing\): check above that it is the bug\)/);
+  assert.match(red.stdout, /GREEN ✓/);
+  assert.doesNotMatch(red.stdout, /SETUP ✗/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before);
+  const setup = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(setup.status, 3, setup.stdout);
+  assert.match(setup.stdout, /✗ setup\s+src\/a\.test\.tsx > notice > shows the saved notice/);
+  assert.match(setup.stdout, /SETUP ✗ — 1 failed for a setup reason/);
+});
+
+test('after a passing green run: a missing role under one --break is RED too; any other setup reason still stops as SETUP', () => {
+  const { repo } = fixture();
+  runnerOutput(repo, [' FAIL  src/a.test.tsx > form > has the PDF button', 'TestingLibraryElementError: Unable to find role="button" and name "PDF"']);
+  const before = fs.readFileSync(path.join(repo, 'app.cjs'));
+  const broken = run(['--repo', repo, '--break', 'app.cjs', '--find', 'exports = 2', '--put', 'exports = 3', '--then-green', '--', process.execPath, 'check.cjs']);
+  assert.equal(broken.status, 0, broken.stdout);
+  assert.match(broken.stdout, /RED ✓ — the test fails with app\.cjs broken \(exit 1; 1 by another error \(an element green found on the fixed tree is missing\): check above that it is the bug\)/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'app.cjs')), before);
+  const alone = run(['--repo', repo, '--break', 'app.cjs', '--find', 'exports = 2', '--put', 'exports = 3', '--', process.execPath, 'check.cjs']);
+  assert.equal(alone.status, 3, 'without green the query is not proven: ' + alone.stdout);
+  runnerOutput(repo, [' FAIL  src/a.test.tsx > notice > shows it', 'TestingLibraryElementError: Unable to find an element with the text: Saved', ' FAIL  src/a.test.tsx > notice > reads it', "TypeError: Cannot read properties of undefined (reading 'x')"]);
+  const mixed = run(['--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--then-green', '--', process.execPath, 'check.cjs']);
+  assert.equal(mixed.status, 3, mixed.stdout);
+  assert.match(mixed.stdout, /✗ setup\s+src\/a\.test\.tsx > notice > reads it — TypeError/);
+  assert.match(mixed.stdout, /SETUP ✗ — 1 failed for a setup reason/);
+});
+
 test('a timeout and a dotnet failure are read too; a build error with no test is SETUP', () => {
   const { repo } = fixture();
   runnerOutput(repo, ['  Failed Api.Tests.HomeworkTests.LateAtTheMinute [42 ms]', '  Error Message:', '   Assert.Equal() Failure: Values differ', ' FAIL  src/b.test.ts > export > writes the file', 'Error: Test timed out in 5000ms.']);
@@ -397,6 +434,108 @@ test('a dotnet test command that does not compile stops at once with the compile
   assert.match(result.stdout, /error CS0246: The type or namespace name 'Fact/);
   assert.match(result.stdout, /SETUP ✗ — the fixed tree does not compile/);
   assert.doesNotMatch(result.stdout, /run\(s\), \d+ at a time/, 'no run starts');
+});
+
+// 2026-11-13: on the test machine every copy built the whole .NET solution at every proof, about 5 minutes
+// each. Two causes, both checked on a real two-project build: each sync is a new commit, and the SDK writes
+// the commit id into every assembly (InformationalVersion), so a new commit alone recompiles every project;
+// and a copy that never built pays a whole build, while build output copied in from another folder
+// recompiles everything too. A fake `dotnet` (Node under that name, this script preloaded) builds like
+// MSBuild by file times: it recompiles when a source is newer than its output, and its tests load the
+// built output, never the sources, so a break that was not compiled is not seen.
+const fakeDotnet = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'red-proof-dotnet-'));
+  const exe = path.join(dir, process.platform === 'win32' ? 'dotnet.exe' : 'dotnet');
+  try { fs.linkSync(process.execPath, exe); } catch { fs.copyFileSync(process.execPath, exe); }
+  if (process.platform !== 'win32') fs.chmodSync(exe, 0o755);
+  const preload = path.join(dir, 'fake-dotnet.cjs');
+  fs.writeFileSync(preload, [
+    'const fs = require("node:fs"), path = require("node:path");',
+    'if (/^dotnet(?:\\.exe)?$/i.test(path.basename(process.execPath))) {',
+    '  const args = process.argv.slice(2), sources = ["app.cjs", "rule.cjs"], out = path.join("obj", "build.json");',
+    '  let outTime = -1;',
+    '  try { outTime = fs.statSync(out).mtimeMs; } catch { /* never built here */ }',
+    '  const newer = sources.filter(f => fs.statSync(f).mtimeMs > outTime);',
+    '  const state = outTime < 0 ? "cold" : newer.length ? "incremental" : "up to date";',
+    '  if (state !== "up to date") { fs.mkdirSync("obj", { recursive: true }); fs.writeFileSync(out, JSON.stringify(Object.fromEntries(sources.map(f => [f, fs.readFileSync(f, "utf8")])))); }',
+    '  fs.appendFileSync(process.env.FAKE_DOTNET_LOG, JSON.stringify({ cwd: process.cwd(), state, newer, list: args.includes("--list-tests"), srcRev: process.env.IncludeSourceRevisionInInformationalVersion ?? null }) + "\\n");',
+    '  if (args.includes("--list-tests")) { fs.writeSync(1, "The following Tests are available:\\n"); process.exit(0); }',
+    '  const built = JSON.parse(fs.readFileSync(out, "utf8"));',
+    '  const load = (text) => { const m = { exports: {} }; new Function("module", "exports", text)(m, m.exports); return m.exports; };',
+    '  const fails = [];',
+    '  if (!load(built["rule.cjs"]).blocks) fails.push(" FAIL  src/a.test.cjs > form > saves nothing", "AssertionError: expected 1 to be 0");',
+    '  if (load(built["app.cjs"]) !== 2) fails.push(" FAIL  src/a.test.cjs > form > shows it once", "AssertionError: expected 2 to be 1");',
+    '  if (fails.length) { fs.writeSync(1, fails.join("\\n") + "\\n"); process.exit(1); }',
+    '  process.exit(0);',
+    '}', ''].join('\n'));
+  return { exe, nodeOptions: `--require "${preload.replace(/\\/g, '/')}"` };
+})();
+const dotnetRun = (repo, args, log) => run(['--repo', repo, ...args, '--', fakeDotnet.exe, 'test', 'Fixture.csproj'], { NODE_OPTIONS: fakeDotnet.nodeOptions, FAKE_DOTNET_LOG: log });
+const builds = (log) => { try { return fs.readFileSync(log, 'utf8').split(/\r?\n/).filter(Boolean).map(l => JSON.parse(l)); } catch { return []; } };
+function builtFixture() {
+  const { repo, breaks } = breakFixture();
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true });
+  fs.writeFileSync(path.join(repo, '.gitignore'), 'obj/\n');
+  git('add', '.gitignore'); git('commit', '-qm', 'ignore build output');
+  writeBreaks(breaks, ['saves nothing']);
+  const log = path.join(repo, '..', path.basename(repo) + '-dotnet.jsonl');
+  return { repo, breaks, git, log };
+}
+
+test('a dotnet proof builds once: every run shares the copy the compile check built, and builds only what its change touched', () => {
+  const { repo, breaks, log } = builtFixture();
+  const result = dotnetRun(repo, ['--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs', '--breaks', breaks, '--then-green', '--parallel', '3'], log);
+  assert.equal(result.status, 0, result.stdout);
+  assert.match(result.stdout, /RED-PROOF: PROVED ✓ — red on the old code, 1 break\(s\) caught, green on the fix/);
+  const seen = builds(log);
+  assert.deepEqual(seen.map(b => [b.list ? 'compile check' : 'run', b.state]),
+    [['compile check', 'cold'], ['run', 'up to date'], ['run', 'incremental'], ['run', 'incremental']], 'one whole build, then green and the red runs: ' + JSON.stringify(seen));
+  assert.equal(new Set(seen.map(b => b.cwd)).size, 1, 'every run in the copy that built: ' + seen.map(b => b.cwd).join(' | '));
+  assert.ok(seen[2].newer.includes('app.cjs'), 'the old code was compiled into the run that tested it');
+  assert.ok(seen[3].newer.includes('rule.cjs'), 'the break was newer than the output, so it was compiled into its run');
+  assert.ok(seen.every(b => b.srcRev === 'false'), 'a copy builds without the commit id, so a new commit recompiles nothing');
+  assert.match(result.stdout, /2 copies never built here sit out/);
+});
+
+test('--warm builds each copy once; a later proof runs in all of them at once; a frontend command leaves them alone', () => {
+  const { repo, breaks, log } = builtFixture();
+  const warm = dotnetRun(repo, ['--warm', '--parallel', '3'], log);
+  assert.equal(warm.status, 0, warm.stdout);
+  const warmed = builds(log);
+  assert.equal(warmed.filter(b => b.state === 'cold').length, 3, JSON.stringify(warmed));
+  fs.rmSync(log);
+  const proof = dotnetRun(repo, ['--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs', '--breaks', breaks, '--then-green', '--parallel', '3'], log);
+  assert.equal(proof.status, 0, proof.stdout);
+  assert.match(proof.stdout, /3 run\(s\), 3 at a time, each in its own copy; green first/);
+  assert.doesNotMatch(proof.stdout, /sit out/);
+  const seen = builds(log);
+  assert.deepEqual(seen.filter(b => b.state === 'cold'), [], 'no whole build during the proof: ' + JSON.stringify(seen));
+  assert.deepEqual([...new Set(seen.map(b => b.cwd))].sort(), [...new Set(warmed.map(b => b.cwd))].sort(), 'the runs used the warmed copies');
+  // A frontend proof at the same time must not hold the built copies, and gets no build setting.
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'console.log("CWD=" + process.cwd() + " SRCREV=" + process.env.IncludeSourceRevisionInInformationalVersion);',
+    'if (!require("./rule.cjs").blocks) { console.log([" FAIL  src/a.test.cjs > form > saves nothing", "AssertionError: expected 1 to be 0"].join(String.fromCharCode(10))); process.exit(1); }', ''].join('\n'));
+  const pageLog = path.join(repo, '..', path.basename(repo) + '-page.log');
+  const page = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--then-green', '--parallel', '2', '--log', pageLog, '--', process.execPath, 'check.cjs']);
+  assert.equal(page.status, 0, page.stdout);
+  assert.match(page.stdout, /2 run\(s\), 2 at a time, each in its own copy/);
+  const used = [...fs.readFileSync(pageLog, 'utf8').matchAll(/CWD=(\S+) SRCREV=(\S+)/g)];
+  assert.equal(used.length, 2, fs.readFileSync(pageLog, 'utf8'));
+  const warmedDirs = new Set(warmed.map(b => path.resolve(b.cwd).toLowerCase()));
+  for (const [, cwd, srcRev] of used) {
+    assert.ok(!warmedDirs.has(path.resolve(cwd).toLowerCase()), 'the frontend run took a built copy: ' + cwd);
+    assert.equal(srcRev, 'undefined');
+  }
+});
+
+test('a dotnet run in a kept copy builds without the commit id, unless the environment sets it', async () => {
+  const { copyRunEnv } = await import('../scripts/red-proof.mjs');
+  assert.deepEqual(copyRunEnv(['dotnet', 'test', 'A.csproj'], { A: '1' }), { A: '1', IncludeSourceRevisionInInformationalVersion: 'false' });
+  assert.deepEqual(copyRunEnv(['C:/Program Files/dotnet/dotnet.exe', 'test'], {}), { IncludeSourceRevisionInInformationalVersion: 'false' });
+  const own = { includesourcerevisionininformationalversion: 'true' };
+  assert.equal(copyRunEnv(['dotnet', 'test'], own, 'win32'), own, 'the env file or the machine already decides it');
+  const env = { A: '1' };
+  assert.equal(copyRunEnv([process.execPath, 'node_modules/vitest/vitest.mjs', 'run'], env), env, 'other runners are left alone');
 });
 
 // 2026-11-09: `cmd.exe /c <wrapper>.cmd` typed in Git Bash hung for 25 minutes with nothing started.

@@ -89,6 +89,36 @@ test('a second run keeps numbers and outcomes, marks new and gone places, and re
   assert.equal(places.length, 5);
 });
 
+// 2026-11-13: 14 places in other components needed one outcome each, written by a hand-made script.
+test('--close writes one outcome on many places: file: and name: fill open places only, P<n> replaces, a miss or a bad outcome is refused', () => {
+  const { repo } = fixture();
+  const out = path.join(root, 'list-close.md');
+  assert.equal(run(['--repo', repo, '--names', 'dueAfterPublish', '--out', out]).status, 0);
+  const placesNow = () => fs.readFileSync(out, 'utf8').split(/\r?\n/).filter(l => /^P\d/.test(l));
+  const byFile = (f) => placesNow().find(l => l.includes(` · ${f} · `));
+  let r = run(['--close', out, '--set', 'file:src/s*.ts=C1']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^CLOSED: 1 place\(s\) — file:src\/s\*\.ts → C1$/m);
+  assert.match(byFile('src/schedule.ts'), /→ C1$/);
+  r = run(['--close', out, '--set', 'name:dueAfterPublish=none: only a draft that never ships']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^CLOSED: 2 place\(s\) — name:dueAfterPublish → none: only a draft that never ships$/m);
+  assert.match(r.stdout, /^PLACES: 3 place\(s\), 0 open/m);
+  assert.match(byFile('src/schedule.ts'), /→ C1$/, 'name: does not overwrite a written outcome');
+  const scheduleN = /^P(\d+)/.exec(byFile('src/schedule.ts'))[1];
+  r = run(['--close', out, '--set', `P${scheduleN}=C2, C3`]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(byFile('src/schedule.ts'), /→ C2, C3$/, 'a P-number replaces the outcome');
+  const before = fs.readFileSync(out, 'utf8');
+  r = run(['--close', out, '--set', 'file:src/nothing.ts=C1']);
+  assert.equal(r.status, 2, 'a selector that matches no open place is a usage error');
+  assert.match(r.stderr, /no open place matches/);
+  r = run(['--close', out, '--set', `P${scheduleN}=none: short`]);
+  assert.equal(r.status, 2, 'an outcome --check would refuse is refused here too');
+  assert.equal(fs.readFileSync(out, 'utf8'), before, 'a refused --close writes nothing');
+  assert.equal(run(['--close', out]).status, 2, '--close needs a --set');
+});
+
 test('a name used in more than 40 product files is too wide, and a name with no hit is a spelling error', () => {
   const { repo, write } = fixture();
   for (let i = 0; i < 40; i++) write(`wide/f${i}.ts`, 'wideName();\n');

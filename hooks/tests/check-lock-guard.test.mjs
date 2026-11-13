@@ -22,12 +22,17 @@ fs.writeFileSync(path.join(repo, 'src', 'app.js'), 'export const value = 1;\n');
 git('add', '-A'); git('commit', '-qm', 'fixture');
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-function writeLock({ pid = process.pid, expires = Date.now() + 600000, toplevel = repo, name = 'run-1', raw } = {}) {
+// `pidStartedAt` left out writes the old lock format (no start time).
+function writeLock({ pid = process.pid, expires = Date.now() + 600000, toplevel = repo, name = 'run-1', raw, pidStartedAt } = {}) {
   fs.mkdirSync(locks, { recursive: true });
   const file = path.join(locks, name + '.json');
-  fs.writeFileSync(file, raw ?? JSON.stringify({ toplevel, pid, runId: name, startedAt: new Date().toISOString(), expiresAt: new Date(expires).toISOString(), command: 'node vitest.mjs run' }));
+  fs.writeFileSync(file, raw ?? JSON.stringify({ toplevel, pid, pidStartedAt, runId: name, startedAt: new Date().toISOString(), expiresAt: new Date(expires).toISOString(), command: 'node vitest.mjs run' }));
   return file;
 }
+// When this process started, as evidence.mjs records its own start in a lock.
+const ownStart = () => new Date(Date.now() - process.uptime() * 1000).toISOString();
+// A process id no system hands out (above Linux's pid_max limit, macOS's 99999 and any Windows id in use).
+const NO_PROCESS = 2147483644;
 function clearLocks() { fs.rmSync(locks, { recursive: true, force: true }); }
 function decide(tool, toolInput, cwd = repo) {
   const run = spawnSync(process.execPath, [hook], {
@@ -73,16 +78,64 @@ test('another spelling of the same path is still refused on Windows', { skip: pr
   assert.equal(decide('Edit', { file_path: app.toUpperCase().replace(/\\/g, '/') }).decision, 'deny');
 });
 
+// 2026-11-13: on a CI runner the id of a just-finished process went to the next process at once, so the
+// "finished process" lock of this test looked alive and blocked. The gone process now has an id no system
+// hands out; an id that went to a later process is the next test's case.
 test('stale locks never block: a finished process or a passed deadline removes them; a half-written one is skipped', () => {
   clearLocks();
-  const done = spawnSync(process.execPath, ['-e', ''], { windowsHide: true });
-  const dead = writeLock({ pid: done.pid, name: 'dead' });
+  const gone = writeLock({ pid: NO_PROCESS, name: 'gone' });
   const expired = writeLock({ expires: Date.now() - 1000, name: 'expired' });
   const partial = writeLock({ name: 'partial', raw: '{"toplevel":' });
   assert.equal(decide('Edit', { file_path: app }).decision, 'allow');
-  assert.equal(fs.existsSync(dead), false);
+  assert.equal(fs.existsSync(gone), false);
   assert.equal(fs.existsSync(expired), false);
   assert.equal(fs.existsSync(partial), true, 'a lock being written is never deleted');
+});
+
+test('a lock whose process id now belongs to a later process is stale: same id, other start time', () => {
+  clearLocks();
+  const reused = writeLock({ pidStartedAt: new Date(Date.parse(ownStart()) - 3600000).toISOString(), name: 'reused' });
+  assert.equal(decide('Edit', { file_path: app }).decision, 'allow');
+  assert.equal(fs.existsSync(reused), false, 'the stale lock is removed');
+});
+
+test('same process id and same start time: the lock blocks', () => {
+  clearLocks();
+  const file = writeLock({ pidStartedAt: ownStart(), name: 'same' });
+  const edit = decide('Edit', { file_path: app });
+  assert.equal(edit.decision, 'deny');
+  assert.ok(edit.reason.includes(file));
+  assert.equal(fs.existsSync(file), true);
+});
+
+test('a lock in the old format (no start time) keeps the process id check alone', () => {
+  clearLocks();
+  const live = writeLock({ name: 'old-live' });
+  assert.equal(JSON.parse(fs.readFileSync(live, 'utf8')).pidStartedAt, undefined);
+  assert.equal(decide('Edit', { file_path: app }).decision, 'deny', 'a live id blocks, as before');
+  clearLocks();
+  const gone = writeLock({ pid: NO_PROCESS, name: 'old-gone' });
+  assert.equal(decide('Edit', { file_path: app }).decision, 'allow', 'a gone id never blocks, as before');
+  assert.equal(fs.existsSync(gone), false);
+});
+
+// The start time evidence.mjs writes and the one this hook reads from the system agree on this machine,
+// so a real check's lock blocks while it runs (a wrong reading would let an edit void the run).
+test('a real check (evidence.mjs) holds a lock this hook honours while the check runs', async () => {
+  clearLocks();
+  const { runCommand } = await import('../../skills/gate/scripts/evidence.mjs');
+  const previous = process.env.SANAD_CHECK_LOCK_DIR;
+  process.env.SANAD_CHECK_LOCK_DIR = locks;
+  try {
+    const ask = `const r=require("node:child_process").spawnSync(process.execPath,[${JSON.stringify(hook)}],{input:${JSON.stringify(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: app }, cwd: repo }))},encoding:"utf8",windowsHide:true});process.stdout.write(r.stdout)`;
+    const run = await runCommand({ executable: process.execPath, args: ['-e', ask], cwd: repo, outputRoot: path.join(root, 'evidence-out'), timeoutMs: 60000 });
+    const out = fs.readFileSync(run.stdout, 'utf8');
+    assert.equal(run.status, 'passed', out);
+    assert.match(out, /"permissionDecision":"deny"/, out);
+    assert.deepEqual(fs.readdirSync(locks), [], 'released when the check ends');
+  } finally {
+    if (previous === undefined) delete process.env.SANAD_CHECK_LOCK_DIR; else process.env.SANAD_CHECK_LOCK_DIR = previous;
+  }
 });
 
 test('shell commands: writes, git content changes and generated files in the repository are refused; reads are not', () => {

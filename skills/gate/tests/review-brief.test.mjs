@@ -43,7 +43,7 @@ test('decided questions go into both briefs; a small change gets one review, the
   // A tiny or small change gets one review (user rule 2026-11-11): the Claude fresh eyes, no whole-diff pass, no Codex.
   assert.match(small, /FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
   assert.doesNotMatch(small, /whole-diff pass|codex exec|Fill the coverage checklist/);
-  assert.match(small, /Test designer/, 'the designer keeps its line');
+  assert.doesNotMatch(small, /Test designer/, 'the designer is a Big-task seat (2026-11-13)');
   assert.match(buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b' }), /Fill the coverage checklist/);
 });
 
@@ -216,7 +216,8 @@ test('a medium change gets one review, the Claude fresh eyes with the full brief
   assert.match(reviewers(medium)[0], /FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
   assert.match(reviewers(medium)[0], /Fill the coverage checklist lines that apply/, 'the one review fills the checklist the whole-diff pass filled');
   assert.doesNotMatch(medium, /whole-diff pass|codex exec|A tiny or small change/);
-  assert.match(medium, /Test designer/, 'the designer keeps its line');
+  assert.doesNotMatch(medium, /Test designer/, 'the designer is a Big-task seat (2026-11-13)');
+  assert.match(buildLaunch({ ...args, size: 'big' }), /## Test designer/, 'a big change keeps the designer line');
   const mediumFacts = { ...facts, size: 'SIZE: medium (diff) — the shared API contract (src/api/x.ts)' };
   assert.doesNotMatch(buildBrief({ ...base, facts: mediumFacts }), /## Focused brief/);
   assert.doesNotMatch(buildFreshBrief({ ...base, facts: mediumFacts }), /## Focused brief/);

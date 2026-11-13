@@ -15,7 +15,8 @@
 //   tags   with --check <file>, every check line Cn (numbered in order, as review-brief.mjs prints
 //          them) has a test that carries `[Cn]` in its name or a comment; not a skipped one.
 //
-// Usage: node check-test-asserts.mjs --repo <path> [--base <ref>] [--check <file>]
+// Usage: node check-test-asserts.mjs --repo <path> [--base <ref>] [--check <file>] [--before-proof]
+//   --before-proof: skip the proof part (pre-review.mjs --before-proof, run before red-proof.mjs).
 // Exit 0: all clear. 1: found (each printed). 2: usage error.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -97,7 +98,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   // with that file as it is now (2026-11-12: one proof of the page cleared every server check too).
   const nothing = nothingChecks(lines);
   let unproven = [];
-  if (nothing.length) {
+  // --before-proof (2026-11-13): the cheap checks run before the proof, so a label or quote fixed in a test
+  // file does not void a proof already run. The proof part is judged by the run after the proof.
+  const beforeProof = argv.includes('--before-proof');
+  if (nothing.length && !beforeProof) {
     const proven = provenTestFiles(top);
     unproven = nothing.filter(l => !proven.has(l.file));
   }
@@ -118,6 +122,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const nonNull = nonNullReads(lines);
   for (const f of nonNull.slice(0, 8)) console.log(`NON-NULL: ${f.file}:${f.line} — ${f.text.trim()} → read with ?. so a missing element fails as an assertion`);
   const problems = found.length + unproven.length + missing.length + nonNull.length;
-  console.log(problems ? `TEST ASSERTS: ${found.length} range, ${unproven.length} unproven, ${missing.length} untagged, ${nonNull.length} non-null` : `TEST ASSERTS: none${nothing.length ? ` (${nothing.length} "nothing happens" check(s) proven by a break run)` : ''}`);
+  const proofNote = !nothing.length ? '' : beforeProof
+    ? ` (${nothing.length} "nothing happens" check(s): proof judged after the proof run)`
+    : ` (${nothing.length} "nothing happens" check(s) proven by a break run)`;
+  console.log(problems ? `TEST ASSERTS: ${found.length} range, ${unproven.length} unproven, ${missing.length} untagged, ${nonNull.length} non-null` : `TEST ASSERTS: none${proofNote}`);
   process.exitCode = problems ? 1 : 0;
 }

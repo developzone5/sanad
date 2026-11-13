@@ -31,15 +31,15 @@ The size changes the depth only. The six rules are the same in every size.
 
 ## Step 1 — Understand
 
-1. **Test machine.** With `git config sanad.remoteHost` set, start `bash ~/.claude/scripts/remote/remote-preflight.sh` in the background (`--db` for real-database tests, `--app` for a browser check). `REMOTE-DOWN` → ask the user once, now.
-2. **Lines file.** Copy every line of the ticket, verbatim, into `<notes>/lines.md`: steps, Expected, Actual, and the rows of a linked ticket. No ticket → the user's own words are the lines. When chat words differ from the ticket, quote both and ask which one holds.
+1. **Test machine.** With `git config sanad.remoteHost` set, start `bash ~/.claude/scripts/remote/remote-preflight.sh` in the background (`--db` for real-database tests, `--app` for a browser check). `REMOTE-DOWN` → ask the user once, now. A server change: also warm the proof copies in the background ([loop-rare-cases.md](loop-rare-cases.md), Warm copies).
+2. **Lines file.** Save the ticket text as it is (steps, Expected, Actual, the rows of a linked ticket), then `node <gate>/lines.mjs --from <ticket text file> --out <notes>/lines.md`: every line becomes T1..Tn, and the text is kept as `<notes>/ticket.md`. No ticket → the user's own words are the lines, plus `--no-ticket --repo <repo>`: the commit check then asks for no ticket ID on this branch. When chat words differ from the ticket, quote both and ask which one holds.
 3. **Read the code.** The method or component, its callers and what it calls.
 4. **Places list (rule 1).** Name what the change touches: each function, rule, helper, constant, error code, text key and field. Then:
    `node <gate>/places.mjs --repo <repo> --names <name1,name2,...> --out <notes>/places.md`
    The list has one place per function that uses a name, and one per file for texts and data. The search is exact: give both spellings of a field (`DueAt,dueAt`). A name used in more than 40 files is too wide: name the rule, not the word.
    Open every place it lists. Ask of each one: is this another way to reach the same rule (create, edit, publish, import, a background job), another role, another screen, an API field, an export or a report? A new name that turns up joins `--names`, and the command runs again; it keeps what is written.
 5. **Check lines.** `<notes>/check.md`: one line per result the change must prove. Each line starts with its source: `[T2]` (a ticket line), `[change]` (what the change itself touches, a place included) or `[rule: <project rule>]`. The lines are numbered C1, C2, ... in order. They are the task's `Done means`. Nothing else becomes a check line.
-6. **Close every place.** In `places.md` each place ends with `→ C<n>` (the check line that tests it) or `→ none: <why this place needs no change and no test>`. A place that holds two rules (two lines far apart in one function) gets a check line for each: `→ C2, C3`.
+6. **Close every place.** In `places.md` each place ends with `→ C<n>` (the check line that tests it) or `→ none: <why this place needs no change and no test>`. A place that holds two rules (two lines far apart in one function) gets a check line for each: `→ C2, C3`. One outcome for many places: `node <gate>/places.mjs --close <notes>/places.md --set "file:<path>=none: <reason>"` (or `P3,P7=C1`, `name:<name>=…`), never a hand-made script.
 7. **Size line.** `▸ size: small | medium | big — <reason> · places: <n>`. Small adds `· 1 PR` and goes on. Medium and Big show the PR plan (one line per PR: order, tickets, content, rough size, base) and wait for the user's OK.
 
 ## Step 1.5 — Check the facts
@@ -62,12 +62,13 @@ Load [engineering-bar.md](engineering-bar.md). DB writes, migrations, transactio
 
 1. **Tests.** One test per check line, tagged `[Cn]` in its title, with the ticket line it proves quoted in a comment above it. A test goes through the public entry point (the real request, the real form). A data write runs on the real database provider. A stricter rule on an old field gets two tests on an old row that breaks it: editing another field still saves; changing that field must meet the new rule.
 2. **Fix.** The narrowest change that makes the tests pass, in every place the list says. Format changed C# once (`dotnet csharpier format <files>`). Finish every edit before the proof: a later edit voids it.
-3. **Breaks.** `<notes>/breaks.json`, written with the Write tool: one break per rule, each naming in `mustFail` only the tests of that rule.
-4. **Proof (rule 3).**
+3. **Cheap checks first.** Commit, then `node <gate>/pre-review.mjs --before-proof` with the options of Step 3.5 item 1. Fix what it finds now: a label, quote or lint fix after the proof voids the proof.
+4. **Breaks.** `<notes>/breaks.json`, written with the Write tool: one break per rule, each naming in `mustFail` only the tests of that rule.
+5. **Proof (rule 3).**
    `node <gate>/red-proof.mjs --repo <repo> --old <base> --files <fix files> --breaks <notes>/breaks.json --then-green --log <notes>/proof.log -- <test command for the changed test files>`
    It runs on the test machine by itself. The server proof and the page proof may start together. Never show a red run by hand.
-5. **Suite (rule 4).** While fixing, run only the touched test files. A suite of under two minutes runs in full right after the first complete build. A slower suite runs once, on the final tree, after the reviews, with no edit while it runs (Small: CI runs it). Checks run through the evidence helper (`/gate`), plainly, never inside a pipe.
-6. **Browser check (rule 6).** `bash ~/.claude/scripts/remote/remote-web.sh start`, quote its `READY` line. Create the test data yourself. Give the user a direct link, the account and at most three actions, each with the exact value and the one result to expect. `remote-web.sh stop` when the user reports. The result is the user's; it is pending until they say it.
+6. **Suite (rule 4).** While fixing, run only the touched test files. A suite of under two minutes runs in full right after the first complete build. A slower suite runs once, on the final tree, after the reviews, with no edit while it runs (Small: CI runs it). Checks run through the evidence helper (`/gate`), plainly, never inside a pipe or straight over ssh: the project's spec script writes the specs (EduQuest: `check-specs.mjs <notes>/specs`, `*-remote.json` for the test machine after `remote-sync.sh`). A failed run prints its totals and failing tests; the full output stays in its log.
+7. **Browser check (rule 6).** `bash ~/.claude/scripts/remote/remote-web.sh start`, quote its `READY` line. Create the test data yourself. Give the user a direct link, the account and at most three actions, each with the exact value and the one result to expect. `remote-web.sh stop` when the user reports. The result is the user's; it is pending until they say it.
 
 Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
 

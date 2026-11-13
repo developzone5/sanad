@@ -26,6 +26,13 @@
 //       its lines, numbered as review-brief.mjs numbers them) or `none: <reason>` (at least 12 characters:
 //       why the place needs no change and no test). Prints `OPEN: P3 · <name> · <file> · <function>` per open place and
 //       `PLACES: <k> place(s), <m> open`. --refresh and --check may be given together: refresh, then check.
+//   node places.mjs --close <places.md> --set "<which>=<outcome>" [--set ...]
+//       Writes one outcome on many places at once (2026-11-13: 14 places in other components took a hand-made
+//       script). <which>: `P3,P7` (those places; an outcome already written is replaced), `file:<path>` (every
+//       place in that file; `*` matches within a folder, `**` across folders) or `name:<name>` (every place of
+//       that name); file: and name: fill only places with no outcome yet. <outcome> is `C<n>[, C<m>]` or
+//       `none: <reason>`, checked as --check checks it. Prints how many places each --set closed; a --set that
+//       matches no place is a usage error (a typo would otherwise close nothing without a word).
 // Exit 0: written, or no open place. 1: an open place. 2: usage error, a missing file, a name too wide
 // (more than 40 product files) or with no hit at all.
 import fs from 'node:fs';
@@ -220,6 +227,53 @@ export function openReason(p, checkCount) {
   return '';
 }
 
+// "file:web/src/**/x.ts" as a regular expression over a list path.
+function globRe(glob) {
+  const body = glob.replace(/\\/g, '/').split(/(\*\*|\*)/)
+    .map(part => (part === '**' ? '.*' : part === '*' ? '[^/]*' : part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))).join('');
+  return new RegExp('^' + body + '$');
+}
+
+// Which places one --set names: pick(place) → boolean; explicit (P-numbers) replaces a written outcome.
+export function selector(which) {
+  const w = String(which).trim();
+  if (/^P\d+(?:\s*,\s*P\d+)*$/i.test(w)) {
+    const nums = new Set(w.split(',').map(x => Number(x.trim().slice(1))));
+    return { pick: p => nums.has(p.n), explicit: true };
+  }
+  const file = /^file:(.+)$/i.exec(w);
+  if (file) { const re = globRe(file[1].trim()); return { pick: p => re.test(p.file), explicit: false }; }
+  const name = /^name:(.+)$/i.exec(w);
+  if (name) return { pick: p => p.name === name[1].trim(), explicit: false };
+  throw usage(`--set: "${w}" is not P<n>[,P<m>], file:<path> or name:<name>`);
+}
+
+// Writes the outcome of each --set into the list's own lines; every other line of the file stays as it is.
+export function closePlaces(file, sets, { checkCount } = {}) {
+  const text = fs.readFileSync(file, 'utf8');
+  if (!parsePlaces(text)) throw usage(`${file} is not a places list (no Repo: and Names: header)`);
+  const rows = text.split(/\r?\n/);
+  const counts = [];
+  for (const { which, outcome } of sets) {
+    const sel = selector(which);
+    const reason = openReason({ mark: '', outcome }, checkCount);
+    if (reason) throw usage(`--set ${which}: ${reason}`);
+    let n = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const m = PLACE.exec(rows[i]);
+      if (!m) continue;
+      const p = { n: Number(m[1]), mark: m[2] || '', name: m[3], file: m[4], fn: m[5] || FILE_PART, lines: m[6].trim(), outcome: m[7].trim() };
+      if (p.mark === 'gone' || !sel.pick(p) || (!sel.explicit && p.outcome)) continue;
+      rows[i] = placeLine({ ...p, outcome });
+      n++;
+    }
+    if (!n) throw usage(`--set ${which}: no ${sel.explicit ? '' : 'open '}place matches`);
+    counts.push({ which, outcome, n });
+  }
+  fs.writeFileSync(file, rows.join(text.includes('\r\n') ? '\r\n' : '\n'));
+  return counts;
+}
+
 export function checkPlaces(list, { checkCount } = {}) {
   const live = list.places.filter(p => p.mark !== 'gone');
   const open = live.map(p => ({ p, why: openReason(p, checkCount) })).filter(x => x.why);
@@ -229,13 +283,25 @@ export function checkPlaces(list, { checkCount } = {}) {
 }
 
 function parse(argv) {
-  const o = {};
+  const o = { set: [] };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
-    if (!['--repo', '--names', '--out', '--refresh', '--check', '--check-lines'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
+    if (!['--repo', '--names', '--out', '--refresh', '--check', '--check-lines', '--close', '--set'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
+    if (k === '--set') {
+      const v = argv[++i], eq = v.indexOf('=');
+      if (eq < 1) throw usage('--set needs "<which>=<outcome>", e.g. --set "file:src/Other.tsx=none: another screen\'s own state"');
+      o.set.push({ which: v.slice(0, eq), outcome: v.slice(eq + 1).trim() });
+      continue;
+    }
     o[k.slice(2)] = argv[++i];
   }
-  if (!o.out && !o.refresh && !o.check) throw usage('give --out (make or update a list), --refresh <list> or --check <list>');
+  if (o.close) {
+    if (o.out || o.refresh || o.check) throw usage('--close goes alone, with its --set options');
+    if (!o.set.length) throw usage('--close needs at least one --set "<which>=<outcome>"');
+    return o;
+  }
+  if (o.set.length) throw usage('--set goes with --close');
+  if (!o.out && !o.refresh && !o.check) throw usage('give --out (make or update a list), --refresh <list>, --check <list> or --close <list>');
   if (o.out && (o.refresh || o.check)) throw usage('--out makes a list; use --refresh or --check on it in another run');
   if (o.out && (!o.repo || !o.names)) throw usage('--out needs --repo and --names');
   if (o['check-lines'] && !o.check) throw usage('--check-lines goes with --check');
@@ -244,13 +310,21 @@ function parse(argv) {
 
 const USAGE = 'Usage: node places.mjs --repo <path> --names <n1,n2,...> --out <places.md>\n' +
   '       node places.mjs --refresh <places.md> [--repo <path>] [--check <places.md> [--check-lines <check.md>]]\n' +
-  '       node places.mjs --check <places.md> [--check-lines <check.md>]\n';
+  '       node places.mjs --check <places.md> [--check-lines <check.md>]\n' +
+  '       node places.mjs --close <places.md> --set "<P1,P2 | file:<path> | name:<name>>=<C<n> | none: <reason>>" [--set ...]\n';
 
 // Not a top-level await (2026-11-12): review-brief.mjs imports this file, so this file's own import of
 // review-brief.mjs must wait until this module has finished loading, or the two wait on each other (exit 13).
 async function main() {
   try {
     const o = parse(process.argv.slice(2));
+    if (o.close) {
+      const file = path.resolve(o.close);
+      for (const c of closePlaces(file, o.set)) process.stdout.write(`CLOSED: ${c.n} place(s) — ${c.which} → ${c.outcome}\n`);
+      const { count, open } = checkPlaces(readPlaces(file));
+      process.stdout.write(`PLACES: ${count} place(s), ${open.length} open — ${file}\n`);
+      return;
+    }
     if (o.out) {
       const list = writePlaces({ repo: path.resolve(o.repo), names: o.names.split(','), out: path.resolve(o.out) });
       const { count, open } = checkPlaces(list);

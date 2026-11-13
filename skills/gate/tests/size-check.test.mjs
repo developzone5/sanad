@@ -75,6 +75,68 @@ test('a C# method with its brace on the next line is the enclosing function', ()
   assert.ok(r.callers.some(c => c.name === 'Total'), JSON.stringify(r.callers));
 });
 
+// 2026-11-13: a C# method whose parameters run over several lines (as CSharpier writes a long signature)
+// was not found around a changed body line, so its callers were not counted and the size came out too low.
+test('C#: a method whose signature runs over several lines is the enclosing function of a changed body line', () => {
+  const controller = (signature) => [
+    'public class HomeworkController : ControllerBase',
+    '{',
+    '    private readonly IHomeworkService _homework;',
+    '',
+    '    [HttpPost("{id:long}/publish")]',
+    '    [ProducesResponseType(typeof(PublishResult), StatusCodes.Status200OK)]',
+    ...signature,
+    '    {',
+    '        var result = await _homework.PublishAsync(id, request.At, ct);',
+    '        return Ok(result);',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  const caller = 'public class HomeworkJobs\n{\n    private readonly HomeworkController _c;\n    public async Task Run(CancellationToken ct)\n    {\n        await _c.PublishNow(1, new PublishRequest(), ct);\n        await _c.PublishNow(2, new PublishRequest(), ct);\n    }\n}\n';
+  const forms = {
+    'parameters on their own lines, ")" alone (CSharpier)': ['    public async Task<IActionResult> PublishNow(', '        long id,', '        [FromBody] PublishRequest request,', '        CancellationToken ct', '    )'],
+    'the last parameter closes the list': ['    public async Task<IActionResult> PublishNow(', '        long id,', '        [FromBody] PublishRequest request,', '        CancellationToken ct)'],
+  };
+  for (const [form, signature] of Object.entries(forms)) {
+    const text = controller(signature);
+    const r = size(change({ 'Api/Controllers/HomeworkController.cs': text, 'Api/Jobs/HomeworkJobs.cs': caller }, { 'Api/Controllers/HomeworkController.cs': text.replace('return Ok(result);', 'return Ok(result with { Shown = true });') }));
+    const row = r.callers.find(c => c.name === 'PublishNow');
+    assert.ok(row, `${form}: ` + JSON.stringify(r.callers));
+    assert.equal(row.count, 2, form);
+  }
+});
+
+test('C#: an expression-bodied method over several lines, and a changed attribute above a method, name that method', () => {
+  const rules = [
+    'public static class DueRules',
+    '{',
+    '    public static bool IsPastDue(',
+    '        DateTime? dueAt,',
+    '        DateTime nowUtc',
+    '    ) =>',
+    '        dueAt != null',
+    '        && dueAt < nowUtc;',
+    '',
+    '    public static DateTime Shift(DateTime at, int minutes) => Clock.Round(at)',
+    '        .AddMinutes(minutes);',
+    '',
+    '    [Obsolete("Use IsPastDue")]',
+    '    public static bool Late(DateTime? dueAt, DateTime nowUtc)',
+    '    {',
+    '        return IsPastDue(dueAt, nowUtc);',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  const user = 'public class Report\n{\n    public bool A(DateTime? d) => DueRules.IsPastDue(d, DateTime.UtcNow) && DueRules.Late(d, DateTime.UtcNow);\n    public DateTime B(DateTime d) => DueRules.Shift(d, 1);\n}\n';
+  const base = { 'Api/Rules/DueRules.cs': rules, 'Api/Report.cs': user };
+  const named = (changed) => size(change(base, { 'Api/Rules/DueRules.cs': changed })).callers.map(c => c.name);
+  assert.ok(named(rules.replace('&& dueAt < nowUtc;', '&& dueAt <= nowUtc;')).includes('IsPastDue'), 'a line of a multi-line expression body');
+  assert.ok(named(rules.replace('.AddMinutes(minutes);', '.AddMinutes(minutes + 1);')).includes('Shift'), 'the next line of an expression body that calls a method on its first line');
+  assert.ok(named(rules.replace('[Obsolete("Use IsPastDue")]', '[Obsolete("Use DueRules.IsPastDue")]')).includes('Late'), 'a changed attribute line names the method under it');
+});
+
 test('a local function counts only its own file; an exported one counts every file', () => {
   const a = 'function helper(x) {\n  return x;\n}\nexport function shared(y) {\n  return y;\n}\nhelper(1); shared(1);\n';
   const b = "import { shared } from './a';\nfunction helper() {}\nhelper(); shared(2); shared(3);\n";
@@ -459,6 +521,85 @@ test('C#: eleven real callers of a method still give callersMany', () => {
   assert.equal(r.callers.find(c => c.name === 'Day').count, 11);
   assert.ok(r.signals.callersMany);
   assert.equal(r.size, 'big');
+});
+
+// 2026-11-13 (PR #773): HomeworkLifecycle.MinuteOf became a one-line call to a new ApiInstant.MinuteOf that holds
+// the same code. A moved body is not a change: the old function's callers are not counted; the new helper is.
+const minuteBody = p => `        new(${p}.Ticks - ${p}.Ticks % TimeSpan.TicksPerMinute, ${p}.Kind);`;
+const lifecycle = minuteOf => ['using EduQuest.Domain.Entities;', '', 'public static class HomeworkLifecycle', '{', '    /// <summary>The start of the minute; every deadline compares with it.</summary>', ...minuteOf, '}', ''].join('\n');
+const instant = extra => ['public static class ApiInstant', '{', '    public static DateTime ToUtc(DateTime value) =>', '        value.Kind == DateTimeKind.Utc ? value : value.ToUniversalTime();', ...extra, '}', ''].join('\n');
+const minuteHelper = (p = 'value', body = minuteBody(p)) => ['', '    /// <summary>The start of the minute, with its Kind kept.</summary>', `    public static DateTime MinuteOf(DateTime ${p}) =>`, body];
+const minuteDelegate = (call, signature = 'public static DateTime MinuteOf(DateTime atUtc)') => lifecycle([`    ${signature} => ${call};`]);
+const reports = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Api/Services/Reports/Report${i}.cs`, `public class Report${i}\n{\n    public DateTime Due(DateTime now) => HomeworkLifecycle.MinuteOf(now).AddMinutes(${i});\n}\n`]));
+const minuteBase = { 'Api/Services/HomeworkLifecycle.cs': lifecycle(['    public static DateTime MinuteOf(DateTime atUtc) =>', minuteBody('atUtc')]), 'Api/Shared/ApiInstant.cs': instant([]), ...reports };
+
+test('a moved body is not a change: a method that now only calls a new helper holding its old code is not counted; the helper is', () => {
+  const repo = change(minuteBase, { 'Api/Services/HomeworkLifecycle.cs': minuteDelegate('ApiInstant.MinuteOf(atUtc)'), 'Api/Shared/ApiInstant.cs': instant(minuteHelper()) });
+  const r = size(repo);
+  assert.deepEqual(r.callers.filter(c => c.name === 'MinuteOf').map(c => c.file), ['Api/Shared/ApiInstant.cs'], 'only the new helper: ' + JSON.stringify(r.callers));
+  assert.equal(r.signals.callersMany, undefined, JSON.stringify(r.callers));
+  assert.equal(r.size, 'small');
+  assert.deepEqual(r.moved, [{ name: 'MinuteOf', file: 'Api/Services/HomeworkLifecycle.cs', to: 'Api/Shared/ApiInstant.cs' }]);
+  const out = spawnSync(process.execPath, [script, '--repo', repo, '--base', 'base'], { encoding: 'utf8', env: process.env }).stdout;
+  assert.match(out, /^ {2}moved, callers not counted: MinuteOf \(Api\/Services\/HomeworkLifecycle\.cs → Api\/Shared\/ApiInstant\.cs\)$/m, out);
+});
+
+test('anything else stays counted: a helper with other code, one that already existed, other arguments, a changed signature, another type', () => {
+  const counted = (baseFiles, changed, why) => {
+    const r = size(change(baseFiles, changed));
+    const row = r.callers.find(c => c.name === 'MinuteOf' && c.file === 'Api/Services/HomeworkLifecycle.cs');
+    assert.equal(row && row.count, 12, why + ': ' + JSON.stringify(r.callers));
+    assert.equal(r.size, 'big', why);
+    assert.deepEqual(r.moved, [], why);
+  };
+  const helper = instant(minuteHelper());
+  counted(minuteBase, { 'Api/Services/HomeworkLifecycle.cs': minuteDelegate('ApiInstant.MinuteOf(atUtc)'), 'Api/Shared/ApiInstant.cs': instant(minuteHelper('value', '        new(value.Ticks - value.Ticks % TimeSpan.TicksPerMinute, DateTimeKind.Utc);')) }, 'the helper body differs');
+  counted({ ...minuteBase, 'Api/Shared/ApiInstant.cs': helper }, { 'Api/Services/HomeworkLifecycle.cs': minuteDelegate('ApiInstant.MinuteOf(atUtc)') }, 'the helper existed before');
+  counted(minuteBase, { 'Api/Services/HomeworkLifecycle.cs': minuteDelegate('ApiInstant.MinuteOf(ApiInstant.ToUtc(atUtc))'), 'Api/Shared/ApiInstant.cs': helper }, 'the argument is not the parameter');
+  counted(minuteBase, { 'Api/Services/HomeworkLifecycle.cs': minuteDelegate('ApiInstant.MinuteOf(atUtc)', 'public static DateTime MinuteOf(DateTimeOffset atUtc)'), 'Api/Shared/ApiInstant.cs': helper }, 'the signature changed');
+  counted(minuteBase, { 'Api/Services/HomeworkLifecycle.cs': minuteDelegate('SchoolClock.MinuteOf(atUtc)'), 'Api/Shared/ApiInstant.cs': helper }, 'the call names another type than the new helper');
+});
+
+test('JS: a function whose body moved into a new helper it now calls is not counted; the helper is', () => {
+  const dates = body => `export function minuteOf(value: Date): number {\n${body}\n}\n`;
+  const users = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`src/pages/P${i}.tsx`, "import { minuteOf } from '../lib/dates';\nexport const a = minuteOf(new Date());\n"]));
+  const r = size(change({ 'src/lib/dates.ts': dates('  // whole minutes only\n  const t = value.getTime();\n  return t - (t % 60000);'), ...users }, {
+    'src/lib/dates.ts': "import { startOfMinute } from './time';\n\n" + dates('  return startOfMinute(value);'),
+    'src/lib/time.ts': 'export function startOfMinute(at: Date): number {\n  const t = at.getTime();\n  return t - (t % 60000);\n}\n',
+  }));
+  assert.equal(r.callers.find(c => c.name === 'minuteOf'), undefined, JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'startOfMinute').count, 1, 'the new helper and its one call: ' + JSON.stringify(r.callers));
+  assert.equal(r.size, 'small');
+});
+
+// 2026-11-13 (PR #773, the real "MinuteOf ×14"): the row was ApiInstant.MinuteOf's, and its 14 "callers" were the
+// unqualified MinuteOf( calls inside HomeworkLifecycle and AssignmentPublishRules, which C# binds to their own MinuteOf.
+test('C#: an unqualified call in a class that declares its own method of that name is that class\'s call', () => {
+  const rules = ['internal static class PublishRules', '{', '    public static bool Ok(DateTime due, DateTime at, DateTime now) =>', '        MinuteOf(due) > MinuteOf(at) && MinuteOf(due) > ApiInstant.MinuteOf(now);', '',
+    '    private static DateTime MinuteOf(DateTime value) =>', '        ApiInstant.MinuteOf(ApiInstant.ToUtc(value));', '}', ''].join('\n');
+  const uses = Array.from({ length: 10 }, (_, i) => `    public static bool Past${i}(DateTime? due, DateTime now) => due < MinuteOf(now).AddDays(${i});`);
+  const life = lifecycle(['    public static DateTime MinuteOf(DateTime atUtc) => ApiInstant.MinuteOf(atUtc);', '', ...uses]);
+  const helper = instant(minuteHelper());
+  const r = size(change({ 'Api/Shared/ApiInstant.cs': helper, 'Api/Rules/PublishRules.cs': rules, 'Api/Services/HomeworkLifecycle.cs': life },
+    { 'Api/Shared/ApiInstant.cs': helper.replace(minuteBody('value'), '        new(value.Ticks - value.Ticks % TimeSpan.TicksPerMinute, DateTimeKind.Utc);') }));
+  const row = r.callers.find(c => c.name === 'MinuteOf');
+  assert.equal(row && row.count, 2, 'the two ApiInstant.MinuteOf( calls in PublishRules, not the 13 calls of their own MinuteOf: ' + JSON.stringify(row));
+  assert.equal(r.signals.callersMany, undefined);
+  assert.equal(r.size, 'small');
+  // The method's own file keeps every bare call, even when another class in it declares the same name.
+  const clocks = ['public static class ApiInstant', '{', '    public static DateTime MinuteOf(DateTime value) =>', minuteBody('value'), ...uses, '    public static bool Late(DateTime d) => d > MinuteOf(d);', '}', '',
+    'internal static class LegacyClock', '{', '    public static DateTime MinuteOf(DateTime value) => value;', '}', ''].join('\n');
+  const own = size(change({ 'Api/Shared/Clocks.cs': clocks }, { 'Api/Shared/Clocks.cs': clocks.replace(minuteBody('value'), '        new(value.Ticks - value.Ticks % TimeSpan.TicksPerMinute, DateTimeKind.Utc);') }));
+  assert.equal(own.callers.find(c => c.name === 'MinuteOf').count, 11, JSON.stringify(own.callers));
+  assert.equal(own.size, 'big');
+});
+
+// 2026-11-13: `=>` is now read right after the parameter list; an arrow whose return type holds `{ … }` is still
+// read by the earlier test (places.mjs names the function of every line of its body).
+test('an arrow function whose return type holds an object type is still the function of its body lines', async () => {
+  const { enclosingFunction } = await import('../scripts/size-check.mjs');
+  const lines = ['export const load = async (id: string): Promise<{ rows: Row[] }> =>', '  fetchRows(id)', '    .then(toRows);', ''];
+  assert.equal(enclosingFunction(lines, 2), 'load');
 });
 
 // 2026-11-12 (audit C19): the import line, `export default X`, a re-export and the closing tag each counted,
