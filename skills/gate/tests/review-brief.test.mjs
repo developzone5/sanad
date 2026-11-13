@@ -303,8 +303,9 @@ test('the command refuses a change that is not tiny with no places list, or with
   fs.writeFileSync(path.join(repo, 'rules.js'), 'export const dueAfterPublish = (d, p) => d >= p;\n');
   const none = brief();
   assert.equal(none.status, 2);
-  const cmd = `node ${placesScript.replace(/\\/g, '/')} --repo ${repo.replace(/\\/g, '/')} --names <names> --out <notes>/places.md`;
-  assert.ok(none.stderr.split(/\r?\n/)[0].startsWith('REVIEW-BRIEF: no --places: a small change needs the list of every place that uses what it changes: ' + cmd), none.stderr);
+  // The repo as git names it: on CI the temp folder is RUNNER~1 to Node and runneradmin to git (2026-11-13).
+  const cmd = `node ${placesScript.replace(/\\/g, '/')} --repo ${fs.realpathSync.native(repo).replace(/\\/g, '/')} --names <names> --out <notes>/places.md`;
+  assert.ok(none.stderr.split(/\r?\n/)[0].toLowerCase().startsWith(('REVIEW-BRIEF: no --places: a small change needs the list of every place that uses what it changes: ' + cmd).toLowerCase()), none.stderr);
   assert.equal(fs.existsSync(out), false, 'no brief written');
 
   const open = brief('--places', placesFor(repo, 'dueAfterPublish', ''));

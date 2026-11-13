@@ -32,6 +32,8 @@ function fixture() {
   return { repo, git, write };
 }
 const run = (args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', windowsHide: true });
+// A folder's real name: on CI the temp folder is RUNNER~1 to Node and runneradmin to git (2026-11-13).
+const real = (p) => fs.realpathSync.native(p).toLowerCase();
 const fill = (file, map) => {
   let text = fs.readFileSync(file, 'utf8');
   for (const [n, outcome] of Object.entries(map)) text = text.replace(new RegExp(`^(${n}(?: \\((?:new|gone)\\))? · .*→).*$`, 'm'), `$1 ${outcome}`);
@@ -45,7 +47,7 @@ test('one place per name, product file and function, with its lines; tests liste
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const text = fs.readFileSync(out, 'utf8');
   assert.match(text, /^Repo: .+$/m);
-  assert.equal(path.resolve(/^Repo: (.+)$/m.exec(text)[1]).toLowerCase(), path.resolve(repo).toLowerCase());
+  assert.equal(real(/^Repo: (.+)$/m.exec(text)[1]), real(repo));
   assert.match(text, /^Names: dueAfterPublish$/m);
   assert.match(text, /^Searched: \d{4}-\d{2}-\d{2}T/m);
   const places = text.split(/\r?\n/).filter(l => /^P\d/.test(l));
@@ -183,7 +185,7 @@ test('--refresh --repo searches another folder of the same repository (a task wo
   const text = fs.readFileSync(out, 'utf8');
   assert.match(text, /^P\d+ \(new\) · dueAfterPublish · src\/late\.ts · \(file\) · lines 1 → $/m);
   assert.match(text, /^P1 \(gone\) · dueAfterPublish · src\/draft\.ts/m, 'the worktree has no untracked draft');
-  assert.equal(path.resolve(/^Repo: (.+)$/m.exec(text)[1]).toLowerCase(), path.resolve(tree).toLowerCase(), 'the new folder is stored');
+  assert.equal(real(/^Repo: (.+)$/m.exec(text)[1]), real(tree), 'the new folder is stored');
 });
 
 // 2026-11-12: one place per FILE let one outcome close every call in it. The original miss was two call
