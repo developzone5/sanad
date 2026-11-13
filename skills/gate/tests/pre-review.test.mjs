@@ -61,8 +61,9 @@ test('places: a code change with no --places is NOT RUN and fails, with the comm
   const r = run(repo);
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /^PRE-REVIEW: 5 of 6 checks passed · 3 skipped/m);
-  const cmd = `node ${placesScript.replace(/\\/g, '/')} --repo ${repo.replace(/\\/g, '/')} --names <names> --out <notes>/places.md`;
-  assert.ok(r.stdout.includes(`  ✗ places — NOT RUN\n      list every place that uses what you change: ${cmd}`), r.stdout);
+  // The repo as git names it: on CI the temp folder is RUNNER~1 to Node and runneradmin to git (2026-11-13).
+  const cmd = `node ${placesScript.replace(/\\/g, '/')} --repo ${fs.realpathSync.native(repo).replace(/\\/g, '/')} --names <names> --out <notes>/places.md`;
+  assert.ok(r.stdout.toLowerCase().includes(`  ✗ places — NOT RUN\n      list every place that uses what you change: ${cmd}`.toLowerCase()), r.stdout);
 });
 
 test('places: a text-only change needs no list, and says so as skipped', () => {
