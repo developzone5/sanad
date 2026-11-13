@@ -13,6 +13,11 @@ const hooks = process.env.WORKFLOW_HOOKS_ROOT || path.resolve(path.dirname(fileU
 const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'scan-incremental-')));
 const stateDir = path.join(root, 'state');
 process.env.SANAD_STATE_DIR = stateDir;
+// The reviewer-notes lock's start time (2026-11-12): these sessions' reports come after it. Every state
+// folder a test scans with gets the same one, so incremental and from-zero scans agree.
+const SINCE = '2026-01-01T00:00:00.000Z';
+const writeSince = (dir) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'review-notes-since'), SINCE + '\n'); };
+writeSince(stateDir);
 const scan = createRequire(import.meta.url)(path.join(hooks, 'lib', 'transcript-scan.js'));
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -36,6 +41,7 @@ function transcriptFile(entries, name = 't' + (++fileCount)) {
 function fullScan(file) {
   const saved = process.env.SANAD_STATE_DIR;
   process.env.SANAD_STATE_DIR = fs.mkdtempSync(path.join(root, 'fresh-'));
+  writeSince(process.env.SANAD_STATE_DIR);
   try { return scan.scanTranscript(file); } finally { process.env.SANAD_STATE_DIR = saved; }
 }
 const cacheFiles = () => { try { return fs.readdirSync(path.join(stateDir, 'scan-cache')).filter((n) => n.endsWith('.json')); } catch { return []; } };
@@ -55,14 +61,19 @@ function sessionParts(dir) {
     ...shell('t1', 'dotnet test', 'Failed!  - Failed: 1, Passed: 2', 2, true),
     ...shell('bg1', 'npx vitest run', 'Command running in background with ID: bgA', 3, false, { backgroundTaskId: 'bgA' }),
   ];
+  // Reviewer notes (2026-11-12): a report read from a file, the user's words, a reviewer's report in its
+  // finish notice, then an outcome line for each note.
   const part2 = [
     { type: 'attachment', timestamp: at(10), attachment: { type: 'queued_command', commandMode: 'task-notification', prompt: '<task-notification>\n<task-id>bgA</task-id>\n<status>completed</status>\n<summary>done (exit code 0)</summary>\n<output-file>' + out + '</output-file>\n</task-notification>' } },
     ...shell('t2', 'dotnet test', passingDotnet, 11),
     call('rv-call', 'Agent', { description: 'review', prompt: 'You are the independent reviewer. Review it.', run_in_background: true }, 12),
     result('rv-call', 'Async agent launched successfully.', 12, false, { isAsync: true, status: 'async_launched', agentId: 'rv1' }),
+    ...shell('cx', 'cat C:/tmp/codex-review.md', 'RECOMMEND: FAIL\n\n- Bug — Api/X.cs:4 — the wrong status code for a gone row', 13),
+    { type: 'user', message: { role: 'user', content: 'keep the status code as it is for now' }, timestamp: at(14), origin: { kind: 'human' } },
   ];
   const part3 = [
-    { type: 'attachment', timestamp: at(20), attachment: { type: 'queued_command', commandMode: 'task-notification', prompt: '<task-notification>\n<task-id>rv1</task-id>\n<status>completed</status>\n<summary>Agent "review" completed</summary>\n</task-notification>' } },
+    { type: 'attachment', timestamp: at(20), attachment: { type: 'queued_command', commandMode: 'task-notification', prompt: '<task-notification>\n<task-id>rv1</task-id>\n<status>completed</status>\n<summary>Agent "review" completed</summary>\n<result>RECOMMEND: PASS\n- Gap — Api/X.cs:9 — a stale comment</result>\n</task-notification>' } },
+    verdict('NOTE 1: user — "keep the status code as it is"\nNOTE 2: fixed — removed the stale comment at Api/X.cs:9; no behavior change', 21),
     verdict('REVIEW: PASS', 21),
     ...shell('ev1', evidenceCommand('a'), receipt(), 22),
     verdict('GATE: PASS', 23),
@@ -97,6 +108,8 @@ test('an incremental scan grown in three steps equals a scan from zero at every 
   assert.equal(final.lastGateVerdict, 'PASS');
   assert.ok(final.lastEdit > final.lastGate, 'the last main edit follows the gate');
   assert.ok(final.lastBoundCheck > 0 && final.lastReviewerRun > 0);
+  assert.deepEqual(final.reviewNotes.map((n) => n.kind + ' ' + n.outcome), ['Bug user', 'Gap fixed'], 'notes and outcomes survive the cache');
+  assert.deepEqual(final.openReviewNotes, []);
   const cache = cacheFiles().map((n) => JSON.parse(fs.readFileSync(path.join(stateDir, 'scan-cache', n), 'utf8'))).find((c) => c.path && c.path.endsWith('session.jsonl'));
   assert.ok(cache, 'a cache file was written');
   assert.equal(cache.offset, fs.statSync(file).size, 'the cache holds the processed offset');

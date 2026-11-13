@@ -39,7 +39,7 @@ When a teammate leaves comments on the user's own PR, answer every comment with 
 1. **Collect everything:** the review bodies, the inline comments and the PR comments (`gh pr view <n> --json reviews`, `gh api repos/<owner>/<repo>/pulls/<n>/comments`, `.../issues/<n>/comments`), plus the PR state, CI and whether it still merges.
 2. **Check each comment in the code and the ticket**, at the PR head: open the lines, trace the case it names, and quote the ticket when it decides the rule. A comment that names a reader, a screen or a field gets a reader-by-reader search, API fields and DTO projections included, never only the frontend callers. (Example: a "no page reads them" reply was wrong; the API still returned the old flag.)
 3. **Report to the user, one line per comment:** correct / partly / not correct, with the reason, before any fix. Wait for the user's yes.
-4. **Fix on yes:** log each real bug first (missed-bugs, with its CLASS and CATCH), prove it red before green, and add the fixes as new commits on the same PR; squash only when the user asks.
+4. **Fix on yes:** prove each real bug red before green, fix it on every path its places list names, and add the fixes as new commits on the same PR; squash only when the user asks.
 5. **Re-check** the changed lines (whole-diff reviewer) and run the fresh-eyes review on the whole PR, then the full suite once, with no edits while it runs.
 6. **Before the push:** update the PR body (`gh pr edit <n> --body-file`), run the PR body check (it must print clean), and give the push command. Reply drafts for the teammate only when the user wants them.
 

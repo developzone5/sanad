@@ -175,9 +175,11 @@ test('a query change is medium with a database seat only where a database is use
   const svc = 'public class S {\n  private readonly AppDbContext _context;\n  public object Get() { return _context.Items.ToList(); }\n}\n';
   const q = size(change({ 'Api/S.cs': svc }, { 'Api/S.cs': svc.replace('_context.Items.ToList()', '_context.Items.Where(i => i.Active).OrderBy(i => i.Id).ToList()') }));
   assert.equal(q.size, 'medium');
-  assert.match(q.roles.join(' '), /boss answers the open question first/);
+  // 2026-11-12 (three sizes, user-approved): Medium gets ONE review with the full brief; the boss and the
+  // full round are for Big.
+  assert.equal(q.roles[0], 'one review: fresh eyes (Opus), full brief');
   assert.match(q.roles.join(' '), /Database expert/);
-  assert.match(q.roles.join(' '), /whole-diff \(Sonnet\), fresh eyes \(Opus\), other engine \(Codex\)/, 'medium keeps the full round');
+  assert.doesNotMatch(q.roles.join(' '), /boss|other engine|whole-diff/, 'the boss and the full round are for big');
   const mem = 'public class M {\n  public int Get(List<int> xs) { return xs.Count; }\n}\n';
   assert.equal(size(change({ 'Api/M.cs': mem }, { 'Api/M.cs': mem.replace('xs.Count', 'xs.Where(x => x > 0).Count()') })).size, 'small', 'in-memory LINQ is not a query');
 });
@@ -333,6 +335,24 @@ test('a comment-only change, or a line in another statement next to a query, sta
 
 // 2026-11-12 (audit C17): every .ts under i18n/ counted as text, so the i18next setup code (i18n/index.ts)
 // sized "tiny"; locale data modules under locales/ (EduQuest keeps 277 of them as .ts) stay text.
+// 2026-11-12 (three sizes, user-approved): "Small: one side only (page or server)". A change with logic on
+// both sides is Medium: its page rule and its server rule must agree (PR #773: a date rule fixed in the
+// validator, the service and the form was sized small, and a teammate found the paths it missed).
+test('server and page code in one change is medium; one side with its tests and texts stays small', () => {
+  const svc = 'public class S {\n  public int Get(int x) { return x; }\n}\n';
+  const page = 'export function rule(x) {\n  return x;\n}\n';
+  const both = size(change({ 'Api/S.cs': svc, 'web/src/rule.ts': page }, { 'Api/S.cs': svc.replace('return x;', 'return x + 1;'), 'web/src/rule.ts': page.replace('return x;', 'return x + 1;') }));
+  assert.equal(both.size, 'medium');
+  assert.deepEqual(both.signals.bothSides, ['S.cs', 'rule.ts']);
+  assert.match(both.roles.join(' '), /the page rule and the server rule agree/);
+  const oneSide = size(change({ 'Api/S.cs': svc }, { 'Api/S.cs': svc.replace('return x;', 'return x + 1;'), 'Api.Tests/STests.cs': 'public class STests { }\n', 'web/src/rule.test.ts': "it('x', () => {});\n", 'web/src/locales/en/a.ts': "export default { a: 'b' };\n", 'web/src/a.css': '.a{}\n' }));
+  assert.equal(oneSide.size, 'small', 'tests, texts and styles of the other side are not logic');
+  assert.equal(oneSide.signals.bothSides, undefined);
+  const repo = change({}, {});
+  assert.equal(sizeTask({ repo, files: ['Api/Services/S.cs', 'web/src/pages/List.tsx'] }).size, 'medium', 'planned files are sized by name');
+  assert.equal(sizeTask({ repo, files: ['web/src/pages/List.tsx', 'web/src/pages/Other.tsx'] }).size, 'small');
+});
+
 test('i18n setup code is code; locale data under a locales folder is text', () => {
   const setup = "export function getInitialLanguage() {\n  return 'ar';\n}\n";
   const code = size(change({ 'web/src/i18n/index.ts': setup }, { 'web/src/i18n/index.ts': setup.replace("'ar'", "'en'") }));

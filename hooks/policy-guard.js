@@ -6,6 +6,7 @@
  *   DENY (impossible from Claude; the human can still run it by hand):
  *     - git push whose target is main/master/prod/production/release/*
  *     - outgoing code without completed verification and passing review/gate
+ *     - any push or PR while a reviewer note has no outcome (rule 5, 2026-11-12)
  *     - git add . / -A / --all            (stage named files only)
  *     - gh pr merge · gh release *        (never merge, never cut a release)
  *     - gh pr create without --base, or with a prod base
@@ -354,8 +355,15 @@ function gateCheck(base) {
   publishBase = base || null;
   cachedBase = undefined; cachedPaths = undefined;
   const files = pushCodePaths();
-  if (files.length === 0) return;                      // prose-only publish: nothing to verify
   const tp = input.transcript_path;
+  if (files.length === 0) {                            // prose-only publish: nothing to verify
+    // Open reviewer notes hold a prose push too (a note can be about the PR text). A transcript that
+    // cannot be read keeps today's answer for prose (2026-11-12).
+    let notes = null;
+    try { notes = tp && fs.existsSync(tp) ? scan.scanTranscript(tp) : null; } catch (e) { notes = null; }
+    openNotesCheck(notes);
+    return;
+  }
   if (!tp || !fs.existsSync(tp)) {
     deny('outgoing code has no session verification evidence. Run the review and /gate in this session before pushing.');
     return;
@@ -363,6 +371,7 @@ function gateCheck(base) {
   let r;
   try { r = scan.scanTranscript(tp); } catch (e) { deny('verification transcript could not be read. Re-run review and /gate before pushing.'); return; }
   if (!r) { deny('verification transcript could not be scanned. Re-run review and /gate before pushing.'); return; }
+  openNotesCheck(r);
   const checked = r.completedCheck;
   const root = gitRaw(['rev-parse', '--show-toplevel']).trim().replace(/\\/g, '/').toLowerCase();
   const tree = gitRaw(['rev-parse', 'HEAD^{tree}']).trim();
@@ -432,6 +441,20 @@ function gateCheck(base) {
     deny('code adds ExecuteUpdate/ExecuteDelete, raw SQL or a migration and has no completed real-provider run after the last edit' + file + '. ' +
          'Exercise the affected flow against MySQL (docker exec … mysql, a live API request, or the smoke script), quote it in the gate, then re-review and re-gate. Unrepeatable malformed checks require the documented recovery procedure in skills/gate/reference/command-evidence.md.');
   }
+}
+
+// Rule 5 (2026-11-12): every reviewer note is fixed, or the user decides it; the author never decides
+// alone. Three notes were once dropped without being shown to the user, so a push waits while any
+// reviewer note in this session has no outcome (`NOTE n: fixed — …` / `NOTE n: user — "…"`). With no
+// reviewer report in the session there are no notes, and nothing changes.
+// An error here keeps the push guard's other answers as they were.
+function openNotesCheck(r) {
+  let list = '';
+  try {
+    const open = r && Array.isArray(r.openReviewNotes) ? r.openReviewNotes : [];
+    if (open.length && typeof scan.openNotesMessage === 'function') list = scan.openNotesMessage(open);
+  } catch (e) { list = ''; }
+  if (list) deny('a reviewer note has no outcome yet, so this cannot be published.\n' + list);
 }
 
 // The first top-level folder that holds changed code but no matching receipt whose
