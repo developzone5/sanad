@@ -26,6 +26,8 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+// 2026-11-14: tests/guard-gaps.test.mjs runs a copy with only the next line raised to
+// 5 min, so a slow test machine cannot turn a verdict into 'ask'; keep the line in this form.
 const DEADLINE_MS = 10000;
 const DEADLINE = Date.now() + DEADLINE_MS;
 const MAX_SCAN_BYTES = 32 * 1024 * 1024;

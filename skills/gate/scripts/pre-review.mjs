@@ -42,6 +42,8 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { isMain } from './is-main.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = /\.(?:[cm]?[jt]sx?)$/i;
@@ -235,6 +237,11 @@ export function placesWithout(sizeOut, repo) {
 export function otherTaskOnRemote(repo, remote) {
   const dir = process.env.SANAD_CHECK_LOCK_DIR || path.join(os.homedir(), '.claude', 'state', 'check-locks');
   const same = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+  // 2026-11-14: an id handed to a later process kept a stale lock "alive" here, and the sync (with lint and
+  // types on the test machine) was skipped. The lock counts only while the process that wrote it holds the id
+  // (hooks/lib/process-start.cjs, as in check-lock-guard.js), asked last, for a lock that would count. No
+  // helper: the id check alone, as before.
+  const sameProcess = (lock) => { try { return createRequire(import.meta.url)('../../../hooks/lib/process-start.cjs').sameProcess(lock); } catch { return true; } };
   let names = [];
   try { names = fs.readdirSync(dir).filter(n => n.endsWith('.json')); } catch { return ''; }
   for (const n of names) {
@@ -242,7 +249,7 @@ export function otherTaskOnRemote(repo, remote) {
       const lock = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8'));
       if (!(Date.parse(lock.expiresAt) > Date.now()) || same(String(lock.toplevel || ''), repo)) continue;
       try { process.kill(lock.pid, 0); } catch (e) { if (e.code !== 'EPERM') continue; }
-      if (new RegExp(`(?:^|[\\s@])${remote.host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`).test(String(lock.command || ''))) return String(lock.toplevel);
+      if (new RegExp(`(?:^|[\\s@])${remote.host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`).test(String(lock.command || '')) && sameProcess(lock)) return String(lock.toplevel);
     } catch { /* a lock being written: not a running check yet */ }
   }
   return '';
@@ -331,7 +338,7 @@ function parse(argv) {
   return o;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   try {
     const o = parse(process.argv.slice(2));
     const repo = git(path.resolve(o.repo || process.cwd()), ['rev-parse', '--show-toplevel']);

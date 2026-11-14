@@ -21,10 +21,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { provenTestFiles, skippedLines } from './proof-record.mjs';
 import { checkLines } from './review-brief.mjs';
+import { isMain } from './is-main.mjs';
 
 // FluentAssertions forms too (2026-11-12: the backend asserts with .Should(); 36 of its range checks
 // were never flagged).
@@ -78,7 +78,7 @@ export function rangeAsserts(lines) {
   return lines.filter(l => TEST_FILE.test(l.file) && RANGE.test(l.text) && !REASON.test(l.text));
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   const argv = process.argv.slice(2);
   const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
   const repo = path.resolve(opt('--repo') || process.cwd());

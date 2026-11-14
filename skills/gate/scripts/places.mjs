@@ -38,9 +38,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { enclosingFunction } from './size-check.mjs';
+import { isMain } from './is-main.mjs';
 
 // More product files than this and nobody can judge each one (2026-11-12): name the rule, not the word.
 export const MAX_FILES = 40;
@@ -354,4 +354,4 @@ async function main() {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+if (isMain(import.meta.url)) main();

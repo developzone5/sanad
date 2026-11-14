@@ -141,9 +141,9 @@ if (r.lastEdit === -1) allow();
 // names the content, so the same tree in another worktree or clone is the same
 // code (2026-11-05: a checkout of the tested commit in the main folder kept
 // asking for a rerun). Any git error → no memo.
-function gitRead(args, cwd) {
+function gitRead(args, cwd, timeout = 8000) {
   try {
-    return require('child_process').execFileSync('git', args, { cwd: cwd || input.cwd || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 8000, windowsHide: true }).trim();
+    return require('child_process').execFileSync('git', args, { cwd: cwd || input.cwd || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(8000, timeout), windowsHide: true }).trim();
   } catch (e) { return null; }
 }
 let verifiedTree = '';
@@ -168,11 +168,47 @@ function remoteRefsOnly() {
   if (r.lastEditPath !== '<git-remote>' || !moves.length) return false;
   return [...new Set(moves.map((m) => m.repo))].every((dir) => !!dir && gitRead(['status', '--porcelain'], dir) === '');
 }
+// Remote-tip memo (2026-11-14). Git syncs (switch, pull, merge, reset, checkout) after every other change,
+// each folder left clean (no staged, unstaged or untracked file) with HEAD's tree equal to a remote branch
+// tip's tree, only brought in upstream code: nothing of this session's own to verify (a clean
+// `git switch -q main && git pull -q` asked for a build). A fetched-ref move there needs a clean folder,
+// as above. A merge with local commits, a local-only branch or a dirty folder matches no tip. Any git
+// error, an unknown folder or the time budget spent → no memo (the stop hook has 20 s in all).
+const SYNC_BUDGET_MS = 5000;
+function syncedToRemoteTips() {
+  // An unexpected error keeps the old rule (the sync counts as a change), never a silent allow (2026-11-14).
+  try { return syncsAtRemoteTips(); } catch (e) { return false; }
+}
+function syncsAtRemoteTips() {
+  const moves = Array.isArray(r.syncMoves) ? r.syncMoves : [];
+  if (!/^<git(?:-remote)?>$/.test(r.lastEditPath) || !moves.length) return false;
+  const deadline = Date.now() + SYNC_BUDGET_MS;
+  const read = (args, dir) => { const left = deadline - Date.now(); return left > 0 ? gitRead(args, dir, left) : null; };
+  const folders = new Map();   // folder -> a move there was not to a fetched ref, so it must be at a remote tip
+  for (const m of moves) {
+    if (!m || typeof m.repo !== 'string' || !m.repo) return false;
+    folders.set(m.repo, folders.get(m.repo) === true || m.remote !== true);
+  }
+  for (const [dir, needsTip] of folders) {
+    if (read(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=normal'], dir) !== '') return false;
+    if (!needsTip) continue;
+    const tree = read(['rev-parse', '--verify', '-q', 'HEAD^{tree}'], dir);
+    if (!tree || !/^[0-9a-f]{40,64}$/i.test(tree)) return false;
+    const tips = read(['for-each-ref', '--format=%(tree)', 'refs/remotes'], dir);
+    if (!tips || !tips.split(/\r?\n/).includes(tree)) return false;
+  }
+  return true;
+}
 const remoteOnly = remoteRefsOnly();
 if (remoteOnly && (r.lastNonRemoteEdit ?? -1) === -1) allow();             // no code change of its own this session
 const treeVerified = !remoteOnly && r.lastEditPath === '<git>' && verifiedTreeCheckedOut();
-const lastEdit = remoteOnly ? r.lastNonRemoteEdit : treeVerified ? r.lastNonGitEdit : r.lastEdit;
-const memo = treeVerified ? ' The checked-out tree is identical to one a passing evidence check verified (' + verifiedTree.slice(0, 12) + '), so the git-only change needs no rerun.'
+let lastEdit = remoteOnly ? r.lastNonRemoteEdit : treeVerified ? r.lastNonGitEdit : r.lastEdit;
+// Checked only when it can move the last change earlier than the memos above did.
+const synced = typeof r.lastNonSyncEdit === 'number' && r.lastNonSyncEdit < lastEdit && syncedToRemoteTips();
+if (synced && r.lastNonSyncEdit === -1) allow();                            // no code change of its own this session
+if (synced) lastEdit = r.lastNonSyncEdit;
+const memo = synced ? ' The last change only synced clean folders to remote branch tips, so it needs no rerun.'
+  : treeVerified ? ' The checked-out tree is identical to one a passing evidence check verified (' + verifiedTree.slice(0, 12) + '), so the git-only change needs no rerun.'
   : remoteOnly ? ' The last change only moved a clean folder to a fetched remote ref, so it needs no rerun.' : '';
 
 // A failure declared with `PROBE EXPECTED:` (a review probe that proves someone

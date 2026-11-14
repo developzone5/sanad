@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { isMain } from './is-main.mjs';
 
 export const STACK_FILE = /(?:^|\/)(?:[^/]+\.csproj|Directory\.Packages\.props|package\.json|(?:docker-)?compose(?:\.[^/]+)?\.ya?ml|schema\.prisma)$/i;
 const SKIP = /(?:^|\/)(?:node_modules|\.claude|\.agents|\.codex|vendor|dist|build|bin|obj)\//i;
@@ -132,7 +132,7 @@ export function readStack(repoPath, { fresh = false } = {}) {
   return { ...stack, cached: false };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   const argv = process.argv.slice(2);
   const at = argv.indexOf('--repo');
   try {

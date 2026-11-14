@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { isMain } from './is-main.mjs';
 
 // The ticket's lines, in order: blank lines dropped, a heading or bullet mark taken off, the words untouched.
 export function ticketLines(text) {
@@ -63,7 +63,7 @@ function main(argv) {
   if (branch) process.stdout.write(`NO TICKET: branch ${branch} — the commit check asks for no ticket ID\n`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   try { main(process.argv.slice(2)); }
   catch (error) {
     process.stderr.write('LINES: ' + error.message + '\nUsage: node lines.mjs --from <ticket text file> --out <notes>/lines.md [--no-ticket --repo <path>]\n');

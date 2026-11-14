@@ -20,22 +20,44 @@ const fakeTemp = path.join(root, 'faketemp');
 fs.mkdirSync(fakeTemp);
 const gitIn = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
+// 2026-11-14: with the CPU taken by other work, each git call of a commit scan took 4-5 s
+// instead of ~45 ms, the hook's 10 s budget ran out at its third call (the working-tree
+// `git diff`), and F1 got 'ask' instead of 'deny'. A 40 s budget still ran out when two
+// tests shared that CPU, so a bigger number only moves the line. Tests that judge WHAT
+// the scan finds run a copy whose only change is a 5-minute budget: far past any slow
+// machine, yet a hung hook still ends. The real file keeps its 10 s bound: under that
+// load it already took 16-17 s in all, and a hook past the 30 s settings timeout lets the
+// tool call through. Tests that pass `realBudget` run the real file.
+const LONG_BUDGET_MS = 300000;
+const longBudget = path.join(root, 'long-budget-hooks');
+fs.cpSync(path.join(hooks, 'lib'), path.join(longBudget, 'lib'), { recursive: true });
+{
+  const source = fs.readFileSync(path.join(hooks, 'precommit-guard.js'), 'utf8');
+  const budget = /^const DEADLINE_MS = \d+;(\r?)$/gm;
+  assert.equal((source.match(budget) || []).length, 1, 'precommit-guard.js declares its budget once as `const DEADLINE_MS = <ms>;`');
+  fs.writeFileSync(path.join(longBudget, 'precommit-guard.js'), source.replace(budget, 'const DEADLINE_MS = ' + LONG_BUDGET_MS + ';$1'));
+}
+
 // Run one hook process without blocking the event loop, so parallel tests overlap.
 function spawnHook(script, input, { env = process.env, timeout = 60000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script], { windowsHide: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '';
+    let stdout = '', stderr = '', killed = false;
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     child.stdout.on('data', d => { stdout += d; }); child.stderr.on('data', d => { stderr += d; });
-    const timer = setTimeout(() => child.kill(), timeout);
+    const timer = setTimeout(() => { killed = true; child.kill(); }, timeout);
     child.once('error', e => { clearTimeout(timer); reject(e); });
-    child.once('close', status => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
+    child.once('close', status => { clearTimeout(timer); resolve({ status, stdout, stderr, killed }); });
     child.stdin.end(input);
   });
 }
-async function decide(hook, command, { cwd, tool = 'PowerShell', env = {} } = {}) {
+async function decide(hook, command, { cwd, tool = 'PowerShell', env = {}, realBudget = false } = {}) {
   const input = JSON.stringify({ cwd, tool_name: tool, hook_event_name: 'PreToolUse', tool_input: { command } });
-  const run = await spawnHook(path.join(hooks, hook), input, { env: { ...process.env, TEMP: fakeTemp, TMP: fakeTemp, ...env } });
+  const long = hook === 'precommit-guard.js' && !realBudget;
+  const run = await spawnHook(long ? path.join(longBudget, hook) : path.join(hooks, hook), input,
+    { env: { ...process.env, TEMP: fakeTemp, TMP: fakeTemp, ...env }, timeout: long ? LONG_BUDGET_MS + 60000 : 60000 });
+  // 2026-11-14: a hook stopped here prints nothing, which would read as 'allow'; fail instead.
+  assert.equal(run.killed, false, hook + ' gave no decision before the test stopped it: ' + command);
   const out = run.stdout.trim() ? JSON.parse(run.stdout) : {};
   const h = out.hookSpecificOutput || {};
   return { decision: h.permissionDecision || 'allow', reason: h.permissionDecisionReason || '', status: run.status, stderr: run.stderr, ms: 0 };
@@ -218,6 +240,35 @@ test('F1: a new ordinary file staged by the same command has its contents scanne
   assert.equal((await decide('precommit-guard.js', 'git add src/leak.cs; git commit -m x', { cwd: dir })).decision, 'allow', 'a clean new file is committed');
 });
 
+// 2026-11-14: a repository whose first index refresh stalls 12 s (a core.fsmonitor
+// script that sleeps once), longer than the hook's whole 10 s budget. It stands in,
+// without loading the PC, for a machine so busy that each git call takes seconds.
+function slowRepo(name) {
+  const dir = repo(name);
+  const gitDir = path.join(dir, '.git').replace(/\\/g, '/');
+  const marker = gitDir + '/slow-once', script = gitDir + '/slow-fsmonitor.sh';
+  fs.writeFileSync(script, "#!/bin/sh\nif [ ! -e '" + marker + "' ]; then : > '" + marker + "'; sleep 12; fi\nexit 1\n", { mode: 0o755 });
+  gitIn(dir, 'config', 'core.fsmonitor', script);
+  gitIn(dir, 'config', 'core.fsmonitorHookVersion', '2');      // one call per refresh, no v1 retry
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.writeFileSync(path.join(dir, 'src', 'leak.cs'), 'var key = "' + fakeAwsKey + '";\n');
+  return dir;
+}
+
+test('F1: a slow machine still gets the scan verdict; the real hook keeps its 10 s bound', async () => {
+  const command = 'git add src/leak.cs; git commit -m x';
+  const [scan, real] = await Promise.all([
+    decide('precommit-guard.js', command, { cwd: slowRepo('f1-slow') }),
+    decide('precommit-guard.js', command, { cwd: slowRepo('f1-slow-real'), realBudget: true }),
+  ]);
+  assert.equal(scan.decision, 'deny', scan.reason);
+  assert.match(scan.reason, /AWS access key/);
+  // The 2026-11-13 failure itself: the budget ran out mid-scan, and a commit whose scan
+  // cannot finish asks by design. The real file must still do exactly that.
+  assert.equal(real.decision, 'ask', real.reason);
+  assert.match(real.reason, /the 10 s scan limit was reached/);
+});
+
 function pushFixture(name) {
   const src = repo(name);
   fs.writeFileSync(path.join(src, 'db.txt'), 'Server=x;Pass' + 'word=fixture123\n');   // already public on the remote; split so this source file is not itself flagged
@@ -266,7 +317,7 @@ test('F4: an unreadable remote or an oversized outgoing set denies within the de
   gitIn(unreachable, 'remote', 'set-url', 'origin', 'https://10.255.255.1/fixture.git');
   commitFile(unreachable, 'a.txt', 'one\n', 'test: one');
   const started = Date.now();
-  const d = await decide('precommit-guard.js', 'git push origin staging', { cwd: unreachable });
+  const d = await decide('precommit-guard.js', 'git push origin staging', { cwd: unreachable, realBudget: true });
   assert.equal(d.decision, 'deny'); assert.match(d.reason, /Nothing was verified/);
   assert.ok(Date.now() - started < 13000, 'decision arrives before the hook timeout');
 
@@ -274,7 +325,7 @@ test('F4: an unreadable remote or an oversized outgoing set denies within the de
   const line = 'x'.repeat(99) + '\n';
   fs.writeFileSync(path.join(big, 'bulk.txt'), line.repeat(400000));                   // ~40 MB of new lines
   gitIn(big, 'add', 'bulk.txt'); gitIn(big, 'commit', '-q', '-m', 'test: bulk');
-  const b = await decide('precommit-guard.js', 'git push origin staging', { cwd: big });
+  const b = await decide('precommit-guard.js', 'git push origin staging', { cwd: big, realBudget: true });
   assert.equal(b.decision, 'deny'); assert.match(b.reason, /scan limit/);
 });
 

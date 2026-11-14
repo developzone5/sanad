@@ -402,4 +402,8 @@ function main(argv) {
   return 0;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = main(process.argv);
+// Compared by real path (2026-11-14): run through a link or a Windows short name, the typed path and the module's
+// own (real) path differ, and the script exited 0 without doing anything.
+const realOf = (p) => { try { return fs.realpathSync.native(path.resolve(p)); } catch { return path.resolve(p); } };
+const same = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+if (process.argv[1] && same(realOf(process.argv[1]), realOf(fileURLToPath(import.meta.url)))) process.exitCode = main(process.argv);

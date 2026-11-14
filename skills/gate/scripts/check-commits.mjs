@@ -15,7 +15,7 @@
 // Exit 0: all clear. 1: a rule is broken (each printed). 2: usage error.
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { isMain } from './is-main.mjs';
 
 const TYPES = 'feat|fix|perf|refactor|test|docs|chore|build|ci|style|revert';
 const SUBJECT = new RegExp(`^(?:${TYPES})(?:\\([a-z0-9._/-]+\\))?!?: \\S.*$`);
@@ -39,7 +39,7 @@ function git(cwd, args) {
   catch { return null; }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   const argv = process.argv.slice(2);
   const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
   const top = git(path.resolve(opt('--repo') || process.cwd()), ['rev-parse', '--show-toplevel']);
