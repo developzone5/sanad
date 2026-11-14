@@ -99,6 +99,8 @@ test('--close writes one outcome on many places: file: and name: fill open place
   let r = run(['--close', out, '--set', 'file:src/s*.ts=C1']);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /^CLOSED: 1 place\(s\) — file:src\/s\*\.ts → C1$/m);
+  // 2026-11-14: each place a --set closed is named under it, so a wrong bulk reason is seen.
+  assert.match(r.stdout, /^CLOSED: 1 place\(s\) — file:src\/s\*\.ts → C1\n {2}P\d+ · dueAfterPublish · src\/schedule\.ts · \(file\)$/m);
   assert.match(byFile('src/schedule.ts'), /→ C1$/);
   r = run(['--close', out, '--set', 'name:dueAfterPublish=none: only a draft that never ships']);
   assert.equal(r.status, 0, r.stdout + r.stderr);

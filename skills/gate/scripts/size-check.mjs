@@ -339,6 +339,20 @@ function endsStatement(line) {
 // `.Where(a =>` holds no query word (2026-11-12, audit C4b). Each hunk is read with up to three unchanged
 // lines above and below it that belong to the same statement (no `;` or lone `}` between): a whole three-line
 // window would count a plain line next to every finished query. Comment lines and comment-only hunks do not count.
+// A changed line and its old line, read with the last plain argument of each `xxxAsync(…)` call taken out: in
+// an async query call that argument is the cancellation token, which never reaches the SQL (2026-11-14: a fix
+// that only handed queries another token grew to medium). A lambda, an operator or a nested call there is not
+// plain, so a changed predicate still differs.
+const asyncTokenFree = (line) => String(line ?? '').replace(/(\w+Async\s*\((?:[^()]*?,\s*)?)[A-Za-z_][\w.]*(\s*\))/g, '$1·$2').trim();
+function tokenOnlyHunk(added, removed) {
+  if (!added.length || added.length !== removed.length) return false;
+  let differs = false;
+  for (let i = 0; i < added.length; i++) {
+    if (asyncTokenFree(added[i]) !== asyncTokenFree(removed[i])) return false;
+    if (String(added[i] ?? '').trim() !== String(removed[i] ?? '').trim()) differs = true;
+  }
+  return differs;
+}
 function queryChanged(repo, f) {
   const text = fileText(repo, f.name), now = text.split(/\r?\n/);
   const code = C_STYLE.test(f.name) ? codeLines(text) : null;
@@ -351,6 +365,7 @@ function queryChanged(repo, f) {
     for (let i = first; i < end; i++) if (!code || code[i]) seen.push(now[i]);
     const removed = [];
     if (h.oldStart != null) for (let i = h.oldStart - 1; i < h.oldStart - 1 + h.oldCount; i++) if (!oldCode || oldCode[i]) removed.push(old[i]);
+    if (tokenOnlyHunk(seen, removed)) continue;
     seen.push(...removed);
     for (let i = first - 1, k = 0; i >= 0 && k < 3 && !endsStatement(now[i]); i--, k++) if (!code || code[i]) seen.push(now[i]);
     let last = h.count ? now[end - 1] : removed[removed.length - 1];

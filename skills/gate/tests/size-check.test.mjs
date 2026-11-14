@@ -373,6 +373,31 @@ test('a changed predicate on the wrapped line under .Where( is a query change', 
   assert.equal(r.size, 'medium');
 });
 
+// 2026-11-14: a fix that only handed a query another cancellation token (`.FirstOrDefaultAsync(cancellationToken)`
+// → `.FirstOrDefaultAsync(PostCommit)`) read as a query shape change, so a one-side fix grew to medium. The
+// token never reaches the SQL; a changed predicate or a new argument still counts.
+test('a query whose only change is the token its async call takes is no query change; a changed predicate still is', () => {
+  const svc = [
+    'public class S {',
+    '  private readonly AppDbContext _db;',
+    '  public async Task<long?> Get(long id, CancellationToken cancellationToken) {',
+    '    var a = await _db.Items.Where(i => i.Id == id).Select(i => i.Owner).FirstOrDefaultAsync(cancellationToken);',
+    '    var b = await _db.Items.FirstOrDefaultAsync(i => i.Id == id, cancellationToken);',
+    '    return a ?? b?.Owner;',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const tokenOnly = svc.replace('.FirstOrDefaultAsync(cancellationToken)', '.FirstOrDefaultAsync(PostCommit)')
+    .replace('i.Id == id, cancellationToken)', 'i.Id == id, CancellationToken.None)');
+  const r = size(change({ 'Api/S.cs': svc }, { 'Api/S.cs': tokenOnly }));
+  assert.ok(!r.signals.query, 'a token-only change: ' + JSON.stringify(r.signals));
+  const predicate = size(change({ 'Api/S.cs': svc }, { 'Api/S.cs': svc.replace('i.Id == id, cancellationToken)', 'i.Id == id + 1, cancellationToken)') }));
+  assert.ok(predicate.signals.query, 'a changed predicate next to the token still counts');
+  const added = size(change({ 'Api/S.cs': svc }, { 'Api/S.cs': svc.replace('.FirstOrDefaultAsync(cancellationToken)', '.FirstOrDefaultAsync(i => i.Active, cancellationToken)') }));
+  assert.ok(added.signals.query, 'a new predicate argument still counts');
+});
+
 test('a comment-only change, or a line in another statement next to a query, stays small in a database file', () => {
   const svc = [
     'public class S {',
