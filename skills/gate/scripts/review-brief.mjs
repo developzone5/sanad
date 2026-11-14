@@ -53,6 +53,7 @@ import { fileURLToPath } from 'node:url';
 import { readLines } from './check-ticket-lines.mjs';
 import { treeId } from './red-proof.mjs';
 import { refreshPlaces, checkPlaces, placeLine } from './places.mjs';
+import { isMain } from './is-main.mjs';
 
 // The sizes in order, as size-check.mjs names them (kept here: that script runs as a child process).
 const SIZES = ['tiny', 'small', 'medium', 'big'];
@@ -330,7 +331,7 @@ function parse(argv) {
   return o;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   try {
     const o = parse(process.argv.slice(2));
     const repo = git(path.resolve(o.repo || process.cwd()), ['rev-parse', '--show-toplevel']);

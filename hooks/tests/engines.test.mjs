@@ -97,6 +97,19 @@ test('workflow release installs Codex config and roles, backs up prior config, a
   assert.notEqual(f.run('engine-release').status, 0, 'A release cannot overwrite its backup');
 });
 
+// 2026-11-14: an install printed "fail 1" and its output was gone, so the failing test could not be named.
+test('a failing suite after install names the failing test and keeps both suites\' full output beside the backup', t => {
+  const f = fixture(t);
+  f.put(f.cand, 'claude/hooks/tests/broken.test.cjs', 'require("node:test")("the broken one", () => { throw new Error("boom"); });\n');
+  const result = f.run('broken-release');
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stdout, /^ {2}failed \(tests-hooks\): the broken one$/m);
+  assert.match(result.stdout, /^Full test output: .*tests-hooks\.log and .*tests-gate\.log$/m);
+  const logs = path.join(f.live, 'claude/backups/broken-release');
+  assert.match(fs.readFileSync(path.join(logs, 'tests-hooks.log'), 'utf8'), /boom/);
+  assert.match(fs.readFileSync(path.join(logs, 'tests-gate.log'), 'utf8'), /ℹ pass 1/);
+});
+
 test('workflow release installs the Codex AGENTS.md rules file and backs up the old one', t => {
   const f = fixture(t);
   for (const folder of [f.base, f.live]) f.put(folder, 'codex/AGENTS.md', 'old rules\n');

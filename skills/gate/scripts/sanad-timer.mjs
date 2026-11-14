@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isMain } from './is-main.mjs';
 
 const FILE = 'timer.tsv';
 /** The pointer file's name for a session id: sanad-timer-active-<id>, or sanad-timer-active with no id. */
@@ -123,7 +124,7 @@ export function report(dir, now = new Date()) {
   return lines.join('\n');
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))) {
+if (isMain(import.meta.url)) {
   const [cmd, dir, ...words] = process.argv.slice(2);
   if (!cmd || !dir) {
     console.error('Usage: sanad-timer.mjs mark|wait|pause|resume|report|end <notes-dir> [step words…]');

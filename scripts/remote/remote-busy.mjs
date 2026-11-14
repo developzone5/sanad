@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
 const [top, host, remoteRepo] = process.argv.slice(2);
 if (!top || !host || !remoteRepo) process.exit(0);
@@ -25,6 +26,10 @@ const flat = (text) => String(text || '').replace(/\\/g, '/').replace(/\/+$/, ''
 const real = (p) => { try { return fs.realpathSync.native(String(p)); } catch { return path.resolve(String(p)); } };
 const same = (a, b) => flat(real(a)) === flat(real(b));
 const alive = (pid) => { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+// 2026-11-14: an id handed to a later process kept a stale lock "alive" here (a false REMOTE-BUSY). The lock
+// counts only while the process that wrote it holds the id (hooks/lib/process-start.cjs, as in
+// check-lock-guard.js), asked last, for a lock that would count. No helper: the id check alone, as before.
+const sameProcess = (lock) => { try { return createRequire(import.meta.url)('../../hooks/lib/process-start.cjs').sameProcess(lock); } catch { return true; } };
 const state = process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state');
 const lockDir = process.env.SANAD_CHECK_LOCK_DIR || path.join(state, 'check-locks');
 
@@ -34,7 +39,7 @@ for (const name of names) {
   try {
     const lock = JSON.parse(fs.readFileSync(path.join(lockDir, name), 'utf8'));
     if (!(Date.parse(lock.expiresAt) > Date.now()) || !lock.toplevel || same(lock.toplevel, top) || !alive(lock.pid)) continue;
-    if (!flat(lock.command).includes(flat(remoteRepo))) continue;
+    if (!flat(lock.command).includes(flat(remoteRepo)) || !sameProcess(lock)) continue;
     console.log(`a check of ${flat(lock.toplevel) === flat(path.resolve(lock.toplevel)) ? lock.toplevel : String(lock.toplevel).replace(/\\/g, '/')} is running in ${host}:${remoteRepo} (since ${lock.startedAt}), and a sync would change the code under it. Wait for it to end, then run this again.`);
     process.exit(0);
   } catch { /* a lock being written: not a running check yet */ }

@@ -61,13 +61,23 @@ fi
 # the "ℹ pass N" lines are missing and the install ends with exit 1 (seen on the Sanad CI).
 # `|| true`: a failing suite exits non-zero, and under pipefail that ended the script silently,
 # before the release line and the restore hint below (seen 2026-11-05).
-hooks=$(cd "$C/hooks/tests" && node --test --test-reporter=spec 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ') || true
-gate=$(cd "$C/skills/gate/tests" && node --test --test-reporter=spec 2>&1 | grep -E '^ℹ (pass|fail)' | tr '\n' ' ') || true
+# 2026-11-14: each suite's full output is kept beside the backup, and a failing test is named below (an
+# install printed "fail 1" and the output was gone, so nobody could tell which test failed).
+mkdir -p "$B"
+(cd "$C/hooks/tests" && node --test --test-reporter=spec > "$B/tests-hooks.log" 2>&1) || true
+(cd "$C/skills/gate/tests" && node --test --test-reporter=spec > "$B/tests-gate.log" 2>&1) || true
+hooks=$(grep -aE '^ℹ (pass|fail)' "$B/tests-hooks.log" 2>/dev/null | tr '\n' ' ') || true
+gate=$(grep -aE '^ℹ (pass|fail)' "$B/tests-gate.log" 2>/dev/null | tr '\n' ' ') || true
 echo "hooks: $hooks"; echo "gate: $gate"
 { printf -- '- %s · %s · changed: %s' "$(date -u +%Y-%m-%dT%H:%MZ)" "$NAME" "${changed[*]}"
   [ ${#removed[@]} -gt 0 ] && printf ' · removed: %s' "${removed[*]}"
   printf ' · hooks: %s· gate: %s\n' "$hooks" "$gate"; } >> "$C/backups/RELEASES.md"
 if echo "$hooks $gate" | grep -qE 'fail [1-9]'; then
+  for log in "$B/tests-hooks.log" "$B/tests-gate.log"; do
+    { grep -aE '^✖ ' "$log" 2>/dev/null || true; } | grep -v '^✖ failing tests:' | sed -E 's/ \([0-9.]+ms\)$//' | sort -u | head -10 \
+      | sed "s|^✖ |  failed ($(basename "$log" .log)): |" || true   # a log with no failing line is not an error
+  done
+  echo "Full test output: $B/tests-hooks.log and $B/tests-gate.log"
   echo "TESTS FAILED after install. Restore with: cp -r \"$B/claude/.\" \"$C/\"; [ -d \"$B/agents/skills\" ] && cp -r \"$B/agents/skills/.\" \"$A/\"; [ -d \"$B/codex\" ] && cp -r \"$B/codex/.\" \"$X/\""
   exit 2
 fi

@@ -15,9 +15,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { readStack } from './stack.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
+import { isMain } from './is-main.mjs';
 
 export const SIZES = ['tiny', 'small', 'medium', 'big'];
 const CODE = /\.(?:cs|[cm]?[jt]sx?|py|go|java|kt|rb|php|sql|razor|cshtml|vue|svelte)$/i;
@@ -887,7 +887,7 @@ function args(argv) {
   return o;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   try {
     const o = args(process.argv.slice(2));
     const r = sizeTask({ repo: o.repo, base: o.base, files: o.files ? o.files.split(',').map(s => s.trim()).filter(Boolean) : null });

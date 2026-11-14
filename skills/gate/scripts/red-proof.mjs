@@ -33,6 +33,8 @@
 //     and every test in the changed test files whose title holds that part fails. A break that does
 //     not compile or run (ReferenceError, SyntaxError, "is not defined", a compiler error) or changes
 //     nothing is BREAK INVALID.
+//   - A mustFail part whose words are in the title of a test this change added AND of an older test is
+//     BREAK AMBIGUOUS (2026-11-14): refused before any run, exit 2. A part may name older tests alone.
 //   - --files may not name a test file; product files left out of it are named in a WARNING.
 //   - --log is emptied when the run starts and written however it ends; its first line names the tree.
 //
@@ -49,6 +51,7 @@
 //   "put": "<replacement>", "mustFail": ["<part of a test's own title>", ...] }, ...]
 //   A mustFail part may come from a test's method name or from its xUnit DisplayName, never from a
 //   describe block or a file name; every test in the changed test files whose title holds it must fail.
+//   A tag shared with older tests ("[C1]" of an earlier ticket) is refused: name each test by its own words.
 //   The find text may be written with LF or CRLF line endings; it matches either.
 // --old with a fix file that only adds lines, and adds names the tests use (a new message, a new
 // constant): that file stays at the fix for the old-code run, so the old code compiles; the run says so.
@@ -104,6 +107,7 @@ import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { canonicalTop, changedTestFiles, declaredTests, defaultBase, recordKey, testFileHashes, writeEntry } from './proof-record.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
+import { isMain } from './is-main.mjs';
 
 // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
 // missing element, a type, reference or build error, or a timeout means the test itself (or the
@@ -215,6 +219,45 @@ export function survivors(mustFail, reasons, pairs = [], declared = []) {
     if (missing.length) left.push(seen(p) ? `${part} (not failing: ${missing.map(t => `"${t}"`).join(', ')})` : String(part));
   }
   return left;
+}
+
+// Each test a changed test file declares, marked new or older (2026-11-14). Older: the file at the merge
+// base declared a test with the same titles (an it()/test() title; a C# method and its DisplayName), counted
+// once per time it did. New: this change added the test or changed its title. `baseText` is null for a file
+// the base did not have.
+export function markNewTests(text, baseText, file = '') {
+  const before = new Map();
+  for (const d of baseText == null ? [] : declaredTests(baseText, file)) {
+    const k = JSON.stringify(d.titles);
+    before.set(k, (before.get(k) || 0) + 1);
+  }
+  return declaredTests(text, file).map(d => {
+    const k = JSON.stringify(d.titles), n = before.get(k) || 0;
+    if (n) before.set(k, n - 1);
+    return { file, titles: d.titles, isNew: !n };
+  });
+}
+
+// The mustFail parts that hold a new test's title and an older test's title at once (2026-11-14: "[C1]" held
+// the task's new test and an older "[C1]" test of an earlier ticket in the same file; every test whose title
+// holds a part must fail, so the proof read NOT PROVED after a full run of every copy). Matched as survivors()
+// matches: the part, in lower case, inside a declared title. A part with only older titles may name an
+// existing test of the rule. A part that is a matched test's whole title is left alone: no narrower words
+// name that test, so refusing it would leave no way through.
+export function ambiguousParts(breaks, tests) {
+  const shown = (d) => d.titles[d.titles.length - 1];
+  const found = [];
+  for (const b of breaks) {
+    if (!b || b.single || !Array.isArray(b.mustFail)) continue;
+    for (const part of b.mustFail) {
+      const p = String(part).toLowerCase();
+      const hits = tests.filter(d => d.titles.some(t => String(t).toLowerCase().includes(p)));
+      if (hits.some(d => d.titles.some(t => String(t).toLowerCase() === p))) continue;
+      const fresh = hits.filter(d => d.isNew), older = hits.filter(d => !d.isNew);
+      if (fresh.length && older.length) found.push({ name: String(b.name), part: String(part), fresh: fresh.map(shown), older: older.map(shown) });
+    }
+  }
+  return found;
 }
 
 // A break's text in a file whose line endings may differ from the break's (2026-11-12, S6: a copy that
@@ -390,7 +433,7 @@ export function compileCheckCommand(command) {
 // This run's lines and outputs, for --log. Kept outside main() so a thrown error's line reaches the log too.
 const state = { said: [], logs: [], logPath: null, head: '', remoteLog: null };
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   main().catch((e) => { const line = 'RED-PROOF: failed — ' + e.message; state.said.push(line); process.stdout.write(line + '\n'); process.exit(2); });
 }
 
@@ -585,6 +628,25 @@ async function main() {
   const fileHashes = testFiles ? testFileHashes(repo, testFiles) : null;
   let targetHashes = {};
   try { targetHashes = plan ? {} : testFileHashes(repo, [...new Set(breaks.filter(b => !b.single).map(b => b.file))]); } catch { /* checked above */ }
+  // A mustFail part that holds a new test and an older one stops here, before the test machine, the compile
+  // check or any copy (2026-11-14, see ambiguousParts). New means new since the merge base with --base. Read
+  // only on the machine that asks: the test machine's base is the synced commit, where no test is new. Any
+  // git or read error skips the check (the proof then reads as before), so it never refuses by mistake.
+  if (!plan && testFiles?.length && breaks.some(b => !b.single)) {
+    let tests = [];
+    try {
+      const from = git('merge-base', base, 'HEAD').toString('utf8').trim();
+      const had = new Set(git('--literal-pathspecs', 'ls-tree', '-r', '--full-tree', '--name-only', '-z', from, '--', ...testFiles).toString('utf8').split('\0').filter(Boolean));
+      tests = testFiles.flatMap(f => markNewTests(textAt(f), had.has(f) ? git('show', `${from}:${f}`).toString('utf8') : null, f));
+    } catch { tests = []; }
+    const unclear = ambiguousParts(breaks, tests);
+    if (unclear.length) {
+      const list = (titles) => titles.slice(0, 4).map(t => `"${t}"`).join(', ') + (titles.length > 4 ? ` (+${titles.length - 4} more)` : '');
+      for (const u of unclear) say(`  BREAK AMBIGUOUS ✗ ${u.name}: mustFail part "${u.part}" holds new test(s) ${list(u.fresh)} and older test(s) ${list(u.older)}`);
+      say('RED-PROOF: NOT PROVED ✗ — every test whose title holds a mustFail part must fail, so each older test above would have to fail under that break too; name each test by words of its own title (a part may still name an older test alone). Nothing ran; files untouched.');
+      process.exit(2);
+    }
+  }
   // Fix files that only add names the tests use stay at the fixed version for the old-code run (addedNames).
   const keptAtFix = [];
   if (oldRef && !plan && testFiles?.length) {

@@ -459,6 +459,29 @@ function remoteCheckout(seg) {
   return refs.length === 1 && REMOTE_REF.test(refs[0]);
 }
 
+// A switch, pull, merge, reset or checkout run as plain git (at most one `-C <dir>` before it) may only
+// bring in upstream code. The stop gate decides it later from the folder: clean, with HEAD's tree equal to
+// a remote branch tip's tree (2026-11-14: `git switch -q main && git pull -q` in a clean clone asked for a
+// build). git -c, --git-dir, --work-tree or a GIT_* variable can move the change elsewhere: no sync then.
+// Returns { dir } (the -C folder, or '') or null.
+const SYNC_SUBCOMMANDS = new Set(['switch', 'pull', 'merge', 'reset', 'checkout']);
+function gitSync(seg) {
+  const words = tokenize(String(seg).trim());
+  if (!/^git(?:\.exe)?$/i.test(String(words[0] || '').split(/[\\/]/).pop())) return null;
+  let i = 1, dir = '';
+  if (words[i] === '-C') { dir = String(words[i + 1] || ''); i += 2; if (!dir) return null; }
+  return SYNC_SUBCOMMANDS.has(String(words[i] || '')) ? { dir } : null;
+}
+// The folder a relative name lands in, from a known absolute folder; '' when it cannot be known
+// (no base, ~, a variable, `cd -` or an option). Git Bash on Windows spells C:/ as /c/ (2026-11-14).
+function joinFolder(p, base, gitBash) {
+  let s = stripQuotes(p);
+  if (gitBash) s = s.replace(/^\/([A-Za-z])(?=\/|$)/, '$1:');
+  if (/^(?:[A-Za-z]:[\\/]|[\\/])/.test(s)) return s;
+  if (!base || !s || /^[~$%<-]/.test(s)) return '';
+  return String(base).replace(/[\\/]+$/, '') + '/' + s;
+}
+
 // base: the folder the segment runs in, for relative names (see inFolder).
 function segmentEditPaths(seg, base) {
   const out = [];
@@ -1148,7 +1171,7 @@ function openNotesMessage(open) {
 // later call continues where the last one stopped (2026-11-12, audit H17).
 function newScanState() {
   return {
-    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1,
+    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastNonSyncEdit: -1, syncMoves: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1,
       // Reviewer notes: { n, kind, text, outcome: null | 'fixed' | 'user', problem? }; the open ones are set by
       // finishScan. turnClaim: an assistant text since the user's last message has a REVIEW/GATE: PASS line or a
       // handed-over push (the stop gate's answer when the host does not send the last message).
@@ -1175,6 +1198,7 @@ function newScanState() {
     passes: [],      // passing verifications: { seq, command }
     stopCalls: new Map(),      // TaskStop tool_use id -> background task id
     remoteCheckouts: [],       // moves to a fetched remote ref: { seq, repo }
+    syncMoves: [],             // those moves and the git syncs (see gitSync): { seq, repo, remote } (2026-11-14)
     helperEdits: [],           // helper agents' edits not yet placed in time: { t, file, pos, edit }
     helperPending: new Map(),  // '<helper file>\n<tool_use id>' -> a helper's edit awaiting its result
     noteSeqs: [],              // the seq of the report each reviewer note came in (same order as res.reviewNotes)
@@ -1183,7 +1207,7 @@ function newScanState() {
   };
 }
 const STATE_MAPS = ['pending', 'background', 'verificationStates', 'providerStates', 'reviewerCalls', 'reviewerAgents', 'reviewerAt', 'helperCalls', 'helpersRunning', 'stopCalls', 'helperPending'];
-const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'helperEdits', 'noteSeqs', 'reportKeys', 'userWords'];
+const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'syncMoves', 'helperEdits', 'noteSeqs', 'reportKeys', 'userWords'];
 function saveState(st) {
   const o = { ...st, finishedUncollected: [...st.finishedUncollected] };
   for (const k of STATE_MAPS) o[k] = [...st[k]];
@@ -1210,7 +1234,7 @@ function restoreState(o) {
 function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
   if (EDIT_TOOLS.has(blk.name)) {
     const p = String(blk.input.file_path || blk.input.notebook_path || '');
-    if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; rec.nonRemoteEditSeq = seq; }
+    if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; rec.nonRemoteEditSeq = seq; rec.nonSyncEditSeq = seq; }
     return;
   }
   const segs = splitSegments(String(blk.input.command || ''));
@@ -1231,10 +1255,17 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
   // The folder a git change lands in: its `-C <dir>`, else the last `cd <dir>`
   // before it in the same command, else the tool's own working directory.
   let cdDir = String(blk.input.cwd || blk.input.workdir || entry.cwd || '');
+  // For the remote-tip check (2026-11-14): the same folder with a relative `cd` joined to the one before,
+  // since the stop gate's git runs in the hook's folder, not the shell's; '' once it cannot be followed
+  // (popd, `cd` alone). A GIT_* variable set in the command can point git elsewhere: no sync in it then.
+  const gitBash = blk.name === 'Bash' && !!proc && proc.platform === 'win32';
+  let syncDir = joinFolder(cdDir, '', gitBash);
+  const gitEnv = segs.some((s) => /(?:^|[\s;&|(])(?:export\s+|set\s+|\$env:)?GIT_[A-Za-z_]+\s*=/i.test(String(s)));
   for (let i = 0; i < segs.length; i++) {
     const frac = seq + (i + 1) / 1000;
     const cd = /^\s*(?:cd|Set-Location|pushd)\s+(?:\/d\s+)?("[^"]+"|'[^']+'|[^\s;&|]+)\s*$/i.exec(String(expanded[i]));
-    if (cd) cdDir = stripQuotes(cd[1]);
+    if (cd) { cdDir = stripQuotes(cd[1]); syncDir = joinFolder(cd[1], syncDir, gitBash); }
+    else if (/^\s*\(?\s*(?:cd|chdir|sl|Set-Location|pushd|popd|Push-Location|Pop-Location)(?:\s|$)/i.test(String(expanded[i]))) syncDir = '';
     if (segmentIsVerify(segs[i])) rec.verifySeq = frac;
     if (!editsOnly && segs.length === 1 && segmentIsProvider(segs[i])) rec.providerSeq = frac;
     if (!editsOnly && segs.length === 1 && /^git(?:\.exe)?\s+range-diff\s/i.test(String(segs[i]).trim())) rec.rangeDiffSeq = frac;
@@ -1249,6 +1280,12 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
         if (GIT_CHANGE.test(paths[0])) rec.gitRepo = repo;
         if (paths.includes('<git-remote>')) rec.remotes.push({ seq: frac, repo });
       }
+      // A git sync (or fetched-ref move) the stop gate may judge by its folder's state (2026-11-14); every
+      // other path of the segment is a change of its own. The marker stays '<git>', so the push guard is unchanged.
+      const sync = !gitEnv && paths.some((p) => GIT_CHANGE.test(p)) ? gitSync(expanded[i]) : null;
+      const synced = (p) => !!sync && GIT_CHANGE.test(p);
+      if (paths.some((p) => !synced(p))) rec.nonSyncEditSeq = frac;
+      if (sync) rec.syncs.push({ seq: frac, repo: sync.dir ? joinFolder(sync.dir, syncDir, gitBash) : syncDir, remote: paths.includes('<git-remote>') });
     }
   }
   // A check whose exit code a later part of the command hides is judged by its output alone (H4).
@@ -1257,7 +1294,7 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
     if (hidden) rec.hidden = hidden;
   }
 }
-const emptyRecord = (background) => ({ editSeq: -1, editPath: '', nonGitEditSeq: -1, nonRemoteEditSeq: -1, remotes: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background });
+const emptyRecord = (background) => ({ editSeq: -1, editPath: '', nonGitEditSeq: -1, nonRemoteEditSeq: -1, remotes: [], nonSyncEditSeq: -1, syncs: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background });
 
 function reviewDone(st, launchAt, doneAt) {
   if (launchAt && doneAt && !st.reviews.some((r) => r.launchAt === launchAt)) st.reviews.push({ launchAt, doneAt });
@@ -1463,6 +1500,11 @@ function creditEdit(st, rec) {
   // The last change that was not a move to a fetched remote ref, and those moves themselves.
   if ((rec.nonRemoteEditSeq ?? -1) > res.lastNonRemoteEdit) res.lastNonRemoteEdit = rec.nonRemoteEditSeq;
   for (const c of rec.remotes || []) st.remoteCheckouts.push(c);
+  // The last change that was not a git sync, and the syncs (2026-11-14). A record without the field counts whole.
+  // Syncs before a later change are never judged again: dropped, so the cached state stays small.
+  const nonSync = rec.nonSyncEditSeq ?? rec.editSeq;
+  if (nonSync > res.lastNonSyncEdit) { res.lastNonSyncEdit = nonSync; st.syncMoves = st.syncMoves.filter((c) => c.seq > nonSync); }
+  for (const c of rec.syncs || []) st.syncMoves.push(c);
 }
 
 // Credit a collected result: a tool_result, or a background task's completion.
@@ -1551,7 +1593,8 @@ function feedHelperLine(st, file, l, pos) {
       fillToolRecord(rec, blk, entry, 0, true);
       if (rec.editSeq !== -1) {
         st.helperPending.set(file + '\n' + blk.id, { editPath: rec.editPath, nonGit: rec.nonGitEditSeq !== -1, nonRemote: rec.nonRemoteEditSeq !== -1,
-          gitRepo: rec.gitRepo, remotes: rec.remotes.map((r) => r.repo), verifies: rec.verifySeq !== -1, at: String(entry.timestamp || '') });
+          gitRepo: rec.gitRepo, remotes: rec.remotes.map((r) => r.repo), verifies: rec.verifySeq !== -1, at: String(entry.timestamp || ''),
+          nonSync: rec.nonSyncEditSeq !== -1, syncs: rec.syncs.map((c) => ({ repo: c.repo, remote: c.remote })) });
       }
     } else if (blk.type === 'tool_result' && blk.tool_use_id && st.helperPending.has(file + '\n' + blk.tool_use_id)) {
       const key = file + '\n' + blk.tool_use_id;
@@ -1582,7 +1625,9 @@ function placeHelperEdits(st, timestamp) {
 function creditHelperEdit(st, { edit }) {
   const s = ++st.seq;
   creditEdit(st, { editSeq: s, editPath: edit.editPath, nonGitEditSeq: edit.nonGit ? s : -1, nonRemoteEditSeq: edit.nonRemote ? s : -1,
-    remotes: edit.remotes.map((repo) => ({ seq: s, repo })), gitRepo: edit.gitRepo });
+    remotes: edit.remotes.map((repo) => ({ seq: s, repo })), gitRepo: edit.gitRepo,
+    // An edit kept without these fields (2026-11-14) is a change of its own, never a sync.
+    nonSyncEditSeq: edit.nonSync === false ? -1 : s, syncs: Array.isArray(edit.syncs) ? edit.syncs.map((c) => ({ seq: s, repo: c.repo, remote: c.remote })) : [] });
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,6 +1820,8 @@ function finishScan(st) {
   }
   // Moves to a fetched remote ref after every other change: the gates check their folders are clean.
   res.remoteCheckouts = remoteCheckouts.filter((c) => c.seq > res.lastNonRemoteEdit);
+  // Git syncs after every other change: the stop gate checks each folder is clean at a remote tip (2026-11-14).
+  res.syncMoves = st.syncMoves.filter((c) => c.seq > res.lastNonSyncEdit);
   // At a stop, only a background command still known to be running holds it (see below); a launch
   // that was never matched to its finish does not (2026-11-06).
   res.lastPendingVerifyStop = -1;

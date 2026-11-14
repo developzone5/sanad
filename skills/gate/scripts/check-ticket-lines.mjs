@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { isMain } from './is-main.mjs';
 
 export const TEST_FILE = /(?:[._](?:test|spec)\.[cm]?[jt]sx?$|Tests?\.cs$|(?:^|\/)[\w-]*\.Tests?\/.+\.cs$|(?:^|\/)tests?\/.+\.(?:[cm]?[jt]sx?|cs|py|go)$|_test\.(?:go|py)$|(?:^|\/)test_[^/]*\.py$)/i;
 export const TEST_DECL = /(?:^|[^\w.])(?:it|test|describe)(?:\.\w+)*\s*\(|\[(?:Fact|Theory)\b|\bdef test_|\bfunc Test|@Test\b/;
@@ -156,7 +156,7 @@ function args(argv) {
   return o;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMain(import.meta.url)) {
   try {
     const o = args(process.argv.slice(2));
     const lines = readLines(fs.readFileSync(o.lines, 'utf8'));

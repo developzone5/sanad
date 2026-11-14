@@ -6,7 +6,8 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runCommand, assertHttp, withCleanup, evidenceLog, redact } from '../scripts/evidence.mjs';
+import { createRequire } from 'node:module';
+import { runCommand, assertHttp, withCleanup, evidenceLog, redact, rerunSuggestion } from '../scripts/evidence.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-evidence-tests-'));
 // Runs bound to a repository take a lock (see checkLockDir); keep them out of the real one.
@@ -164,6 +165,144 @@ test('CLI: a failed check prints its totals and failing tests above the receipt 
   assert.ok(!lines.some(l => /ok 3\d\d/.test(l)), 'the 400 passing lines are not repeated');
   assert.match(lines[lines.length - 1], /^CHECK_COMPLETED \{/, 'the receipt stays the last line');
   // A passed check prints no summary: run-summary.test.mjs (summaryLines of a passed receipt is empty).
+});
+
+// 2026-11-14: the only failure of a 1759-test Vitest suite was "Test timed out in 5000ms." in
+// src/utils/exam-results-export.test.ts, a slow test the task never touched; writing the rerun spec and the
+// CHECK RETIRED line by hand cost minutes. The task's repository: a base on origin/staging, one own change.
+const SLOW = 'src/utils/exam-results-export.test.ts';
+const TIMEOUT = 'Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".';
+const vitestOut = failed => {
+  const files = new Set(failed.map(f => f.file)).size;
+  return [' ❯ ' + failed[0].file + ' (12 tests | 1 failed) 5123ms', ` Test Files  ${files} failed | ${112 - files} passed (112)`,
+    `      Tests  ${failed.length} failed | ${1759 - failed.length} passed (1759)`, '   Duration  412.80s'].join('\n') + '\n';
+};
+const vitestErr = failed => ['', `⎯⎯⎯⎯⎯⎯⎯ Failed Tests ${failed.length} ⎯⎯⎯⎯⎯⎯⎯`, '',
+  ...failed.flatMap((f, i) => [` FAIL  ${f.file} > exportExamResults > ${f.name || 'builds the sheet'}`, f.error || TIMEOUT, ' ❯ ' + f.file + ':41:3', '', `⎯⎯⎯[${i + 1}/${failed.length}]⎯`, ''])].join('\n');
+function taskRepo() {
+  const { repo, git } = sourceFixture();
+  const web = path.join(repo, 'web');
+  for (const [file, text] of [[SLOW, 'it("builds the sheet")\n'], ['src/utils/exam-results-export.ts', 'export {};\n'], ['src/feature.ts', 'export const on = false;\n'], ['src/pages/Exam.test.tsx', 'it("x")\n']]) {
+    fs.mkdirSync(path.dirname(path.join(web, file)), { recursive: true }); fs.writeFileSync(path.join(web, file), text);
+  }
+  fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules/\n');
+  git('add', '-A'); git('commit', '-qm', 'base');
+  git('update-ref', 'refs/remotes/origin/staging', 'HEAD');
+  fs.writeFileSync(path.join(web, 'src', 'feature.ts'), 'export const on = true;\n');   // the task's own change
+  return { repo, web, git };
+}
+function failedReceipt(repo, stdout, stderr) {
+  const dir = fs.mkdtempSync(path.join(root, 'logs-'));
+  fs.writeFileSync(path.join(dir, 'stdout.log'), stdout); fs.writeFileSync(path.join(dir, 'stderr.log'), stderr);
+  return { status: 'failed', nativeExitCode: 1, signal: null, reason: null, stdout: path.join(dir, 'stdout.log'), stderr: path.join(dir, 'stderr.log'), source: { toplevel: fs.realpathSync.native(repo) } };
+}
+const SCRIPT = 'C:/u/.claude/skills/gate/scripts/evidence.mjs';
+const vitestSpec = web => ({ executable: process.execPath, args: ['node_modules/vitest/vitest.mjs', 'run'], cwd: web, outputRoot: root });
+
+test('CLI: a suite that failed only by a timeout in a test file the task does not touch gets a rerun spec and a CHECK RETIRED line the stop hook accepts', () => {
+  const { web } = taskRepo();
+  // A stand-in for vitest: the full run fails by the timeout; it passes only when asked for that file with the longer timeout.
+  fs.mkdirSync(path.join(web, 'node_modules', 'vitest'), { recursive: true });
+  fs.writeFileSync(path.join(web, 'node_modules', 'vitest', 'vitest.mjs'), `const a = process.argv.slice(2);
+if (a.join(' ') === 'run ${SLOW} --testTimeout=60000') console.log(' Test Files  1 passed (1)\\n      Tests  12 passed (12)');
+else { process.stdout.write(${JSON.stringify(vitestOut([{ file: SLOW }]))}); process.stderr.write(${JSON.stringify(vitestErr([{ file: SLOW }]))}); process.exitCode = 1; }\n`);
+  // The hook credits only the helper under a .claude folder; the spec folder has a space in its name.
+  const scripts = path.join(root, 'home', '.claude', 'skills', 'gate', 'scripts');
+  fs.mkdirSync(scripts, { recursive: true });
+  for (const name of ['evidence.mjs', 'run-summary.mjs', 'is-main.mjs']) fs.copyFileSync(fileURLToPath(new URL('../scripts/' + name, import.meta.url)), path.join(scripts, name));
+  const script = path.join(scripts, 'evidence.mjs').replace(/\\/g, '/');
+  fs.mkdirSync(path.join(root, 'check specs'), { recursive: true });
+  const specArg = path.join(root, 'check specs').replace(/\\/g, '/') + '/frontend-full.json';
+  const rerunArg = specArg.replace('frontend-full.json', 'frontend-full-rerun-timeouts.json');
+  fs.writeFileSync(specArg, JSON.stringify(vitestSpec(web)));
+  const cli = spec => spawnSync(process.execPath, [script, '--spec', spec], { encoding: 'utf8', windowsHide: true });
+  const red = cli(specArg);
+  assert.equal(red.status, 1, 'the native exit stays: ' + red.stderr);
+  const lines = red.stdout.trim().split(/\r?\n/);
+  assert.equal(JSON.parse(lines.pop().replace(/^CHECK_COMPLETED /, '')).status, 'failed', 'the receipt stays the last line');
+  assert.equal(lines.at(-2), 'CHECK_RERUN: only timeouts, in test files this change does not touch: ' + SLOW);
+  const typed = spec => `node ${script} --spec "${spec}"`;
+  const retire = JSON.parse(/^CHECK RETIRED: (\{.*\})$/.exec(lines.at(-1))[1]);
+  assert.deepEqual([retire.failed, retire.replacement], [typed(specArg), typed(rerunArg)]);
+  assert.match(retire.reason, /timeout.*exam-results-export\.test\.ts/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(rerunArg, 'utf8')), { ...vitestSpec(web), args: ['node_modules/vitest/vitest.mjs', 'run', SLOW, '--testTimeout=60000'] });
+  const green = cli(rerunArg);
+  assert.equal(green.status, 0, green.stdout + green.stderr);
+  // The stop hook's own scanner: the printed line, sent as written, retires the failure once the rerun passes.
+  const scan = createRequire(import.meta.url)('../../../hooks/lib/transcript-scan.js');
+  const message = (role, content) => ({ type: role, message: { role, content } });
+  const run = (id, command, out, isError) => [message('assistant', [{ type: 'tool_use', name: 'Bash', id, input: { command } }]),
+    message('user', [{ type: 'tool_result', tool_use_id: id, content: out, is_error: isError }])];
+  let n = 0;
+  const scanOf = entries => { const file = path.join(root, `transcript-${++n}.jsonl`); fs.writeFileSync(file, entries.map(e => JSON.stringify(e)).join('\n') + '\n'); return scan.scanTranscript(file); };
+  const state = process.env.SANAD_STATE_DIR;
+  delete process.env.SANAD_STATE_DIR;   // a test transcript writes no hook state
+  try {
+    const redRun = run('red', typed(specArg), red.stdout, true), greenRun = run('green', typed(rerunArg), green.stdout, false);
+    assert.ok(scanOf([...redRun, ...greenRun]).lastFailedVerifyStop >= 0, 'the line in the tool output alone retires nothing');
+    assert.equal(scanOf([...redRun, message('assistant', [{ type: 'text', text: lines.at(-1) }]), ...greenRun]).lastFailedVerifyStop, -1);
+  } finally { if (state !== undefined) process.env.SANAD_STATE_DIR = state; }
+});
+
+test('no rerun suggestion for a timeout in a test file the task changed, next to a source file it changed, or without a base', async () => {
+  const { repo, web, git } = taskRepo();
+  const ask = (specArg = 'C:/checks/frontend-full.json') => rerunSuggestion({ receipt: failedReceipt(repo, vitestOut([{ file: SLOW }]), vitestErr([{ file: SLOW }])), spec: vitestSpec(web), specArg, script: SCRIPT });
+  const offered = await ask();
+  assert.deepEqual(offered.lines, ['CHECK_RERUN: only timeouts, in test files this change does not touch: ' + SLOW,
+    'CHECK RETIRED: ' + JSON.stringify({ failed: `node ${SCRIPT} --spec C:/checks/frontend-full.json`, replacement: `node ${SCRIPT} --spec C:/checks/frontend-full-rerun-timeouts.json`, reason: JSON.parse(offered.lines[1].slice(15)).reason })]);
+  assert.equal(path.basename(offered.file), 'frontend-full-rerun-timeouts.json');
+  assert.equal(await ask('C:/checks/frontend-full-rerun-timeouts.json'), null, 'a rerun that timed out again is no load noise');
+  fs.appendFileSync(path.join(web, SLOW), '// changed\n');
+  assert.equal(await ask(), null, 'the failing test file is changed in the working tree');
+  git('add', '-A'); git('commit', '-qm', 'the task changes the slow test');
+  assert.equal(await ask(), null, 'the failing test file is changed in a commit after the base');
+  git('reset', '-q', '--hard', 'origin/staging');
+  assert.ok(await ask(), 'back to the base: offered again');
+  fs.appendFileSync(path.join(web, 'src', 'utils', 'exam-results-export.ts'), '// slower now\n');
+  assert.equal(await ask(), null, 'the source file the test is named after is changed');
+  git('checkout', '--', 'web/src/utils/exam-results-export.ts');
+  git('config', 'sanad.integration', 'develop');
+  assert.equal(await ask(), null, 'no origin/develop: no base, no suggestion');
+  git('update-ref', 'refs/remotes/origin/develop', 'HEAD');
+  assert.ok(await ask(), 'the integration branch comes from git config sanad.integration');
+});
+
+test('no rerun suggestion when a timeout comes with an assertion, or the check failed for another reason', async () => {
+  const { repo, web } = taskRepo();
+  const both = [{ file: SLOW }, { file: 'src/pages/Exam.test.tsx', name: 'names no old section', error: "AssertionError: expected 'Part 1' to be null" }];
+  const ask = (receipt) => rerunSuggestion({ receipt, spec: vitestSpec(web), specArg: 'C:/checks/frontend-full.json', script: SCRIPT });
+  assert.equal(await ask(failedReceipt(repo, vitestOut(both), vitestErr(both))), null);
+  const alone = failedReceipt(repo, vitestOut([{ file: SLOW }]), vitestErr([{ file: SLOW }]));
+  assert.ok(await ask(alone), 'the timeout alone is offered');
+  for (const change of [{ reason: 'Timed out' }, { reason: 'Verified source changed while the command was running.' }, { status: 'passed', nativeExitCode: 0 }, { nativeExitCode: null }, { source: null }]) {
+    assert.equal(await ask({ ...alone, ...change }), null, JSON.stringify(change));
+  }
+  // The CLI refuses a spec over 64 KB: a rerun spec it would refuse is no offer (2026-11-14).
+  const big = await rerunSuggestion({ receipt: alone, spec: { ...vitestSpec(web), secrets: ['x'.repeat(64000)] }, specArg: 'C:/checks/frontend-full.json', script: SCRIPT });
+  assert.equal(big, null, 'a rerun spec over 64 KB');
+  // A run told to stop at the first failure never ran the rest: no rerun of one file can stand for it.
+  for (const bail of ['--bail', '--bail=1', '-b']) {
+    const stopped = await rerunSuggestion({ receipt: alone, spec: { ...vitestSpec(web), args: [...vitestSpec(web).args, bail] }, specArg: 'C:/checks/frontend-full.json', script: SCRIPT });
+    assert.equal(stopped, null, bail);
+  }
+});
+
+test('ssh form: the files and the longer timeout go at the end of the remote command; a pipe or another runner gives nothing', async () => {
+  const { repo, web } = taskRepo();
+  const receipt = failedReceipt(repo, vitestOut([{ file: SLOW }]), vitestErr([{ file: SLOW }]));
+  const remote = 'cd /d C:\\repos\\app\\web && C:\\tools\\node20\\node.exe node_modules\\vitest\\vitest.mjs run';
+  const ask = line => rerunSuggestion({ receipt, spec: { executable: 'C:/Windows/System32/OpenSSH/ssh.exe', args: ['-o', 'BatchMode=yes', 'pc2', line], cwd: web, outputRoot: root, timeoutMs: 1500000 },
+    specArg: 'C:/checks/frontend-full-remote.json', script: SCRIPT });
+  const offered = await ask(remote);
+  assert.deepEqual(offered.spec, { executable: 'C:/Windows/System32/OpenSSH/ssh.exe', args: ['-o', 'BatchMode=yes', 'pc2', `${remote} ${SLOW} --testTimeout=60000`], cwd: web, outputRoot: root, timeoutMs: 1500000 });
+  assert.equal(JSON.parse(offered.lines[1].slice(15)).replacement, `node ${SCRIPT} --spec C:/checks/frontend-full-remote-rerun-timeouts.json`);
+  assert.equal((await ask(remote + ' 2>&1')).spec.args.at(-1), `${remote} ${SLOW} --testTimeout=60000 2>&1`, 'before a trailing stream merge');
+  assert.equal((await ask('cd /d C:\\repos\\app\\web && npm test')).spec.args.at(-1), `cd /d C:\\repos\\app\\web && npm test -- ${SLOW} --testTimeout=60000`, 'npm passes them on after --');
+  assert.equal(await ask(remote + ' | findstr FAIL'), null, 'the words would go to the pipe');
+  assert.equal(await ask(remote + ' > out.log'), null, 'a redirection');
+  assert.equal(await ask(remote + ' --testTimeout=5000'), null, 'a timeout of its own');
+  assert.equal(await ask('cd /d C:\\repos\\app\\web && dotnet test'), null, 'not Vitest or Jest');
+  assert.equal(await ask('pc2'), null, 'no remote command');
 });
 test('HTTP asserts expected rejection, code and persisted state and rejects false smoke success', async () => {
   let stored = 'hidden';

@@ -4,7 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { isMain } from './is-main.mjs';
 
 // Credential key names are matched as whole words after splitting camelCase,
 // PascalCase, snake_case and kebab-case (accessToken, ClientSecret, x-api-key
@@ -278,16 +278,156 @@ export async function withCleanup(action, cleanup) {
   return value;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// 2026-11-14: the only failure of a 1759-test Vitest suite was "Test timed out in 5000ms." in a slow test file
+// the task never touched; writing its rerun spec and the CHECK RETIRED line by hand cost minutes. When the
+// check failed, every failing test failed by its test timeout (run-summary.mjs timeoutFailures), and no
+// failing test file nor the source file it is named after is changed by this task, the CLI writes
+// `<spec>-rerun-timeouts.json` (only those files, a 60 s test timeout) and prints the ready CHECK RETIRED
+// line. Anything unsure offers nothing: a missed offer costs a hand-written rerun, a wrong one hides a failure.
+const RERUN_SUFFIX = '-rerun-timeouts';
+const RERUN_TIMEOUT = '--testTimeout=60000';
+// Words that change which tests run, stop the run at a failure, let an empty run pass, or set a timeout
+// already: offer nothing.
+const RERUN_UNSAFE = /^(?:--(?:passWithNoTests|changed|related|findRelatedTests|onlyChanged|changedSince|lastCommit|listTests|shard|testTimeout|bail)\b.*|-o|-b|related|bench|list)$/;
+
+// This task's files: those that differ between the merge base of HEAD with origin/<git config
+// sanad.integration, default staging> and the working tree, untracked ones included; and every tracked
+// file. null when git or that base is missing.
+function taskFiles(toplevel) {
+  try {
+    const base = sourceGit(toplevel, ['merge-base', 'HEAD', 'origin/' + (configValue(toplevel, 'sanad.integration') || 'staging')]);
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(base)) return null;
+    const list = args => sourceGit(toplevel, args).split('\0').filter(Boolean);
+    return { changed: [...list(['diff', '--name-only', '--no-renames', '-z', base, '--']), ...list(['ls-files', '--others', '--exclude-standard', '-z'])],
+      tracked: list(['ls-files', '-z']) };
+  } catch { return null; }
+}
+// A runner names files from its own root (a sub-folder of the repository): the same file when one name ends the other.
+const lowerPath = p => String(p).replace(/\\/g, '/').toLowerCase();
+function sameFile(a, b) { a = lowerPath(a); b = lowerPath(b); return a === b || a.endsWith('/' + b) || b.endsWith('/' + a); }
+// Touched: the test file changed, or the file it is named after (a.test.ts → a.ts, a.tsx): code made slower
+// by this task would otherwise pass under the longer timeout.
+function touched(file, changed) {
+  const own = file.replace(/\.(?:test|spec)\.[^./]+$/i, '');
+  return changed.some(c => sameFile(c, file) || (own !== file && sameFile(c.replace(/\.[^./]+$/, ''), own)));
+}
+
+const executableWord = w => String(w || '').split(/[\\/]/).pop().replace(/\.(?:exe|cmd|bat)$/i, '').toLowerCase();
+// How a check's last command takes more words: a direct Vitest/Jest run as they are, an npm script after `--`.
+// null for any other command, or when the command names another runner than the one whose output was read.
+function runnerTail(words, runner) {
+  const direct = found => (found === runner ? { dashDash: false } : null);
+  const npm = rest => (/^(?:test|t|tst)$/.test(rest[0] || '') || (/^(?:run|run-script)$/.test(rest[0] || '') && /^[^-]/.test(rest[1] || ''))
+    ? { dashDash: !rest.includes('--') } : null);
+  const program = executableWord(words[0]);
+  if (program === 'node') {
+    const script = String(words[1] || '').replace(/\\/g, '/');
+    if (/(?:^|\/)node_modules\/vitest\/vitest\.mjs$/i.test(script)) return direct('vitest');
+    if (/(?:^|\/)node_modules\/(?:jest|jest-cli)\/bin\/jest(?:\.js)?$/i.test(script)) return direct('jest');
+    if (/(?:^|\/)node_modules\/npm\/bin\/npm-cli\.js$/i.test(script)) return npm(words.slice(2));
+    return null;
+  }
+  if (program === 'vitest' || program === 'jest') return direct(program);
+  if (program === 'npx') return direct(executableWord(words.slice(1).find(w => !w.startsWith('-'))));
+  if (program === 'npm') return npm(words.slice(1));
+  return null;
+}
+// The last command of an ssh spec's remote line (`cd /d X && node …vitest.mjs run`): its words, and where added
+// words go (before a trailing `2>&1`). null after a pipe, or with a redirection, a group or a variable in it:
+// added words might reach another program there.
+function lastCommand(line) {
+  let start = 0, quoted = false, piped = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { quoted = !quoted; continue; }
+    if (quoted || !(ch === ';' || ch === '\n' || ch === '|' || (ch === '&' && line[i - 1] !== '>' && line[i - 1] !== '<'))) continue;
+    const pair = (ch === '&' || ch === '|') && line[i + 1] === ch;
+    piped = ch === '|' && !pair;
+    start = i + (pair ? 2 : 1);
+    if (pair) i++;
+  }
+  if (quoted || piped) return null;
+  const end = start + /(?:\s+\d?>&\d)*\s*$/.exec(line.slice(start)).index;
+  const command = line.slice(start, end);
+  if (/[<>()`$%^!]/.test(command)) return null;
+  return { words: (command.match(/"[^"]*"|\S+/g) || []).map(w => w.replace(/"/g, '')), end };
+}
+// A file name added to a remote shell line: quoted when it holds more than plain path signs.
+function shellWord(file) {
+  if (/["%$`!^&|<>\r\n\\]/.test(file)) return null;
+  return /^[\w./@+-]+$/.test(file) ? file : '"' + file + '"';
+}
+// The spec's args with the failing files and the longer timeout added; for ssh, at the end of its remote line.
+function rerunArgs(executable, args, files, runner) {
+  if (typeof executable !== 'string' || !Array.isArray(args) || args.some(a => typeof a !== 'string') || !files.length) return null;
+  // Jest reads each file as a pattern: a pattern sign in a name could match no file, and an empty run proves nothing.
+  if (runner === 'jest' && files.some(f => /[[\](){}+*?^$|]/.test(f))) return null;
+  if (executableWord(executable) === 'ssh') {
+    const line = args[args.length - 1] || '';
+    const last = lastCommand(line);
+    const tail = last && !last.words.some(w => RERUN_UNSAFE.test(w)) ? runnerTail(last.words, runner) : null;
+    const words = files.map(shellWord);
+    if (!tail || words.includes(null)) return null;
+    const added = [...(tail.dashDash ? ['--'] : []), ...words, RERUN_TIMEOUT].join(' ');
+    return [...args.slice(0, -1), line.slice(0, last.end).replace(/\s+$/, '') + ' ' + added + line.slice(last.end)];
+  }
+  if (args.some(a => RERUN_UNSAFE.test(a))) return null;
+  const tail = runnerTail([executable, ...args], runner);
+  return tail ? [...args, ...(tail.dashDash ? ['--'] : []), ...files, RERUN_TIMEOUT] : null;
+}
+
+// The rerun offer for a finished check: { file, spec, lines } (the CLI writes the spec and prints the lines), or
+// null. `specArg` is the spec path as given on the command line and `script` this helper's path: the stop hook
+// matches CHECK RETIRED's `failed` against the command as typed (quotes dropped), so it is built the same way.
+export async function rerunSuggestion({ receipt, spec, specArg, script }) {
+  try {
+    if (!receipt || receipt.status !== 'failed' || receipt.reason || receipt.signal || !Number.isInteger(receipt.nativeExitCode) || receipt.nativeExitCode === 0) return null;
+    if (!receipt.source || typeof receipt.source.toplevel !== 'string' || !spec || typeof specArg !== 'string' || typeof script !== 'string' || /["\r\n]/.test(specArg + script)) return null;
+    const cut = Math.max(specArg.lastIndexOf('/'), specArg.lastIndexOf('\\'));
+    const name = specArg.slice(cut + 1).replace(/\.json$/i, '');
+    if (!name || name.toLowerCase().endsWith(RERUN_SUFFIX)) return null;   // timed out again at 60 s: no load noise
+    const { timeoutFailures } = await import('./run-summary.mjs');
+    const read = file => { try { return fs.readFileSync(file, 'utf8'); } catch { return ''; } };
+    const failures = timeoutFailures(read(receipt.stdout) + '\n' + read(receipt.stderr));
+    if (!failures) return null;
+    // Each failing file must be a file of this repository (its name was read right) that this task does not touch.
+    const git = taskFiles(receipt.source.toplevel);
+    if (!git || failures.files.some(f => !git.tracked.some(t => sameFile(t, f)) || touched(f, git.changed))) return null;
+    const args = rerunArgs(spec.executable, spec.args || [], failures.files, failures.runner);
+    if (!args) return null;
+    const quote = p => (/\s/.test(p) ? `"${p}"` : p);
+    const command = file => `node ${quote(script)} --spec ${quote(file)}`;
+    const shown = failures.files.join(', ');
+    const lines = [`CHECK_RERUN: only timeouts, in test files this change does not touch: ${shown}`,
+      'CHECK RETIRED: ' + JSON.stringify({ failed: command(specArg), replacement: command(specArg.slice(0, cut + 1) + name + RERUN_SUFFIX + '.json'),
+        reason: `every failure is a test timeout, in test files this change does not touch (${shown}); the replacement reruns only them with ${RERUN_TIMEOUT}` })];
+    if (lines.some(l => redact(l) !== l)) return null;   // a masked word would make a wrong command
+    // The CLI refuses a spec over 64 KB (see below): such a rerun spec would only fail.
+    if (Buffer.byteLength(JSON.stringify({ ...spec, args }, null, 2) + '\n') > 64000) return null;
+    return { file: path.join(path.dirname(path.resolve(specArg)), name + RERUN_SUFFIX + '.json'), spec: { ...spec, args }, lines };
+  } catch { return null; }
+}
+
+if (isMain(import.meta.url)) {
   try {
     if (process.argv.length !== 4 || process.argv[2] !== '--spec') throw new Error('Use --spec ABSOLUTE_JSON_FILE.');
     const spec = path.resolve(process.argv[3]);
     if (fs.statSync(spec).size > 64000) throw new Error('Verification specification exceeds 64 KB.');
-    const result = await runCommand(JSON.parse(fs.readFileSync(spec, 'utf8')));
+    const input = JSON.parse(fs.readFileSync(spec, 'utf8'));
+    const result = await runCommand(input);
     // A failed check names its totals and failing tests here, read from its saved logs (run-summary.mjs,
     // 2026-11-13); the receipt line stays last and unchanged.
     const { summaryLines } = await import('./run-summary.mjs');
     for (const line of summaryLines(result)) process.stdout.write(redact(line) + '\n');
+    // Only test timeouts, in test files this task does not touch: a ready rerun spec and CHECK RETIRED line (2026-11-14).
+    // The lines print only once the spec is written; any error offers nothing and changes neither the receipt nor the exit.
+    try {
+      const offer = await rerunSuggestion({ receipt: result, spec: input, specArg: process.argv[3], script: path.resolve(process.argv[1]).replace(/\\/g, '/') });
+      if (offer) {
+        fs.writeFileSync(offer.file, JSON.stringify(offer.spec, null, 2) + '\n');
+        for (const line of offer.lines) process.stdout.write(line + '\n');
+      }
+    } catch { /* no offer */ }
     process.stdout.write('CHECK_COMPLETED ' + JSON.stringify(result) + '\n');
     process.exitCode = result.status === 'passed' ? 0 : result.nativeExitCode || 1;
   } catch (error) { process.stderr.write('CHECK_FAILED ' + redact(error.message) + '\n'); process.exitCode = 1; }
