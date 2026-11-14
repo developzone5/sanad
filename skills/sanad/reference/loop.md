@@ -39,8 +39,9 @@ The size changes the depth only. The six rules are the same in every size.
    The list has one place per function that uses a name, and one per file for texts and data. The search is exact: give both spellings of a field (`DueAt,dueAt`). A name used in more than 40 files is too wide: name the rule, not the word.
    Open every place it lists. Ask of each one: is this another way to reach the same rule (create, edit, publish, import, a background job), another role, another screen, an API field, an export or a report? A new name that turns up joins `--names`, and the command runs again; it keeps what is written.
 5. **Check lines.** `<notes>/check.md`: one line per result the change must prove. Each line starts with its source: `[T2]` (a ticket line), `[change]` (what the change itself touches, a place included) or `[rule: <project rule>]`. The lines are numbered C1, C2, ... in order. They are the task's `Done means`. Nothing else becomes a check line.
-6. **Close every place.** In `places.md` each place ends with `→ C<n>` (the check line that tests it) or `→ none: <why this place needs no change and no test>`. A place that holds two rules (two lines far apart in one function) gets a check line for each: `→ C2, C3`. One outcome for many places: `node <gate>/places.mjs --close <notes>/places.md --set "file:<path>=none: <reason>"` (or `P3,P7=C1`, `name:<name>=…`), never a hand-made script. It lists every place it closed: read the list, and give a place you did not open its own outcome.
-7. **Size line.** `▸ size: small | medium | big — <reason> · places: <n>`. Small adds `· 1 PR` and goes on. Medium and Big show the PR plan (one line per PR: order, tickets, content, rough size, base) and wait for the user's OK.
+6. **Second look (rule 1).** `node <gate>/siblings.mjs --brief --notes <notes> --repo <repo>`, then launch the `LAUNCH` line it prints: a second AI names every other place with the same rule or defect that the list misses. Save its answer as `<notes>/siblings-report.md`, then `node <gate>/siblings.mjs --record <notes>/siblings-report.md --notes <notes>`. Each `S<n>` line gets `→ P<n>` (add its name to the places search, then close that place too) or `→ none: <reason>`. A text-only change skips this.
+7. **Close every place.** In `places.md` each place ends with `→ C<n>` (the check line that tests it) or `→ none: <why this place needs no change and no test>`. A place that holds two rules (two lines far apart in one function) gets a check line for each: `→ C2, C3`. One outcome for many places: `node <gate>/places.mjs --close <notes>/places.md --set "file:<path>=none: <reason>"` (or `P3,P7=C1`, `name:<name>=…`), never a hand-made script. It lists every place it closed: read the list, and give a place you did not open its own outcome.
+8. **Size line.** `▸ size: small | medium | big — <reason> · places: <n>`. Small adds `· 1 PR` and goes on. Medium and Big show the PR plan (one line per PR: order, tickets, content, rough size, base) and wait for the user's OK.
 
 ## Step 1.5 — Check the facts
 
@@ -60,7 +61,7 @@ Open user decisions are asked together, once, each with a recommended answer.
 
 Load [engineering-bar.md](engineering-bar.md). DB writes, migrations, transactions, workers or exports → [backend-scaling.md](backend-scaling.md) first.
 
-1. **Tests.** One test per check line, tagged `[Cn]` in its title, with the ticket line it proves quoted in a comment above it. A test goes through the public entry point (the real request, the real form). A data write runs on the real database provider. A stricter rule on an old field gets two tests on an old row that breaks it: editing another field still saves; changing that field must meet the new rule.
+1. **Tests.** One test per check line, tagged `[Cn]` in its title, with the ticket line it proves quoted in a comment above it. A test goes through the public entry point (the real request, the real form). Its input is valid except for the rule under test, so that rule is the only reason for the result; a test of the first error also has a second error. A data write runs on the real database provider. A stricter rule on an old field gets two tests on an old row that breaks it: editing another field still saves; changing that field must meet the new rule.
 2. **Fix.** The narrowest change that makes the tests pass, in every place the list says. Format changed C# once (`dotnet csharpier format <files>`). Finish every edit before the proof: a later edit voids it.
 3. **Cheap checks first.** Commit, then `node <gate>/pre-review.mjs --before-proof` with the options of Step 3.5 item 1. Fix what it finds now: a label, quote or lint fix after the proof voids the proof.
 4. **Breaks.** `<notes>/breaks.json`, written with the Write tool: one break per rule, each naming in `mustFail` only the tests of that rule.
@@ -75,7 +76,7 @@ Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
 ## Step 3.5 — Review
 
 1. **Checks before review**, one command, all green:
-   `node <gate>/pre-review.mjs --was <size> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md`
+   `node <gate>/pre-review.mjs --was <size> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --siblings <notes>/siblings.md`
 2. **The brief**, always from the tool, never typed or copied:
    `node <gate>/review-brief.mjs --out <notes>/brief.md --ticket <ticket text file> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --proof-log <notes>/proof.log`
 3. **Launch** every line of `<notes>/launch.md` in one message. Small and Medium: one review, fresh eyes, which gets only the user's words, the ticket, the diff and the places list. Big: the risk files, the whole diff, fresh eyes and the other engine, together. Every prompt starts `You are the independent reviewer`. No source edit while they read.
