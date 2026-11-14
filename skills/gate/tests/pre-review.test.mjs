@@ -41,16 +41,78 @@ function placesFor(repo, names = 'a', { open = false } = {}) {
   if (!open) fs.writeFileSync(out, fs.readFileSync(out, 'utf8').replace(/→ $/gm, '→ none: unchanged on purpose in this fixture'));
   return out;
 }
+const siblingsScript = path.join(path.dirname(script), 'siblings.mjs');
+// The sibling check's record next to a places list (2026-11-14): one sibling with `outcome` ('' leaves it open).
+function siblingsFor(places, outcome = 'P1') {
+  const out = path.join(path.dirname(places), 'siblings.md');
+  fs.writeFileSync(out, `# Siblings\n\nS1 · web/src/b.ts:1 · b — the same rule on another screen → ${outcome}\n`);
+  return out;
+}
+// --places and --siblings for a change that is not text only, every place and sibling closed.
+const closed = (repo) => { const places = placesFor(repo); return ['--places', places, '--siblings', siblingsFor(places)]; };
 
-test('every check passes: lint, types, size, places and the project check, with one summary', () => {
+test('every check passes: lint, types, size, places, siblings and the project check, with one summary', () => {
   const { repo, write } = fixture({ mechanical: "console.log('MECHANICAL: 0 bugs'); process.argv.includes('--repo') || process.exit(9);" });
   write('web/src/a.ts', 'export const a = 2;\n');
-  const r = run(repo, ['--places', placesFor(repo)]);
+  const r = run(repo, closed(repo));
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /PRE-REVIEW: 7 of 7 checks passed/);
-  for (const name of ['lint web \\(1 file\\)', 'types web', 'test asserts', 'commits', 'size', 'places', 'mechanical']) assert.match(r.stdout, new RegExp('✓ ' + name));
+  assert.match(r.stdout, /PRE-REVIEW: 8 of 8 checks passed/);
+  for (const name of ['lint web \\(1 file\\)', 'types web', 'test asserts', 'commits', 'size', 'places', 'siblings', 'mechanical']) assert.match(r.stdout, new RegExp('✓ ' + name));
   assert.match(r.stdout, /✓ places[^\n]*\n\s+PLACES: 1 place\(s\), 0 open/, 'the count shows also when it passes');
+  assert.match(r.stdout, /✓ siblings[^\n]*\n\s+SIBLINGS: 1 found, 0 open/, 'the sibling count shows also when it passes');
   assert.match(r.stdout, /MECHANICAL: 0 bugs/, 'the project check got --repo');
+});
+
+// 2026-11-14: a focus fix listed three chip groups; three sibling fields with the same defect were found only at
+// the final review. The author alone chose the names to search: another agent's second look is owed too.
+test('siblings: a code change with no --siblings is NOT RUN and fails, with the command that starts the check', () => {
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 14;\n');
+  const r = run(repo, ['--places', placesFor(repo)]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^PRE-REVIEW: 6 of 7 checks passed · 3 skipped/m);
+  const cmd = `node ${siblingsScript.replace(/\\/g, '/')} --brief --notes <notes> --repo ${fs.realpathSync.native(repo).replace(/\\/g, '/')}`;
+  assert.ok(r.stdout.toLowerCase().includes(`  ✗ siblings — NOT RUN\n      look for the places the list misses, before code: ${cmd}`.toLowerCase()), r.stdout);
+  assert.match(r.stdout, /--record <report> --notes <notes>/);
+});
+
+test('siblings: an open sibling fails the run and is named; closed, it passes; the check reads the places list after its refresh', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 15;\n');
+  const places = placesFor(repo);
+  const open = run(repo, ['--places', places, '--siblings', siblingsFor(places, '')]);
+  assert.equal(open.status, 1, open.stdout);
+  assert.match(open.stdout, /✗ siblings[^\n]*\n\s+OPEN: S1 · web\/src\/b\.ts:1 · b\n\s+SIBLINGS: 1 found, 1 open/);
+  const missing = run(repo, ['--places', places, '--siblings', siblingsFor(places, 'P7')]);
+  assert.equal(missing.status, 1, missing.stdout);
+  assert.match(missing.stdout, /OPEN: S1 · web\/src\/b\.ts:1 · b — P7 is not on the places list/, 'P<n> is checked against --places');
+  const ok = run(repo, ['--places', places, '--siblings', siblingsFor(places, 'none: another screen with its own focus rule')]);
+  assert.equal(ok.status, 0, ok.stdout);
+  const plan = planChecks({ repo, base: 'base', node: process.execPath, remote: null, places: 'p.md', siblings: 's.md' });
+  const check = plan.checks.find((c) => c.name === 'siblings');
+  assert.deepEqual(check.args, [siblingsScript, '--check', 's.md', '--places', 'p.md']);
+  assert.equal(check.after, 'places', 'it starts when the places check, which rewrites the list, has ended');
+  assert.equal(plan.siblingsOwed, false);
+  const alone = planChecks({ repo, base: 'base', node: process.execPath, remote: null, siblings: 's.md' }).checks.find((c) => c.name === 'siblings');
+  assert.deepEqual(alone.args, [siblingsScript, '--check', 's.md'], 'no --places: P<n> is not looked up');
+  assert.equal(planChecks({ repo, base: 'base', node: process.execPath, remote: null }).siblingsOwed, true);
+});
+
+test('a check with `after` starts when that check has ended; every other check starts at once', async () => {
+  const { runChecks } = await import('../scripts/pre-review.mjs');
+  const log = [];
+  const fake = (c) => new Promise((resolve) => {
+    log.push('start ' + c.name);
+    setTimeout(() => { log.push('end ' + c.name); resolve({ ...c, code: 0, out: '', ms: 0 }); }, c.name === 'places' ? 60 : 1);
+  });
+  const results = await runChecks([{ name: 'size' }, { name: 'places' }, { name: 'siblings', after: 'places' }, { name: 'commits' }], fake);
+  assert.deepEqual(results.map((r) => r.name), ['size', 'places', 'siblings', 'commits'], 'results keep the plan order');
+  assert.ok(log.indexOf('start siblings') > log.indexOf('end places'), log.join(', '));
+  assert.ok(log.indexOf('start commits') < log.indexOf('end places'), 'the other checks do not wait: ' + log.join(', '));
+  log.length = 0;
+  await runChecks([{ name: 'siblings', after: 'places' }, { name: 'size' }], fake);
+  assert.equal(log[0], 'start siblings', 'no places check planned: it starts at once');
 });
 
 // 2026-11-12: rule 1 ("list every place that uses what you change, by search") was text and was skipped; a
@@ -60,19 +122,20 @@ test('places: a code change with no --places is NOT RUN and fails, with the comm
   write('web/src/a.ts', 'export const a = 12;\n');
   const r = run(repo);
   assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PRE-REVIEW: 5 of 6 checks passed · 3 skipped/m);
+  // 2026-11-14: the sibling check is owed too, and shows as its own NOT RUN line.
+  assert.match(r.stdout, /^PRE-REVIEW: 5 of 7 checks passed · 3 skipped/m);
   // The repo as git names it: on CI the temp folder is RUNNER~1 to Node and runneradmin to git (2026-11-13).
   const cmd = `node ${placesScript.replace(/\\/g, '/')} --repo ${fs.realpathSync.native(repo).replace(/\\/g, '/')} --names <names> --out <notes>/places.md`;
   assert.ok(r.stdout.toLowerCase().includes(`  ✗ places — NOT RUN\n      list every place that uses what you change: ${cmd}`.toLowerCase()), r.stdout);
 });
 
-test('places: a text-only change needs no list, and says so as skipped', () => {
+test('places and siblings: a text-only change needs neither, and says so as skipped', () => {
   const { repo, write } = fixture();
   write('README.md', 'y\n');
   const r = run(repo);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PRE-REVIEW: 3 of 3 checks passed · 4 skipped: ticket lines, test labels, size growth, places · /m);
-  assert.match(r.stdout, /\n {2}– places: skipped \(a text-only change\)/);
+  assert.match(r.stdout, /^PRE-REVIEW: 3 of 3 checks passed · 5 skipped: ticket lines, test labels, size growth, places, siblings · /m);
+  assert.match(r.stdout, /\n {2}– places: skipped \(a text-only change\)\n {2}– siblings: skipped \(a text-only change\)/);
 });
 
 test('places: the list is searched again first, every place needs an outcome, and --check numbers the check lines', async () => {
@@ -91,7 +154,7 @@ test('places: the list is searched again first, every place needs an outcome, an
   assert.match(late.stdout, /OPEN: P2 · a · web\/src\/b\.ts · \(file\)/);
   assert.match(fs.readFileSync(list, 'utf8'), /^P2 \(new\) · a · web\/src\/b\.ts · \(file\) · lines 1 → $/m, 'the list itself was refreshed');
   fs.writeFileSync(list, fs.readFileSync(list, 'utf8').replace(/→ $/m, '→ none: imports it only to re-export it'));
-  const ok = run(repo, ['--places', list]);
+  const ok = run(repo, ['--places', list, '--siblings', siblingsFor(list)]);
   assert.equal(ok.status, 0, ok.stdout);
   assert.match(ok.stdout, /✓ places/);
   const check = planChecks({ repo, base: 'base', node: process.execPath, remote: null, places: list, check: 'c.md' }).checks.find(c => c.name === 'places');
@@ -160,7 +223,7 @@ test('ticket lines run when a lines file is given, and --was fails a grown chang
   write('web/src/a.ts', 'export const a = 4;\n');
   const lines = path.join(root, 'lines.md');
   fs.writeFileSync(lines, '- The total shows once\n');
-  const ok = run(repo, ['--lines', lines, '--was', 'small', '--places', placesFor(repo)]);
+  const ok = run(repo, ['--lines', lines, '--was', 'small', ...closed(repo)]);
   assert.equal(ok.status, 0, ok.stdout);
   assert.match(ok.stdout, /✓ ticket lines/);
   write('Api/Migrations/20260101_X.cs', 'public class X : Migration { }\n');
@@ -245,9 +308,9 @@ test('a part left out for a missing option is named as skipped, and is not a fai
   const { planChecks } = await import('../scripts/pre-review.mjs');
   const { repo, write } = fixture();
   write('web/src/a.ts', 'export const a = 7;\n');
-  const r = run(repo, ['--places', placesFor(repo)]);
+  const r = run(repo, closed(repo));
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PRE-REVIEW: 6 of 6 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
+  assert.match(r.stdout, /^PRE-REVIEW: 7 of 7 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
   assert.match(r.stdout, /\n {2}– ticket lines: skipped \(no --lines\)\n {2}– test labels: skipped \(no --check\)\n {2}– size growth: skipped \(no --was\)/);
   const all = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md', was: 'small', places: 'p.md' });
   assert.deepEqual(all.skipped, [], 'every option given: nothing skipped');
@@ -256,7 +319,7 @@ test('a part left out for a missing option is named as skipped, and is not a fai
 test('the project check\'s GAP and NOTE lines show also when it passes', () => {
   const { repo, write } = fixture({ mechanical: "console.log('GAP — Api/A.cs — new [HttpPost] A.Create has no test naming it'); console.log('NOTE — web/b.ts — read the texts'); console.log('MECHANICAL: 0 bugs, 1 gaps, 1 notes');" });
   write('web/src/a.ts', 'export const a = 8;\n');
-  const r = run(repo, ['--places', placesFor(repo)]);
+  const r = run(repo, closed(repo));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /✓ mechanical[^\n]*\n\s+GAP — Api\/A\.cs — new \[HttpPost\] A\.Create has no test naming it\n\s+NOTE — web\/b\.ts — read the texts\n\s+MECHANICAL: 0 bugs, 1 gaps, 1 notes/);
 });

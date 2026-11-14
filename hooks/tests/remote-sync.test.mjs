@@ -22,15 +22,18 @@ const BASH = gitBash();
 
 // A fake test machine. Its clone holds ONE bundle file name, as the real one does: the copy puts it
 // there, the fetch reads it and deletes it. A fetch that finds no bundle fails.
+// 2026-11-14: each fetch is logged with its time in bin/<kind>-calls, and the first N fetches of a kind
+// fail when bin/<kind>-fails holds N (a fetch that drops once, as one did on the real test machine).
 const FAKE_SSH = `#!/usr/bin/env bash
 d="$(dirname "$0")"
 cmd="\${@: -1}"
+attempt() { date +%s >> "$d/$1-calls"; [ "$(wc -l < "$d/$1-calls")" -gt "$(cat "$d/$1-fails" 2>/dev/null || echo 0)" ]; }
 case "$cmd" in
   "echo ok") echo ok ;;
   *"--untracked-files=no"*) : ;;
   *"status --porcelain"*) cat "$d/status" 2>/dev/null ;;
-  *"fetch -q origin"*) : ;;
-  *"sanad-run.bundle"*) mv "$d/bundle" "$d/taken.$$" 2>/dev/null || exit 1 ;;
+  *"fetch -q origin"*) attempt origin || exit 1 ;;
+  *"sanad-run.bundle"*) attempt bundle || exit 1; mv "$d/bundle" "$d/taken.$$" 2>/dev/null || exit 1 ;;
   *"checkout -q --detach"*) : ;;
   *"rev-parse HEAD"*) cat "$d/tree" ;;
   *) exit 1 ;;
@@ -55,6 +58,7 @@ function setup() {
   fs.writeFileSync(path.join(bin, 'scp'), FAKE_SCP, { mode: 0o755 });
   // Only this test's settings: the real global ones (this machine has a remote) must not leak in.
   const env = { ...process.env, GIT_CONFIG_GLOBAL: path.join(root, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', SANAD_STATE_DIR: state };
+  delete env.SANAD_SYNC_RETRY_SECONDS; // the script's own pause unless a test sets one
   fs.writeFileSync(env.GIT_CONFIG_GLOBAL, '');
   const git = (...a) => execFileSync('git', a, { cwd: repo, env, encoding: 'utf8', windowsHide: true }).trim();
   git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
@@ -64,14 +68,21 @@ function setup() {
   fs.writeFileSync(path.join(bin, 'tree'), git('rev-parse', 'HEAD^{tree}') + '\n');
   for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
   env.PATH = [bin, BASH.tools, process.env.PATH].filter(Boolean).join(path.delimiter);
-  const run = () => new Promise((resolve) => {
-    const child = spawn(BASH.exe, [script], { cwd: repo, env, windowsHide: true });
+  const run = (extra = {}) => new Promise((resolve) => {
+    const child = spawn(BASH.exe, [script], { cwd: repo, env: { ...env, ...extra }, windowsHide: true });
     let out = '';
     child.stdout.on('data', (d) => { out += d; }); child.stderr.on('data', (d) => { out += d; });
     child.on('close', (code) => resolve({ code, out }));
   });
-  return { root, state, run };
+  return { root, state, run, git };
 }
+
+// The times (seconds) of the fake test machine's fetches of one kind: 'origin' or 'bundle'.
+function fetchTimes(root, kind) {
+  try { return fs.readFileSync(path.join(root, 'bin', kind + '-calls'), 'utf8').trim().split(/\s+/).filter(Boolean).map(Number); }
+  catch { return []; }
+}
+const count = (text, re) => (text.match(re) || []).length;
 
 // 2026-11-11 (TUW-243): the server's proof and the page's proof started together. Both syncs used the one
 // bundle name; the first fetch deleted the bundle the second was about to fetch: "FAILED: fetch the bundle".
@@ -82,6 +93,7 @@ test('two syncs started together both finish: the second waits for the first', a
     for (const r of results) {
       assert.equal(r.code, 0, r.out);
       assert.match(r.out, /^SYNCED pc2:C:\/repos\/App [0-9a-f]{40} tree [0-9a-f]{40}$/m);
+      assert.doesNotMatch(r.out, /RETRY/, 'a fetch that works the first time is not tried again');
     }
     assert.equal(fs.existsSync(path.join(state, 'remote-sync.lock')), false, 'the lock is gone when both are done');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -164,5 +176,68 @@ test('a lock left by a sync that is gone is taken over at once', async () => {
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /^SYNCED /m);
     assert.ok(Date.now() - started < 30000, 'no long wait for a process that is gone');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// 2026-11-14: a proof stopped on "FAILED: git fetch on pc2", and the same sync a minute later worked.
+// Each fetch on the test machine is now tried once more after a short pause; only a second failure stops.
+test('a git fetch on the test machine that fails once is tried again after about 5 s, and the sync goes on', async () => {
+  const { root, state, run } = setup();
+  try {
+    fs.writeFileSync(path.join(root, 'bin', 'origin-fails'), '1\n');
+    const r = await run(); // the script's own pause
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /^SYNCED pc2:C:\/repos\/App [0-9a-f]{40} tree [0-9a-f]{40}$/m);
+    assert.equal(count(r.out, /^RETRY: git fetch on pc2$/gm), 1, r.out);
+    assert.doesNotMatch(r.out, /FAILED|RETRY: fetch the bundle/);
+    const times = fetchTimes(root, 'origin');
+    assert.equal(times.length, 2, 'one failed fetch, one retry');
+    assert.ok(times[1] - times[0] >= 4, `the retry waits about 5 s (waited ${times[1] - times[0]} s)`);
+    assert.equal(fetchTimes(root, 'bundle').length, 1);
+    assert.equal(fs.existsSync(path.join(state, 'remote-sync.lock')), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a git fetch that fails twice stops the sync with the same FAILED line and exit 1', async () => {
+  const { root, state, run } = setup();
+  try {
+    fs.writeFileSync(path.join(root, 'bin', 'origin-fails'), '2\n');
+    const r = await run({ SANAD_SYNC_RETRY_SECONDS: '0' });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /^FAILED: git fetch on pc2$/m);
+    assert.equal(count(r.out, /^RETRY: git fetch on pc2$/gm), 1, r.out);
+    assert.doesNotMatch(r.out, /SYNCED/);
+    assert.equal(fetchTimes(root, 'origin').length, 2, 'tried twice, not more');
+    assert.equal(fetchTimes(root, 'bundle').length, 0, 'the sync stops before the bundle');
+    assert.equal(fs.existsSync(path.join(state, 'remote-sync.lock')), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the bundle fetch on the test machine that fails once is tried again, and the sync goes on', async () => {
+  const { root, run } = setup();
+  try {
+    fs.writeFileSync(path.join(root, 'bin', 'bundle-fails'), '1\n');
+    const r = await run({ SANAD_SYNC_RETRY_SECONDS: '0' });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /^SYNCED pc2:C:\/repos\/App [0-9a-f]{40} tree [0-9a-f]{40}$/m);
+    assert.equal(count(r.out, /^RETRY: fetch the bundle on pc2$/gm), 1, r.out);
+    assert.doesNotMatch(r.out, /FAILED|RETRY: git fetch/);
+    assert.equal(fetchTimes(root, 'bundle').length, 2, 'one failed fetch, one retry');
+    assert.equal(fetchTimes(root, 'origin').length, 1);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a bundle fetch that fails twice stops the sync with the same FAILED line and exit 1, and drops the run ref', async () => {
+  const { root, state, run, git } = setup();
+  try {
+    fs.writeFileSync(path.join(root, 'bin', 'bundle-fails'), '2\n');
+    const r = await run({ SANAD_SYNC_RETRY_SECONDS: '0' });
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /^FAILED: fetch the bundle on pc2$/m);
+    assert.equal(count(r.out, /^RETRY: fetch the bundle on pc2$/gm), 1, r.out);
+    assert.doesNotMatch(r.out, /SYNCED/);
+    assert.equal(fetchTimes(root, 'bundle').length, 2, 'tried twice, not more');
+    assert.throws(() => git('rev-parse', '--verify', '-q', 'refs/sanad/remote-run'), 'the run ref is removed, as before');
+    assert.equal(fs.existsSync(path.join(state, 'remote-sync.lock')), false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

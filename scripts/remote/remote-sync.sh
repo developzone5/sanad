@@ -13,6 +13,7 @@
 # Prints SYNCED <alias>:<path> <commit> tree <tree> (exit 0), or NO-REMOTE (3: run locally),
 # REMOTE-DOWN (4: ask the user before running locally), REMOTE-DIRTY (5), FAILED (1),
 # REMOTE-BUSY (11: another task's check or browser-check app uses the clone now; wait or stop it).
+# A fetch on the remote that fails is tried once more after 5 s; it prints RETRY: <what> on <alias> (stderr).
 # 2026-11-06: the user's desktop ran a full suite at a third of its speed with timeouts; the user's
 # rule is "the remote machine first, ask before using this one".
 set -uo pipefail
@@ -38,6 +39,15 @@ if ! reach; then
   via=(-o "HostName=$found")
 fi
 ssh_q() { ssh -o BatchMode=yes -o ConnectTimeout=12 ${via[@]+"${via[@]}"} "$host" "$@"; }
+# 2026-11-14: "FAILED: git fetch on pc2" stopped a proof, and the same sync a minute later worked. A fetch on
+# the test machine gets one more try after a short pause (SANAD_SYNC_RETRY_SECONDS, default 5); only a second
+# failure stops the sync. RETRY goes to stderr, so a caller reading stdout alone still sees FAILED or SYNCED first.
+fetch_twice() { # <what, for the RETRY line> <command run there>
+  ssh_q "$2" >/dev/null 2>&1 && return 0
+  echo "RETRY: $1 on $host" >&2
+  sleep "${SANAD_SYNC_RETRY_SECONDS:-5}"
+  ssh_q "$2" >/dev/null 2>&1
+}
 
 # 2026-11-12: the clone on the test machine is ONE folder for every worktree of this repository. A sync
 # while another task's check runs in it, or while another task's browser-check app is served from it,
@@ -78,7 +88,7 @@ else commit=$(git -C "$top" commit-tree "$tree" -p "$head" -m "sanad remote run 
 # source or test file is compiled into the run, so the result is not for this folder's code alone.
 dirty=$(ssh_q "cd /d \"$rrepo\" && git status --porcelain" 2>/dev/null | tr -d '\r')
 [ -z "$dirty" ] || { echo "REMOTE-DIRTY: $host:$rrepo has uncommitted changes or files that are not in git:"; echo "$dirty" | head -5; exit 5; }
-ssh_q "cd /d \"$rrepo\" && git fetch -q origin" >/dev/null 2>&1 || { echo "FAILED: git fetch on $host"; exit 1; }
+fetch_twice "git fetch" "cd /d \"$rrepo\" && git fetch -q origin" || { echo "FAILED: git fetch on $host"; exit 1; }
 base=$(git -C "$top" merge-base "origin/$integ" "$commit" 2>/dev/null || true)
 ref="refs/sanad/remote-run"
 git -C "$top" update-ref "$ref" "$commit"
@@ -88,7 +98,7 @@ if [ "$range" = "$ref" ] && [ -n "$base" ]; then
 else
   git -C "$top" bundle create "$tmp/run.bundle" "$range" >/dev/null 2>&1 || { git -C "$top" update-ref -d "$ref"; echo "FAILED: bundle"; exit 1; }
   scp -q -o BatchMode=yes ${via[@]+"${via[@]}"} "$tmp/run.bundle" "$host:$rrepo/.git/sanad-run.bundle" || { git -C "$top" update-ref -d "$ref"; echo "FAILED: copy to $host"; exit 1; }
-  ssh_q "cd /d \"$rrepo\" && git fetch -q -f .git/sanad-run.bundle +$ref:$ref && del .git\\sanad-run.bundle" >/dev/null 2>&1 || { git -C "$top" update-ref -d "$ref"; echo "FAILED: fetch the bundle on $host"; exit 1; }
+  fetch_twice "fetch the bundle" "cd /d \"$rrepo\" && git fetch -q -f .git/sanad-run.bundle +$ref:$ref && del .git\\sanad-run.bundle" || { git -C "$top" update-ref -d "$ref"; echo "FAILED: fetch the bundle on $host"; exit 1; }
 fi
 git -C "$top" update-ref -d "$ref"
 ssh_q "cd /d \"$rrepo\" && git -c advice.detachedHead=false checkout -q --detach $commit" >/dev/null 2>&1 || { echo "FAILED: checkout on $host"; exit 1; }

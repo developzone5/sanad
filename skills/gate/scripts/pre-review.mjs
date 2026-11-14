@@ -25,11 +25,16 @@
 //               again first, then every place needs `C<n>` or `none: <reason>` (with --check, n is one of
 //               its lines). With no --places: skipped for a text-only change (size tiny), else NOT RUN, a
 //               failure (2026-11-12: the rule "list every place by search" was text and was skipped)
+//   siblings    siblings.mjs --check (--siblings): every sibling another agent named before code (a place with
+//               the same rule or defect that the places list missed) needs `P<n>` (with --places, a place on
+//               that list) or `none: <reason>`. It starts after the places check, which rewrites the list. With
+//               no --siblings: skipped for a text-only change, else NOT RUN, a failure (2026-11-14: three
+//               sibling fields of a focus fix were found only at the final review, a full fix round)
 //   mechanical  the project's own script, when `git config sanad.mechanical <path>` is set
 // A part left out because its option is missing (--lines, --check, --was) is printed as skipped.
 // A .NET change is built and tested by the test step, not here.
 //
-// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--node <path>] [--before-proof]
+// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--before-proof]
 //   --before-proof (2026-11-13): run right before red-proof.mjs. Everything runs except the proof part of
 //   the test asserts check. A label, quote or commit fixed now does not void a proof; run it again after the
 //   proof (Step 3.5), where every part runs.
@@ -150,7 +155,7 @@ function remoteLine(remote, rel, words) {
 const sshArgs = (remote, line) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=30', remote.host, line];
 
 // `remote`: the test machine (remoteOf); undefined reads it from git config, null means none.
-export function planChecks({ repo, base, was, lines, check, places, node, remote, beforeProof }) {
+export function planChecks({ repo, base, was, lines, check, places, siblings, node, remote, beforeProof }) {
   const files = changedFiles(repo, base);
   const checks = [];
   if (remote === undefined) remote = remoteOf(repo);
@@ -213,6 +218,9 @@ export function planChecks({ repo, base, was, lines, check, places, node, remote
   // 2026-11-12: the list is searched again in this folder before the check, so a place that appeared after
   // it was written (a new caller, a sibling path) shows as open and cannot be missed.
   if (places) checks.push({ name: 'places', cmd: process.execPath, args: [path.join(here, 'places.mjs'), '--refresh', places, '--repo', repo, '--check', places, ...(check ? ['--check-lines', check] : [])], cwd: repo, show: true });
+  // 2026-11-14: a P<n> outcome is looked up in the places list, which the places check rewrites as it refreshes
+  // it: this check starts when that one has ended (`after`), never while the list is half written.
+  if (siblings) checks.push({ name: 'siblings', cmd: process.execPath, args: [path.join(here, 'siblings.mjs'), '--check', siblings, ...(places ? ['--places', places] : [])], cwd: repo, show: true, after: 'places' });
   const mechanical = git(repo, ['config', '--get', 'sanad.mechanical']);
   if (mechanical) checks.push({ name: 'mechanical', cmd: process.execPath, args: [mechanical, '--repo', repo, '--base', base], cwd: repo, show: true });
   // 2026-11-12 (audit C14): with no --lines, --check or --was those parts were left out without a word, and
@@ -222,7 +230,7 @@ export function planChecks({ repo, base, was, lines, check, places, node, remote
     check ? null : { name: 'test labels', why: 'no --check' },
     was ? null : { name: 'size growth', why: 'no --was' },
   ].filter(Boolean);
-  return { files, checks, remote, skipped, placesOwed: !places };
+  return { files, checks, remote, skipped, placesOwed: !places, siblingsOwed: !siblings };
 }
 
 // With no --places, the size check's answer decides (preReview): a text-only change (size tiny) skips the
@@ -231,6 +239,14 @@ export function placesWithout(sizeOut, repo) {
   if (/^SIZE: tiny\b/m.test(String(sizeOut || ''))) return { skipped: { name: 'places', why: 'a text-only change' } };
   const cmd = `node ${path.join(here, 'places.mjs')} --repo ${repo} --names <names> --out <notes>/places.md`.replace(/\\/g, '/');
   return { result: { name: 'places', notRun: true, code: 1, ms: 0, out: `list every place that uses what you change: ${cmd}` } };
+}
+
+// The same rule for the sibling check (2026-11-14): a text-only change skips it; any other change owes it, and
+// the run fails with the steps that make it.
+export function siblingsWithout(sizeOut, repo) {
+  if (/^SIZE: tiny\b/m.test(String(sizeOut || ''))) return { skipped: { name: 'siblings', why: 'a text-only change' } };
+  const cmd = `node ${path.join(here, 'siblings.mjs')} --brief --notes <notes> --repo ${repo}`.replace(/\\/g, '/');
+  return { result: { name: 'siblings', notRun: true, code: 1, ms: 0, out: `look for the places the list misses, before code: ${cmd}; launch the line it prints, then --record <report> --notes <notes>, and give pre-review --siblings <notes>/siblings.md` } };
 }
 
 // Same folder as checkLockDir() in evidence.mjs: a lock per source-bound check that runs right now.
@@ -294,9 +310,21 @@ export function failureLines(text) {
   return [...keep].sort((a, b) => a - b).map(i => text[i]);
 }
 
+// Every check at once, results in plan order. A check with `after` starts when the named check (planned before
+// it) has ended (2026-11-14: siblings reads the list the places check rewrites). `run`: tests only.
+export function runChecks(checks, run = runOne) {
+  const running = new Map();
+  return Promise.all(checks.map(c => {
+    const first = c.after && checks.find(o => o.name === c.after && running.has(o));
+    const p = first ? running.get(first).then(() => run(c)) : run(c);
+    running.set(c, p);
+    return p;
+  }));
+}
+
 // opts.sync: tests only (in place of the real sync to the test machine).
 export async function preReview(opts) {
-  const { files, checks, remote, skipped, placesOwed } = planChecks(opts);
+  const { files, checks, remote, skipped, placesOwed, siblingsOwed } = planChecks(opts);
   let synced = '';
   if (checks.some(c => c.remote)) {
     const sync = (opts.sync || syncRemote)(opts.repo, remote);
@@ -306,10 +334,11 @@ export async function preReview(opts) {
     }
     if (sync.ok) synced = `  (no node_modules here: lint and types run on ${remote.host}, on this folder's code${sync.tree ? ', tree ' + String(sync.tree).slice(0, 12) : ''})`;
   }
-  const results = await Promise.all(checks.map(runOne));
-  if (placesOwed) {
-    const size = results.find(r => r.name === 'size');
-    const owed = placesWithout(size && size.out, opts.repo);
+  const results = await runChecks(checks);
+  const size = results.find(r => r.name === 'size');
+  for (const [owes, without] of [[placesOwed, placesWithout], [siblingsOwed, siblingsWithout]]) {
+    if (!owes) continue;
+    const owed = without(size && size.out, opts.repo);
     if (owed.skipped) skipped.push(owed.skipped); else results.push(owed.result);
   }
   const skippedText = skipped.length ? ` · ${skipped.length} skipped: ${skipped.map(s => s.name).join(', ')}` : '';
@@ -321,7 +350,7 @@ export async function preReview(opts) {
     const text = r.out.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).filter(l => l.trim());
     if (r.code !== 0) lines.push(...failureLines(text).map(l => '      ' + l));
     // The project check's GAP and NOTE lines are leads for the review: shown also when it passes (2026-11-12).
-    else if (r.show) lines.push(...text.filter(l => /^(?:SIZE|SIZE GREW|MECHANICAL|GAP|NOTE|PLACES|  callers|  roles)/.test(l)).map(l => '      ' + l.trim()));
+    else if (r.show) lines.push(...text.filter(l => /^(?:SIZE|SIZE GREW|MECHANICAL|GAP|NOTE|PLACES|SIBLINGS|  callers|  roles)/.test(l)).map(l => '      ' + l.trim()));
   }
   for (const s of skipped) lines.push(`  – ${s.name}: skipped (${s.why})`);
   return { ok: results.every(r => r.code === 0), text: lines.join('\n') };
@@ -332,7 +361,7 @@ function parse(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--before-proof') { o.beforeProof = true; continue; }
-    if (!['--repo', '--base', '--was', '--lines', '--check', '--places', '--node'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
+    if (!['--repo', '--base', '--was', '--lines', '--check', '--places', '--siblings', '--node'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
   return o;
@@ -345,11 +374,11 @@ if (isMain(import.meta.url)) {
     if (!repo) throw new Error('not inside a git repository: ' + (o.repo || process.cwd()));
     const integration = git(repo, ['config', '--get', 'sanad.integration']) || 'staging';
     const node = o.node || git(repo, ['config', '--get', 'sanad.node']) || process.execPath;
-    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), node, beforeProof: !!o.beforeProof });
+    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof });
     process.stdout.write(text + '\n');
     process.exitCode = ok ? 0 : 1;
   } catch (error) {
-    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--node <path>] [--before-proof]\n');
+    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--before-proof]\n');
     process.exitCode = 2;
   }
 }
