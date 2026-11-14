@@ -7,6 +7,7 @@
 #
 # 1. Changed = files that differ between base and candidate (added, edited or removed).
 # 2. Drift guard: every changed live file must still equal its base copy; otherwise abort untouched.
+#    Then the end-to-end runs on the test machine (sanad.e2eRun), with the candidate's own proof script.
 # 3. Back up every replaced/removed live file to ~/.claude/backups/<release-name>/.
 # 4. Install, run the hook and gate suites, and append one line to ~/.claude/backups/RELEASES.md.
 set -euo pipefail
@@ -42,6 +43,26 @@ for f in "${changed[@]}" "${removed[@]}"; do
   else [ -e "$L" ] && { echo "DRIFT: $f now exists live"; drift=1; }; fi
 done
 [ "$drift" = 0 ] || { echo "ABORTED: nothing was changed."; exit 1; }
+
+# End to end on the test machine, BEFORE anything is installed (2026-11-14: a release passed every local
+# suite and CI, and the first real proof on the test machine crashed: a new shared file was missing from what
+# the proof copies there). Each run uses the CANDIDATE's red-proof to warm one kept copy on the test machine,
+# which copies the candidate's scripts there and loads them. Runs: SANAD_E2E_RUN (one per line) or every
+# `git config --global sanad.e2eRun "<repo>|<folder in it>|<test command>"`. None set: said, never silent.
+if [ -n "${SANAD_E2E_RUN+set}" ]; then e2e_runs="$SANAD_E2E_RUN"; else e2e_runs="$(git config --global --get-all sanad.e2eRun 2>/dev/null || true)"; fi
+[ "$e2e_runs" = "none" ] && e2e_runs=""   # tests: SANAD_E2E_RUN=none skips the machine's own runs
+if [ -z "$e2e_runs" ]; then
+  echo "E2E: skipped — no run set (git config --global --add sanad.e2eRun \"<repo>|<folder>|<test command>\")"
+else
+  while IFS='|' read -r e2e_repo e2e_dir e2e_cmd; do
+    [ -n "$e2e_repo" ] || continue
+    echo "E2E: $e2e_repo ($e2e_dir): $e2e_cmd"
+    # shellcheck disable=SC2086 — the command is words, split on purpose
+    if ! node "$CAND/claude/skills/gate/scripts/red-proof.mjs" --repo "$e2e_repo" --warm --parallel 1 --cwd "$e2e_repo/$e2e_dir" -- $e2e_cmd; then
+      echo "ABORTED: the candidate's proof did not run end to end on the test machine; nothing was changed."; exit 3
+    fi
+  done <<< "$e2e_runs"
+fi
 
 for f in "${changed[@]}" "${removed[@]}"; do
   L="$(live "$f")"

@@ -79,11 +79,28 @@ function fixture(t) {
   const isolated = source.replace(rootLine, `C=${quote(path.join(live,'claude'))}; A=${quote(path.join(live,'agents/skills'))}; X=${quote(path.join(live,'codex'))}`);
   const script = path.join(root, 'install.sh');
   fs.writeFileSync(script, isolated);
-  const env = {...process.env};
+  const env = {...process.env, SANAD_E2E_RUN: 'none'};   // never this machine's own end-to-end runs
   delete env.NODE_TEST_CONTEXT;
-  const run = name => spawnSync(bash, [script, cand, base, name], {encoding:'utf8', env, timeout:30000});
+  const run = (name, extra = {}) => spawnSync(bash, [script, cand, base, name], {encoding:'utf8', env: {...env, ...extra}, timeout:30000});
   return {root, base, cand, live, put, run};
 }
+
+// 2026-11-14: a release passed every suite, and the first real proof on the test machine crashed (a new shared
+// file was not copied there). The candidate's proof now runs end to end before anything is installed.
+test('an end-to-end run that fails stops the install before any file changes; none set is said, not silent', t => {
+  const f = fixture(t);
+  const before = fs.readFileSync(path.join(f.live, 'codex/config.toml'), 'utf8');
+  const failed = f.run('e2e-release', { SANAD_E2E_RUN: `${path.join(f.root, 'no-such-repo')}|web|node -e 0` });
+  assert.equal(failed.status, 3, failed.stdout + failed.stderr);
+  assert.match(failed.stdout, /^E2E: .*no-such-repo \(web\): node -e 0$/m);
+  assert.match(failed.stdout, /ABORTED: the candidate's proof did not run end to end on the test machine; nothing was changed\./);
+  assert.equal(fs.readFileSync(path.join(f.live, 'codex/config.toml'), 'utf8'), before, 'nothing installed');
+  assert.ok(!fs.existsSync(path.join(f.live, 'claude/backups/e2e-release')), 'no backup folder either');
+  const none = f.run('e2e-none');
+  assert.equal(none.status, 0, none.stdout + none.stderr);
+  assert.match(none.stdout, /^E2E: skipped — no run set/m);
+});
+
 
 test('workflow release installs Codex config and roles, backs up prior config, and logs the release', t => {
   const f = fixture(t);

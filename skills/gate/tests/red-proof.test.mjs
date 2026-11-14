@@ -838,6 +838,16 @@ test('jest-dom and Moq failures read as assertions; a connection failure reads a
   assert.deepEqual(own, ['setup', 'assert']);
 });
 
+// 2026-11-14: FluentAssertions' NotThrowAsync failure ("Did not expect any exception, but found …") read as
+// "other", so a proof that was red by an assertion said "by another error: check above that it is the bug".
+test('a FluentAssertions "did not expect any exception" failure reads as an assertion', async () => {
+  const { failureReasons } = await import('../scripts/red-proof.mjs');
+  const kinds = failureReasons(['  Failed Api.Tests.T.RecordsTheAccount [3 ms]', '  Error Message:',
+    '   Did not expect any exception, but found System.Threading.Tasks.TaskCanceledException: A task was canceled.',
+    '  Failed Api.Tests.T.Throws [1 ms]', '  Error Message:', '   System.InvalidOperationException : boom'].join('\n')).map(w => w.kind);
+  assert.deepEqual(kinds, ['assert', 'other']);
+});
+
 // S6: a break whose text crashed everything failed every named test and read as caught.
 test('--breaks: a break that does not compile or run is BREAK INVALID, never caught', () => {
   const { repo, breaks } = breakFixture();

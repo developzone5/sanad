@@ -115,7 +115,7 @@ import { isMain } from './is-main.mjs';
 const SETUP_ERR = /TestingLibraryElementError|Unable to find (?:an? )?(?:accessible )?element|Found multiple elements|\bTypeError\b|\bReferenceError\b|\bSyntaxError\b|Cannot read propert|is not a function|is not defined|Test timed out|Hook timed out|Cannot find module|Failed to resolve import|NullReferenceException|\berror (?:CS|TS)\d{3,5}\b/;
 // A jest-dom matcher prints `expect(element).toBeInTheDocument()`, Moq and NSubstitute their own
 // exceptions (2026-11-12: with the old code red only by an assertion, these must read as one).
-const ASSERT_ERR = /AssertionError|\bexpected\b.*\bto\b|Assert\.\w+\(\) Failure|Xunit\.Sdk\.\w+Exception|AssertFailedException|Shouldly|^Expected:|^(?:Error:\s*)?expect\(\w*\)\.(?:not\.)?\w+\(|MockException|ReceivedCallsException/i;
+const ASSERT_ERR = /AssertionError|\bexpected\b.*\bto\b|Assert\.\w+\(\) Failure|Xunit\.Sdk\.\w+Exception|AssertFailedException|Shouldly|^Expected:|^(?:Error:\s*)?expect\(\w*\)\.(?:not\.)?\w+\(|MockException|ReceivedCallsException|\bDid not expect\b/i;
 const SETUP_OUTPUT = /\berror (?:CS|TS)\d{3,5}\b|Build FAILED|Failed to resolve import|Cannot find module|SyntaxError/;
 // A Testing Library query that found no element (or not the one element it wants). After a passing green run
 // the same query found its element on the fixed tree, so on the old code (or under a break) this is the
@@ -401,6 +401,18 @@ export function hider(values) {
   }
   const list = [...secrets].sort((a, b) => b.length - a.length);
   return (text) => list.reduce((t, s) => t.split(s).join('***'), String(text));
+}
+
+// The scripts the test machine needs: this one and every script it imports, followed through their own
+// imports (2026-11-14: a new shared import, is-main.mjs, was missing from a hand-written list, and every
+// proof on the test machine stopped with "Cannot find module").
+export function proofScripts(dir) {
+  const list = ['red-proof.mjs'];
+  for (let i = 0; i < list.length; i++) {
+    const text = fs.readFileSync(path.join(dir, list[i]), 'utf8');
+    for (const m of text.matchAll(/^\s*import\b[^;]*?\bfrom\s+['"]\.\/([\w.-]+\.mjs)['"]/gm)) if (!list.includes(m[1])) list.push(m[1]);
+  }
+  return list;
 }
 
 // A `dotnet` command: its executable is dotnet or dotnet.exe, by any path.
@@ -742,12 +754,13 @@ async function main() {
       old: hasOld ? oldRun.map(f => { try { return { file: f, content64: git('show', `${oldRef}:${f}`).toString('base64') }; } catch { return { file: f, content64: null }; } }) : [],
     }));
     const here = path.dirname(fileURLToPath(import.meta.url));
-    for (const f of ['red-proof.mjs', 'proof-record.mjs', 'check-ticket-lines.mjs']) fs.copyFileSync(path.join(here, f), path.join(local, f));
+    const scripts = proofScripts(here);
+    for (const f of scripts) fs.copyFileSync(path.join(here, f), path.join(local, f));
     // BatchMode: a password prompt nobody can answer fails at once instead of waiting.
     const sshOpts = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', ...viaOpt];
     spawnSync('ssh', [...sshOpts, remoteHost, windows ? `if not exist "${dir.replace(/\//g, '\\')}" mkdir "${dir.replace(/\//g, '\\')}"` : `mkdir -p '${dir}'`], { encoding: 'utf8', windowsHide: true, timeout: 120000 });
     // scp reads "C:/..." as a host name, so it copies by file name from inside the folder.
-    const scp = spawnSync('scp', ['-q', ...sshOpts, planName, 'red-proof.mjs', 'proof-record.mjs', 'check-ticket-lines.mjs', `${remoteHost}:${dir}/`], { cwd: local, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+    const scp = spawnSync('scp', ['-q', ...sshOpts, planName, ...scripts, `${remoteHost}:${dir}/`], { cwd: local, encoding: 'utf8', windowsHide: true, timeout: 120000 });
     if (scp.status !== 0) { say('RED-PROOF: could not copy the proof to the test machine — ' + ((scp.stderr || '').trim().split(/\r?\n/).pop() || 'scp failed')); process.exit(2); }
     // Each line as it comes, so a long proof is never silent. The runs there stop at their own limit;
     // this wait is the backstop for a lost connection.

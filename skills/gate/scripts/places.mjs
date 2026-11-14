@@ -259,16 +259,18 @@ export function closePlaces(file, sets, { checkCount } = {}) {
     const reason = openReason({ mark: '', outcome }, checkCount);
     if (reason) throw usage(`--set ${which}: ${reason}`);
     let n = 0;
+    const closed = [];
     for (let i = 0; i < rows.length; i++) {
       const m = PLACE.exec(rows[i]);
       if (!m) continue;
       const p = { n: Number(m[1]), mark: m[2] || '', name: m[3], file: m[4], fn: m[5] || FILE_PART, lines: m[6].trim(), outcome: m[7].trim() };
       if (p.mark === 'gone' || !sel.pick(p) || (!sel.explicit && p.outcome)) continue;
       rows[i] = placeLine({ ...p, outcome });
+      closed.push(`P${p.n} · ${where(p)}`);
       n++;
     }
     if (!n) throw usage(`--set ${which}: no ${sel.explicit ? '' : 'open '}place matches`);
-    counts.push({ which, outcome, n });
+    counts.push({ which, outcome, n, closed });
   }
   fs.writeFileSync(file, rows.join(text.includes('\r\n') ? '\r\n' : '\n'));
   return counts;
@@ -320,7 +322,12 @@ async function main() {
     const o = parse(process.argv.slice(2));
     if (o.close) {
       const file = path.resolve(o.close);
-      for (const c of closePlaces(file, o.set)) process.stdout.write(`CLOSED: ${c.n} place(s) — ${c.which} → ${c.outcome}\n`);
+      // Each place a --set closed is named (2026-11-14: one file: outcome closed 8 places, and one of them, a
+      // function the author had not opened, did not fit the reason; listed, it is seen before review).
+      for (const c of closePlaces(file, o.set)) {
+        process.stdout.write(`CLOSED: ${c.n} place(s) — ${c.which} → ${c.outcome}\n`);
+        for (const p of c.closed) process.stdout.write(`  ${p}\n`);
+      }
       const { count, open } = checkPlaces(readPlaces(file));
       process.stdout.write(`PLACES: ${count} place(s), ${open.length} open — ${file}\n`);
       return;
