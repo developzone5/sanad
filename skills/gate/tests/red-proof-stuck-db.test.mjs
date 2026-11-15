@@ -106,7 +106,14 @@ function remoteFixture() {
   return f;
 }
 const dotnet = ['--', 'dotnet', 'test', 'A.Tests/A.Tests.csproj'];
-const atHome = (home) => ({ HOME: home, USERPROFILE: home });
+// The test machine's PATH over ssh (2026-11-15: release 6 failed there): the WSL launcher in System32 is the first
+// `bash`. The scripts must still run, through Git's own bash. Windows names the variable Path or PATH.
+function wslFirst() {
+  if (process.platform !== 'win32') return {};
+  const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  return { [key]: path.join(process.env.SystemRoot || 'C:\\Windows', 'System32') + path.delimiter + process.env[key] };
+}
+const atHome = (home) => ({ HOME: home, USERPROFILE: home, ...wslFirst() });
 
 test('a dotnet proof on the test machine checks the database first: a database that does not come up stops it before anything is sent', () => {
   const { repo, breaks } = remoteFixture();
