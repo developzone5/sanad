@@ -11,7 +11,7 @@ Read once per substantive task. Keep a short task record outside application sou
 
 ## Synchronize before final verification
 
-Before final tests and review, fetch the configured remote, discover the integration branch, and check the current PR state. If it is merged, use a fresh feature branch; if integration advanced, incorporate it into the feature branch and resolve conflicts before freezing source. Never merge into a shared branch or rebase a pushed branch. Record the integration commit. Recheck freshness before publishing; unchanged inputs reuse evidence, while later integration changes require affected verification and the review scope selected by the helper. An unavailable remote is an explicit gap; a local workflow without a remote records this step as not applicable.
+Before final tests and review, fetch the configured remote, discover the integration branch, and check the current PR state. If it is merged, use a fresh feature branch; if integration advanced and conflicts with the branch (`git merge-tree --write-tree --quiet`), merge it into the feature branch and resolve the conflicts before freezing source. With no conflict, leave it: the PR's own checks test the combined code ([/ship](../../ship/SKILL.md) step 1 names the exceptions). Never merge into a shared branch or rebase a pushed branch. Record the integration commit. Recheck freshness before publishing; unchanged inputs reuse evidence, while later integration changes require affected verification and the review scope selected by the helper. An unavailable remote is an explicit gap; a local workflow without a remote records this step as not applicable.
 
 ## Review once, follow up on the fix
 

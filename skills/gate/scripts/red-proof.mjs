@@ -90,6 +90,11 @@
 // a build error stops there with the compiler lines (SETUP, exit 3), before any run starts.
 //
 // --timeout-min <n> (default 15, decimals allowed): the limit for each run and for the compile check.
+// A stuck run stops sooner (2026-11-15): once two red runs have finished in their own copies, a red run still
+// going at twice the slowest of them (never under a fifth of the limit) is stopped and named stuck (exit 5).
+// The database (2026-11-15): a dotnet proof on the test machine first runs remote-preflight.sh --db when
+// git config sanad.remoteDbContainer is set; a database that does not come up stops it before any run
+// (ENVIRONMENT, exit 6), and the preflight renews the hold that keeps the database up.
 // --test-env <path> (2026-11-09: opt-in MySQL tests need a connection string with a password):
 // KEY=VALUE lines (# comments, blank lines and a leading `export ` allowed; one pair of quotes around a
 // value is removed) added to every run's environment. Only the names are printed; a value of 6 or more
@@ -493,6 +498,9 @@ export function compileCheckCommand(command) {
 // This run's lines and outputs, for --log. Kept outside main() so a thrown error's line reaches the log too.
 const state = { said: [], logs: [], logPath: null, head: '', remoteLog: null };
 
+// A red run is stuck at STUCK_FACTOR times the slowest finished red run, once STUCK_PEERS of them finished.
+const STUCK_FACTOR = 2, STUCK_PEERS = 2;
+
 if (isMain(import.meta.url)) {
   main().catch((e) => { const line = 'RED-PROOF: failed — ' + e.message; state.said.push(line); process.stdout.write(line + '\n'); process.exit(2); });
 }
@@ -822,6 +830,21 @@ async function main() {
       '--base', 'HEAD', '--cwd', q(rel ? remoteRepo + '/' + rel : remoteRepo), '--log', q(dir + '/' + logName),
       '--', q(exe), ...command.slice(1).map(q)].join(' ');
     if (opts.includes('--show-remote')) { say(`RED-PROOF: on ${remoteHost} this runs: ${remoteCmd}`); process.exit(0); }
+    // The database first (2026-11-15, role-sync task: the database there had stopped, and the proof found out
+    // only from its first run, a full rerun lost). A server proof starts it, or waits for it, before anything is
+    // sent; the preflight also renews the hold that keeps it up between runs. A warm-up builds only.
+    const dbContainer = gitText(['config', '--get', 'sanad.remoteDbContainer']);
+    if (dotnetRun && !warm && dbContainer) {
+      const pre = spawnSync('bash', [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-preflight.sh'), '--db'], { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 8 * 60 * 1000 });
+      const preOut = (pre.stdout || '') + (pre.stderr || '');
+      if (pre.status === 4 || /REMOTE-DOWN/.test(preOut)) { say('RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).'); process.exit(4); }
+      if (pre.status !== 0 || !/^READY\b/m.test(preOut)) {
+        const why = preOut.split(/\r?\n/).find(l => /^(?:DB-DOWN|DOCKER-DOWN|FAILED|NO-REMOTE)\b/.test(l.trim())) || (pre.error ? pre.error.message : `exit ${pre.status}`);
+        say(`RED-PROOF: ENVIRONMENT ✗ — the database on the test machine is not ready (${why.trim()}); nothing ran. Fix it (remote-preflight.sh --db), then run the same proof again.`);
+        process.exit(6);
+      }
+      say(`RED-PROOF: database ${dbContainer} ready on ${remoteHost}`);
+    }
     const sync = spawnSync('bash', [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000 });
     const syncOut = (sync.stdout || '') + (sync.stderr || '');
     if (/REMOTE-DOWN/.test(syncOut)) { say('RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).'); process.exit(4); }
@@ -950,7 +973,8 @@ async function main() {
   // One process: no typed input (2026-11-09: an open input pipe let cmd.exe wait for ever), the env
   // file's variables (a kept copy's run: copyRunEnv), and the time limit, past which it and every process it
   // started are stopped.
-  function runProcess(argv, cwd, env = runEnv) {
+  // `control` (a kept copy's run): runParallel's stuck watch gets control.stop, which ends the run like the limit.
+  function runProcess(argv, cwd, env = runEnv, control = null) {
     return new Promise((resolve) => {
       let stdout = '', stderr = '', settled = false, timedOut = false, grace = null, timer = null;
       const end = (r) => { if (settled) return; settled = true; clearTimeout(timer); clearTimeout(grace); resolve({ stdout, stderr, timedOut, ...r }); };
@@ -960,6 +984,7 @@ async function main() {
       } catch (error) { end({ status: null, error }); return; }
       if (child.pid) { running.add(child.pid); child.on('close', () => running.delete(child.pid)); }
       timer = setTimeout(() => { timedOut = true; stopTree(child.pid); }, limitMs);
+      if (control) control.stop = () => { timedOut = true; stopTree(child.pid); };
       child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
       child.stdout.on('data', (d) => { stdout += d; });
       child.stderr.on('data', (d) => { stderr += d; });
@@ -1143,11 +1168,24 @@ async function main() {
     const greenGate = list.some(j => j.kind === 'green') ? new Promise(r => { releaseGreen = r; }) : null;
     say(`RED-PROOF: ${list.length} run(s), ${slots.length} at a time, each in its own copy${greenGate ? '; green first' : ''}` +
       (sitOut.length ? `; ${sitOut.length} cop${sitOut.length === 1 ? 'y' : 'ies'} never built here sit out (a first build in a new folder compiles the whole solution; --warm builds them before the next proof)` : ''));
+    // The stuck watch (2026-11-15, role-sync task: one break kept a lock held, so its run waited the full 15
+    // minutes while its peers had each finished in about 4). Once two red runs have finished, a red run still
+    // going at twice the slowest of them, and never under a fifth of the time limit, is stuck: it is stopped
+    // like a run past the limit. The green run runs alone and has no peer: only the limit stops it.
+    const active = new Map(), peerMs = [];
+    const watch = setInterval(() => {
+      if (peerMs.length < STUCK_PEERS) return;
+      const stuckMs = Math.max(limitMs / 5, STUCK_FACTOR * Math.max(...peerMs));
+      if (stuckMs >= limitMs) return;
+      for (const [i, a] of active) if (a.control.stop && Date.now() - a.started > stuckMs) { a.control.stuckMs = stuckMs; active.delete(i); a.control.stop(); }
+    }, 500);
     async function worker(copy) {
       while (next < list.length) {
         const i = order[next++];
         if (greenGate && list[i].kind !== 'green') { await greenGate; if (stopped) return; }
         const started = Date.now();
+        const control = {};
+        if (list[i].kind !== 'green') active.set(i, { started, control });
         const links = [], saved = [];
         let unsure = false;
         try {
@@ -1160,7 +1198,8 @@ async function main() {
             if (text === null) { if (fs.existsSync(target)) fs.rmSync(target); }
             else { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, text); }
           }
-          out[i] = await runProcess(command, path.join(copy, cwdRel), env);
+          out[i] = await runProcess(command, path.join(copy, cwdRel), env, control);
+          if (control.stuckMs && out[i].timedOut) out[i].stuckMs = control.stuckMs;
           if (dotnet && !out[i].timedOut && !out[i].error) markBuilt(copy);
         } catch (e) {
           out[i] = e.noop ? { status: null, stdout: '', stderr: '', noop: true, why: e.message } : { status: null, stdout: '', stderr: '', error: e };
@@ -1170,12 +1209,15 @@ async function main() {
           for (const l of links) { try { fs.unlinkSync(l); } catch { /* a link that is gone needs nothing */ } }
           // A stopped or failed run can leave half-written build output: that copy starts over.
           if (unsure || out[i].timedOut || out[i].error) { try { dropCopy(copy); } catch { /* the next sync clones it again */ } }
+          active.delete(i);
         }
-        say(`  ran ${list[i].label}: ${out[i].timedOut ? 'stopped at the time limit' : out[i].error ? 'could not run' : out[i].noop ? 'not run, the break changes nothing there' : 'exit ' + out[i].status} (${Math.round((Date.now() - started) / 1000)} s)`);
+        const ms = Date.now() - started;
+        if (list[i].kind !== 'green' && !out[i].timedOut && !out[i].error && !out[i].noop) peerMs.push(ms);
+        say(`  ran ${list[i].label}: ${out[i].stuckMs ? `stopped as stuck (twice the slowest finished run: ${Math.round(out[i].stuckMs / 1000)} s)` : out[i].timedOut ? 'stopped at the time limit' : out[i].error ? 'could not run' : out[i].noop ? 'not run, the break changes nothing there' : 'exit ' + out[i].status} (${Math.round(ms / 1000)} s)`);
         if (list[i].kind === 'green') { stopped = runFailed(out[i]); releaseGreen(); }
       }
     }
-    await Promise.all(slots.map(worker));
+    try { await Promise.all(slots.map(worker)); } finally { clearInterval(watch); }
     return out;
   }
 
@@ -1289,7 +1331,12 @@ async function main() {
   let ok = true;
   // 0. A run past the time limit proves nothing: named first, the others still read.
   const late = jobs.filter((j, i) => results[i]?.timedOut);
-  for (const j of late) say(`RED-PROOF: TIMEOUT ✗ — ${j.label} ran past ${timeoutMin} min; it and every process it started were stopped; files restored.`);
+  const stuck = jobs.filter((j, i) => results[i]?.stuckMs);
+  for (const j of late) {
+    const s = results[jobs.indexOf(j)].stuckMs;
+    say(s ? `RED-PROOF: TIMEOUT ✗ — ${j.label} was stuck: still running after ${Math.round(s / 1000)} s, twice the slowest finished run; it and every process it started were stopped; files restored.`
+      : `RED-PROOF: TIMEOUT ✗ — ${j.label} ran past ${timeoutMin} min; it and every process it started were stopped; files restored.`);
+  }
   // 1. The old code: red only when a named test fails by an assertion (2026-11-12, S2/S7: a crash, a run
   // with no test, or a runner whose failures are not read used to print RED ✓).
   if (hasOld) {
@@ -1364,7 +1411,9 @@ async function main() {
     else { setupStop(r); showWhy(r); say('  GREEN ✗ the tests fail on the fixed tree'); ok = false; }
   }
   if (late.length) {
-    say(`RED-PROOF: NOT PROVED ✗ — ${late.length} run(s) did not finish within ${timeoutMin} min, so nothing is proved. Fix the hang or raise --timeout-min, then run again; files restored.`);
+    say(stuck.length
+      ? `RED-PROOF: NOT PROVED ✗ — ${late.length} run(s) did not finish (${stuck.length} stuck at twice the slowest finished run), so nothing is proved. Fix the hang (a test with no time bound of its own), then run again; a slow run that is not stuck: raise --timeout-min, which raises the stuck floor too. Files restored.`
+      : `RED-PROOF: NOT PROVED ✗ — ${late.length} run(s) did not finish within ${timeoutMin} min, so nothing is proved. Fix the hang or raise --timeout-min, then run again; files restored.`);
     finish(5);
   }
   if (breaks.length && !breaks[0].single) say(ok ? `RED-PROOF: PROVED ✓ — ${hasOld ? 'red on the old code, ' : ''}${breaks.length} break(s) caught${green ? ', green on the fix' : ''}; files restored.` : 'RED-PROOF: NOT PROVED ✗ — see the lines above; files restored.');

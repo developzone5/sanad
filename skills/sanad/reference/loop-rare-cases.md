@@ -21,7 +21,8 @@ The timer starts, marks its stages and ends by itself: the first code edit start
   - A setup failure (element not found, type error, timeout) → fix the test. One exception: after a passing green run, an element the old code (or a break) does not render is red, shown as `? missing`; read that line and confirm the missing element is the bug. Keep `--then-green` on page proofs, or it stays SETUP.
   - A break whose named tests still pass → the tests do not isolate the rule: fix the tests, not the list.
   - `BREAK INVALID ✗` → the break does not compile or changes nothing. A break changes one rule.
-  - `ENVIRONMENT ✗` (exit 6) → the database or the machine failed: `remote-preflight.sh --db`, then the same proof again. Do not touch the tests.
+  - `ENVIRONMENT ✗` (exit 6) → the database or the machine failed: `remote-preflight.sh --db`, then the same proof again. Do not touch the tests. A server proof on the test machine checks the database itself before any run (`git config sanad.remoteDbContainer`).
+  - A red run still going at twice the slowest finished red run is stopped as stuck (`TIMEOUT ✗ … was stuck`, exit 5): a test with no time bound of its own. Bound it, then run again.
   - A `mustFail` text is part of a test's own title, and every test with that text must fail. Name a new test by words of its own title, not by its `[Cn]` tag: a part that matches a new test and an older one (an old ticket's `[C1]` in the same file) is refused before any run (`BREAK AMBIGUOUS`, exit 2). A part may name older tests alone, and a test's whole title is always accepted.
   - A new "nothing happens" check (not called, null, empty, zero, never) is proven only by a caught break whose `mustFail` names a test in its own test file; the old code never proves it. A proof that would leave one unproven, `--old` alone included, is refused before any run (`UNPROVEN ✗ <file>`, exit 2): add such a break.
   - A test of code that already works has no old version that fails: use `--break <file> --find <text> --put <text>` in place of `--old` and `--files`.
@@ -74,4 +75,4 @@ One PR per ticket by default. The plan is shown before code and waits for the us
 - Agents think on the API; builds and tests load the machine. Start every independent part at once and keep adding while CPU stays under about 80% and free memory above about 2 GB.
 - Full suites are the heavy load: at most 2 at once on one machine, one at a time when they share a database. Check free memory first.
 - No source edit while a full suite runs: the evidence helper refuses a run whose files changed under it. Hold the fixes, apply them in one batch, run once more.
-- A suite never runs beside reviewers on this machine.
+- A suite never runs beside reviewers on this machine. On the test machine it does: the final suite starts with the last re-check (loop.md Step 3, item 6).

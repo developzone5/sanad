@@ -41,10 +41,13 @@ function run(cmd, args, timeout) {
 }
 // A quiet fetch prints nothing on success, so judge it by its exit status.
 function succeeds(cmd, args, timeout) {
+  return exitCode(cmd, args, timeout) === 0;
+}
+function exitCode(cmd, args, timeout) {
   try {
     execFileSync(cmd, args, { cwd, stdio: 'ignore', timeout: timeout || 8000, windowsHide: true });
-    return true;
-  } catch (e) { return false; }
+    return 0;
+  } catch (e) { return typeof e.status === 'number' ? e.status : -1; }
 }
 
 try {
@@ -80,8 +83,16 @@ try {
 
   if (integ && branch !== integ && branch !== '(detached)') {
     const [behind, ahead] = run('git', ['rev-list', '--left-right', '--count', 'origin/' + integ + '...HEAD']).split(/\s+/);
-    lines.push('vs origin/' + integ + ': ahead ' + (ahead || 0) + ', behind ' + (behind || 0) + stale +
-      (Number(behind) > 0 ? ' — ⚠ merge origin/' + integ + ' into this branch before the ship brief' : ''));
+    // Behind is no reason to merge (2026-11-15: merging an unrelated staging commit made a new tree, and the full
+    // suite ran again for it). Only a conflict is: the PR's own checks test the combined code. Nothing is written.
+    let note = '';
+    if (Number(behind) > 0) {
+      const merge = exitCode('git', ['merge-tree', '--write-tree', '--quiet', 'origin/' + integ, 'HEAD'], 15000);
+      note = merge === 0 ? ' — no conflict: no merge needed, the PR checks test the combined code'
+        : merge === 1 ? ' — ⚠ conflicts with origin/' + integ + ': merge it into this branch before the ship brief'
+          : ' — merge only on a conflict (/ship step 1)';
+    }
+    lines.push('vs origin/' + integ + ': ahead ' + (ahead || 0) + ', behind ' + (behind || 0) + stale + note);
   }
 
   if (branch !== '(detached)' && !PROD.test(branch) && branch !== integ) {

@@ -7,6 +7,9 @@
 // which cost a full fix round. Here another agent reads the ticket lines, the check lines and the places, and
 // names the other places with the same rule or defect; each one needs an outcome before review
 // (pre-review.mjs --siblings).
+// 2026-11-15 (role-sync task): the agent named 7 places with other problems, outside the ticket's goal, and the
+// author spent time sorting them out. A sibling now carries the ticket's own rule; any other finding is an
+// `OUTSIDE PR:` line, kept apart for the user's end list, with no outcome needed.
 //
 //   node siblings.mjs --brief --notes <dir> --repo <repo>
 //       Writes <notes>/siblings-brief.md from <notes>/lines.md (ticket lines), <notes>/check.md (check lines)
@@ -14,7 +17,8 @@
 //       line for the Agent tool (braintrust-expert, a read-only planning seat; never a reviewer prompt, which
 //       the hooks would count as a finished review). Its prompt names the brief only.
 //   node siblings.mjs --record <report file> --notes <dir>
-//       Reads the agent's report: its `SIBLING: <file>:<line> · <what> — <why>` lines, or `SIBLINGS: none`.
+//       Reads the agent's report: its `SIBLING: <file>:<line> · <what> — <why>` lines, or `SIBLINGS: none`,
+//       and its `OUTSIDE PR: <file>:<line> — <what>` lines (kept under their own heading, for the user's end list).
 //       Writes <notes>/siblings.md: one line per sibling, `S<n> · <file>:<line> · <what> — <why> → `, open. A
 //       SIBLING line in another shape is kept as written, never dropped. Recorded again: every S line keeps its
 //       number and outcome, a sibling not on it yet gets the next number. A report with neither kind of line
@@ -38,7 +42,7 @@ const MIN_REASON = 12;
 export const BRIEF = 'siblings-brief.md';
 export const LIST = 'siblings.md';
 export const REPORT = 'siblings-report.md';
-export const INSTRUCTIONS = "Before any code. Read the ticket lines and the places, then the code at each place and around it. Name every OTHER place that applies the same rule or has the same defect and is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the same rule>' or the single line 'SIBLINGS: none'. About 3 minutes; do not edit.";
+export const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>' and 'OUTSIDE PR:' lines, or the single line 'SIBLINGS: none'. About 3 minutes; do not edit.";
 // A planning seat, never a review (2026-11-14): a prompt that starts "You are the independent reviewer" is
 // counted by the stop and push hooks as a finished review, so this check, run before any code, could have
 // stood in for the real review of the code written after it.
@@ -90,7 +94,7 @@ export function buildBrief({ repo, ticket, checks, list }) {
 
 export function launchLine(brief) {
   return `LAUNCH: Agent braintrust-expert · prompt: ${PROMPT_START} Read and follow only the brief at ${slash(brief)}. ` +
-    'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING lines, or the single line SIBLINGS: none.';
+    'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING and OUTSIDE PR lines, or the single line SIBLINGS: none.';
 }
 
 export function writeBrief({ notes, repo }) {
@@ -112,16 +116,24 @@ export function writeBrief({ notes, repo }) {
 // A report line without list marks, quotes or bold: "- `SIBLING: …`" and "**SIBLINGS: none**" read plainly.
 const bare = (line) => line.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, '').replace(/^[`*_>"\s]+|[`*_"\s]+$/g, '').replace(/^(SIBLINGS?:)[*_]+\s*/, '$1 ').trim();
 const NONE = /^SIBLINGS:\s*none\.?$/i;
+const OUTSIDE = /^OUTSIDE PR:\s*(.*)$/i;
 // "<file>:<line> · <function or field> — <why>"; a line range (12-20) counts as a line.
 const SHAPED = /^(.+?):(\d+(?:[-–]\d+)?) · (.+?) — (.+)$/;
 
-// The agent's answer: { siblings: [text of each S line], none } or null when it has neither kind of line.
+// The agent's answer: { siblings: [text of each S line], none, outside: [text of each OUTSIDE PR line] }, or
+// null when it has no line of any kind.
 export function parseReport(text) {
-  const siblings = [];
+  const siblings = [], outside = [];
   let none = false;
   for (const row of String(text).split(/\r?\n/)) {
     const l = bare(row);
     if (NONE.test(l)) { none = true; continue; }
+    const o = OUTSIDE.exec(l);
+    if (o) {
+      const body = o[1].replace(/→/g, '->').trim();
+      if (body && !/<file>/.test(body) && !outside.includes(body)) outside.push(body);
+      continue;
+    }
     const m = /^SIBLING:\s*(.*)$/.exec(l);
     if (!m) continue;
     // The agent's own arrows become "->": the first → on an S line starts its outcome.
@@ -132,7 +144,7 @@ export function parseReport(text) {
     const shaped = s ? `${s[1].trim()}:${s[2]} · ${s[3].trim()} — ${s[4].trim()}` : body;
     if (!siblings.includes(shaped)) siblings.push(shaped);
   }
-  return siblings.length || none ? { siblings, none: !siblings.length } : null;
+  return siblings.length || none || outside.length ? { siblings, none: !siblings.length, outside } : null;
 }
 
 // "S3 · <text> → <outcome>"; a line whose arrow was deleted reads with no outcome (open), never dropped.
@@ -150,8 +162,14 @@ export function parseSiblings(text) {
 }
 
 export const siblingLine = (r) => `S${r.n} · ${r.body} → ${r.outcome}`;
+export const OUTSIDE_HEADING = "## Outside the ticket — for the user's end list (no outcome here)";
 
-export function renderSiblings({ brief, report, recorded, rows }) {
+// The OUTSIDE PR lines already in a siblings list, in order.
+export function parseOutside(text) {
+  return String(text).split(/\r?\n/).map((l) => /^- OUTSIDE PR:\s*(.*)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
+}
+
+export function renderSiblings({ brief, report, recorded, rows, outside = [] }) {
   return [
     '# Siblings — places with the same rule or defect that the places list missed', '',
     `Brief: ${slash(brief)}`,
@@ -160,6 +178,7 @@ export function renderSiblings({ brief, report, recorded, rows }) {
     "Write the outcome after each →: `P<n>` (add the sibling's name with places.mjs --names; n is the place it gets) or `none: <why it is not the same rule>`.",
     'siblings.mjs --record keeps every outcome when it records again; pre-review.mjs --siblings checks this file.', '',
     ...(rows.length ? rows.map(siblingLine) : ['SIBLINGS: none']), '',
+    ...(outside.length ? [OUTSIDE_HEADING, '', ...outside.map((o) => '- OUTSIDE PR: ' + o), ''] : []),
   ].join('\n');
 }
 
@@ -169,15 +188,17 @@ export function recordSiblings({ report, notes, now = new Date() }) {
   if (!fs.existsSync(brief)) throw usage(`no ${BRIEF} in ${notes}: run --brief first and launch the line it prints`);
   if (!fs.existsSync(report)) throw usage('no such report: ' + report);
   const found = parseReport(readText(report));
-  if (!found) throw usage(`${report} has no SIBLING line and no "SIBLINGS: none" line: the check did not run. Save the agent's final message there and record again.`);
+  if (!found) throw usage(`${report} has no SIBLING line, no OUTSIDE PR line and no "SIBLINGS: none" line: the check did not run. Save the agent's final message there and record again.`);
   const out = path.join(notes, LIST);
   const oldText = fs.existsSync(out) ? readText(out) : '';
   const rows = parseSiblings(oldText).rows;
   let next = rows.reduce((n, r) => Math.max(n, r.n), 0) + 1;
   for (const body of found.siblings) if (!rows.some((r) => r.body === body)) rows.push({ n: next++, body, outcome: '' });
-  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows });
+  const outside = parseOutside(oldText);
+  for (const body of found.outside) if (!outside.includes(body)) outside.push(body);
+  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside });
   fs.writeFileSync(out, oldText.includes('\r\n') ? text.replace(/\n/g, '\r\n') : text);
-  return { out, rows };
+  return { out, rows, outside };
 }
 
 // Why an S line is still open ('' = closed). `places`: the parsed places list, when --places is given.
@@ -244,10 +265,11 @@ function main() {
         launchLine(b.brief) + '\n' +
         `THEN: save the agent's final message as ${slash(path.join(notes, REPORT))}, then run: node ${slash(path.join(here, 'siblings.mjs'))} --record ${slash(path.join(notes, REPORT))} --notes ${slash(notes)}\n`);
     } else if (o.record) {
-      const { out, rows } = recordSiblings({ report: path.resolve(o.record), notes: path.resolve(o.notes) });
+      const { out, rows, outside } = recordSiblings({ report: path.resolve(o.record), notes: path.resolve(o.notes) });
       const r = checkSiblings({ rows });
       process.stdout.write(rows.map((row) => '  ' + siblingLine(row).trimEnd() + '\n').join('') +
-        `SIBLINGS: ${r.count} found, ${r.open.length} open — written to ${out}${r.count ? '; write P<n> or none: <reason> after each →' : ''}\n`);
+        `SIBLINGS: ${r.count} found, ${r.open.length} open — written to ${out}${r.count ? '; write P<n> or none: <reason> after each →' : ''}\n` +
+        (outside.length ? `OUTSIDE PR: ${outside.length} line(s) outside the ticket, kept apart — not this task's work; they go to the user's end list (loop.md Step 3.5, item 5)\n` : ''));
     } else {
       let places;
       if (o.places) {

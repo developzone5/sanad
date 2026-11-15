@@ -20,7 +20,7 @@ const slash = (p) => p.replace(/\\/g, '/');
 const real = (p) => fs.realpathSync.native(p).toLowerCase();
 const sLines = (file) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => /^S\d/.test(l));
 
-const INSTRUCTIONS = "Before any code. Read the ticket lines and the places, then the code at each place and around it. Name every OTHER place that applies the same rule or has the same defect and is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the same rule>' or the single line 'SIBLINGS: none'. About 3 minutes; do not edit.";
+const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>' and 'OUTSIDE PR:' lines, or the single line 'SIBLINGS: none'. About 3 minutes; do not edit.";
 
 // A repo where focusFirstError is used by the chip group form, and a notes folder with the three sources:
 // the ticket lines, the check lines and the places list (made by places.mjs).
@@ -150,6 +150,49 @@ test('--record needs the brief first, keeps a SIBLING line in another shape as w
   const r = run(['--record', report, '--notes', f.notes]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual(sLines(path.join(f.notes, 'siblings.md')), ['S1 · the rich-text description editor - same focus defect on save -> publish → ']);
+});
+
+// 2026-11-15 (role-sync task): the agent named 7 places with other problems, outside the ticket's goal. They are
+// OUTSIDE PR lines now: kept apart for the user's end list, never an S line that needs an outcome.
+test('--record keeps OUTSIDE PR lines apart: no S number, no outcome needed, kept when recorded again', () => {
+  const { report, list } = briefed([
+    '- SIBLING: src/DatePicker.tsx:1 · DueDatePicker — a field on the same form whose error never gets the focus after a failed save',
+    '- OUTSIDE PR: src/StudentList.tsx:1 — the list loads every student at once (a speed problem, not the focus rule)',
+    '`OUTSIDE PR: <file>:<line> — <what>`',
+  ].join('\n'));
+  const r = run(['--record', report, '--notes', path.dirname(report)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(sLines(list), ['S1 · src/DatePicker.tsx:1 · DueDatePicker — a field on the same form whose error never gets the focus after a failed save → ']);
+  const text = fs.readFileSync(list, 'utf8');
+  assert.match(text, /^## Outside the ticket — for the user's end list \(no outcome here\)$/m);
+  assert.deepEqual(text.split(/\r?\n/).filter((l) => l.startsWith('- OUTSIDE PR:')),
+    ['- OUTSIDE PR: src/StudentList.tsx:1 — the list loads every student at once (a speed problem, not the focus rule)'], 'the quoted instruction is no line');
+  assert.match(r.stdout, /^SIBLINGS: 1 found, 1 open — /m);
+  assert.match(r.stdout, /^OUTSIDE PR: 1 line\(s\) outside the ticket, kept apart/m);
+  // Only the S line needs an outcome: once it has one, the check passes with the OUTSIDE PR line still there.
+  fs.writeFileSync(list, text.replace(/^(S1 · .*→) $/m, '$1 none: the date picker already moves the focus'));
+  const c = run(['--check', list]);
+  assert.equal(c.status, 0, c.stdout + c.stderr);
+  assert.match(c.stdout, /^SIBLINGS: 1 found, 0 open$/m);
+  // Recorded again with a new outside line: the old one stays, the new one joins, the outcome is kept.
+  fs.writeFileSync(report, 'OUTSIDE PR: src/focus.ts:1 — the helper has no test of its own\n');
+  assert.equal(run(['--record', report, '--notes', path.dirname(report)]).status, 0);
+  const again = fs.readFileSync(list, 'utf8');
+  assert.deepEqual(again.split(/\r?\n/).filter((l) => l.startsWith('- OUTSIDE PR:')), [
+    '- OUTSIDE PR: src/StudentList.tsx:1 — the list loads every student at once (a speed problem, not the focus rule)',
+    '- OUTSIDE PR: src/focus.ts:1 — the helper has no test of its own',
+  ]);
+  assert.deepEqual(sLines(list), ['S1 · src/DatePicker.tsx:1 · DueDatePicker — a field on the same form whose error never gets the focus after a failed save → none: the date picker already moves the focus']);
+});
+
+test('--record from OUTSIDE PR lines alone writes "SIBLINGS: none" and keeps them; the check passes', () => {
+  const { report, list } = briefed('OUTSIDE PR: src/StudentList.tsx:1 — the list loads every student at once\n');
+  const r = run(['--record', report, '--notes', path.dirname(report)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const text = fs.readFileSync(list, 'utf8');
+  assert.match(text, /^SIBLINGS: none$/m);
+  assert.match(text, /^- OUTSIDE PR: src\/StudentList\.tsx:1 — the list loads every student at once$/m);
+  assert.equal(run(['--check', list]).status, 0);
 });
 
 test('--record again keeps each S line\'s number and outcome and adds the new siblings', () => {
