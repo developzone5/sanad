@@ -13,7 +13,9 @@
  *    edits through the shell, so shell writes must count or the gate is blind.
  *  - a verify: a completed build/test/typecheck command whose recorded result did
  *    NOT fail (non-zero exit, "Build FAILED", "error CS…", "Failed!", "N
- *    failed", npm ERR!, …). A failing build is not verification.
+ *    failed", npm ERR!, …). A failing build is not verification. A red-proof
+ *    --then-green run counts by its green run, also when its output went to a
+ *    file: then its run record decides (2026-11-15).
  *  - an open reviewer note (2026-11-12): a final text that says REVIEW/GATE: PASS
  *    or hands over a push command blocks, even in a chat-only turn, until each
  *    note is fixed or the user decided it (see transcript-scan.js "Reviewer notes").
@@ -126,6 +128,7 @@ try {
  * Verdict — exactly one of six exits (open reviewer notes, above, turn any of them into a block):
  *   1. no code edit this session               → allow silently
  *   2. PASSING verify ran after the last edit  → allow + confirmation note
+ *      (or a red-proof green run passed there, though the proof failed: allow + that note)
  *   3. a helper or a background check of this
  *      work still running, nothing failed      → allow + wait note (its finish returns here)
  *   4. unverified, already blocked once        → allow + warning (never loop)
@@ -221,6 +224,12 @@ if (!failedAfterEdit && !pendingAfterEdit && lastEdit === -1) {
 }
 if (!failedAfterEdit && !pendingAfterEdit && r.lastVerify > lastEdit) {
   out({ systemMessage: 'A verification command completed successfully after the last code edit.' + memo + ' This is not the full Definition-of-Done: finish /gate with behavior evidence before /ship.' });
+}
+// A red-proof run whose green run passed on the tree after the last edit, while the proof itself failed (NOT
+// RED, a break not caught): the tests ran green, so no test run is missing (2026-11-15). The push guard still
+// counts the failed proof (see transcript-scan.js "Red-proof runs").
+if (!failedAfterEdit && !pendingAfterEdit && (r.lastGreenProof ?? -1) > lastEdit) {
+  out({ systemMessage: 'The tests ran green after the last code edit (a red-proof green run), but the proof itself did not hold (NOT RED, or a break not caught or invalid: see its RED-PROOF line).' + memo + ' Fix the tests and prove again: the push guard still counts the failed proof.' });
 }
 if (!failedAfterEdit && !pendingAfterEdit && r.lastProbeFailure > lastEdit) {
   out({ systemMessage: 'Declared review probe(s) failed as expected. That is evidence about the code under review, not verification of your own change; the push guard still refuses while they fail.' });

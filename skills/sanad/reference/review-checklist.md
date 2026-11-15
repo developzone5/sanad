@@ -15,6 +15,7 @@ Every line of items 2 and 3 is a note. The author must fix it or bring the user'
 ## Every change
 
 - `COVERAGE:` one line per check line (`Done means`) — `✓ implemented + tested (<test name>)` / `~ implemented, NO test` / `✗ missing`.
+- `ONE JOB:` does this PR do more than one thing? A yes is a `Question` note that names the jobs; the user decides.
 - `USERS FOUND BY SEARCH:` read the author's places list. For each `none:` line, open that place and check the reason; a place that needs the change and has none is a Bug. Then run the searches yourself (imports, callers, readers, copies, sibling screens, other roles' routes, and every user of an older piece a new one sits beside); a place the list misses is a Bug.
 - `MISSED:` what the ask implies that nothing in the diff addresses — the other call site, the other locale, the other role, the raw-SQL twin of a query change, the screen that shows a new field.
 - `HALF-DONE:` stubs, TODOs without an id, unhandled null, empty or failure branches, fields an update endpoint silently drops, helpers defined and never called.

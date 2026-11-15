@@ -21,7 +21,9 @@
 //               happens" check no break run proved, and (with --check) a check line with no [Cn] test
 //   commits     check-commits.mjs: one commit, a Conventional subject that ends with the ticket ID
 //   size        size-check.mjs on the real change (--was <size> fails when it grew)
-//   places      places.mjs: the list of every place that uses what the change touches (--places), searched
+//   one job     one-job.mjs: over about 400 logic lines or 30 code files, it fails until the user answers
+//               "split it, or keep it as one job?" (a keep is saved with their words; user rule 2026-11-15)
+//   places     places.mjs: the list of every place that uses what the change touches (--places), searched
 //               again first, then every place needs `C<n>` or `none: <reason>` (with --check, n is one of
 //               its lines). With no --places: skipped for a text-only change (size tiny), else NOT RUN, a
 //               failure (2026-11-12: the rule "list every place by search" was text and was skipped)
@@ -215,6 +217,7 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
   checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : []), ...(beforeProof ? ['--before-proof'] : [])], cwd: repo });
   checks.push({ name: 'commits', cmd: process.execPath, args: [path.join(here, 'check-commits.mjs'), '--repo', repo, '--base', base], cwd: repo });
   checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : [])], cwd: repo, show: true });
+  checks.push({ name: 'one job', cmd: process.execPath, args: [path.join(here, 'one-job.mjs'), '--repo', repo, '--base', base], cwd: repo, show: true });
   // 2026-11-12: the list is searched again in this folder before the check, so a place that appeared after
   // it was written (a new caller, a sibling path) shows as open and cannot be missed.
   if (places) checks.push({ name: 'places', cmd: process.execPath, args: [path.join(here, 'places.mjs'), '--refresh', places, '--repo', repo, '--check', places, ...(check ? ['--check-lines', check] : [])], cwd: repo, show: true });

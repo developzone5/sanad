@@ -870,6 +870,82 @@ function hiddenVerificationResult(block, entry, hidden) {
   return runners.length && runners.every((r) => (PASS_MARKERS[r] || []).some((re) => re.test(text))) ? 'passed' : 'none';
 }
 
+// ---------------------------------------------------------------------------
+// Red-proof runs (2026-11-15). red-proof.mjs --then-green first runs the changed tests on the tree as it is.
+// When that green run passed, the tests ran green after the launch, whatever the proof said next: NOT RED or
+// a break not caught is the proof's own failure, still a failed check for the push guard, but no missing test
+// run for the stop gate. A proof run in the background with its output sent to a file (`… > proof-run.out
+// 2>&1; echo "exit $?" >> proof-run.out`) shows no line of its own here, so its green run never counted: the
+// stop asked for a check three times in one task. red-proof writes one record per --then-green run when it
+// ends (skills/gate/scripts/run-record.mjs: <state>/proof/runs/<start ms>-<pid>.json). When the result shows
+// no line of the proof's own, that record decides, if it is this run's: the same arguments, started after
+// the launch and ended before the result, and its tree the same at its start and its end. A proof never
+// makes an evidence receipt: the push guard still needs evidence.mjs.
+// ---------------------------------------------------------------------------
+const GREEN_PASSED = /^\s*GREEN ✓/m;
+const GREEN_FAILED = /^\s*GREEN ✗/m;
+// The proof stopped for a reason that is not the code: nothing it said about green counts.
+const PROOF_STOPPED = /RED-PROOF: (?:SETUP|ENVIRONMENT|TIMEOUT|REMOTE-DOWN|RESTORE FAILED|failed —)/;
+// The host's times and the proof's own clock are the same machine's; a little room for rounding.
+const RUN_SLACK_MS = 2000;
+// What a proof's own lines say about its green run: true (passed), false, or null (no line about it).
+function greenInText(text) {
+  if (GREEN_FAILED.test(text) || PROOF_STOPPED.test(text)) return false;
+  return GREEN_PASSED.test(text) ? true : null;
+}
+// A proof's arguments in one comparable form: path separators, Git Bash's /c/ for C:/, and case do not
+// matter. A word the shell changes in another way (`~`, a variable set outside the command) does not match:
+// no record, so no credit, as before.
+function proofWords(words) { return words.map((w) => String(w).replace(/\\/g, '/').replace(/^\/([A-Za-z])(?=\/|$)/, '$1:').toLowerCase()); }
+function proofLaunch(segs, expanded, at) {
+  const checks = segs.map((s, i) => i).filter((i) => segmentIsVerify(segs[i]));
+  if (checks.length !== 1 || checkRunner(segs[checks[0]]) !== 'red-proof') return null;
+  return { args: proofWords(stripRedirects(verificationWords(expanded[checks[0]])).slice(2)), at: String(at || '') };
+}
+
+// This run's record, or null: one record only, of the same arguments, that started after the launch and
+// ended before the result came (doneAt). No times, no state folder, or two such records: null.
+function proofRunRecord(st, proof, doneAt) {
+  const from = Date.parse(proof.at || ''), to = Date.parse(doneAt || '');
+  if (!st.proofRuns || !Number.isFinite(from) || !Number.isFinite(to)) return null;
+  let names;
+  try { names = fs.readdirSync(st.proofRuns); } catch (e) { return null; }
+  const want = JSON.stringify(proof.args);
+  const found = [];
+  for (const name of names) {
+    const m = /^(\d{10,16})-\d+\.json$/.exec(String(name));
+    if (!m || Number(m[1]) < from - RUN_SLACK_MS || Number(m[1]) > to + RUN_SLACK_MS) continue;
+    let run = null;
+    try { run = JSON.parse(fs.readFileSync(path.join(st.proofRuns, String(name)), 'utf8')); } catch (e) { continue; }
+    if (!run || typeof run !== 'object' || !Array.isArray(run.argv) || JSON.stringify(proofWords(run.argv)) !== want) continue;
+    const start = Date.parse(run.startedAt || ''), end = Date.parse(run.endedAt || '');
+    if (!(start >= from - RUN_SLACK_MS) || !(end >= start) || !(end <= to + RUN_SLACK_MS)) continue;
+    found.push(run);
+  }
+  return found.length === 1 ? found[0] : null;
+}
+
+// A red-proof check's result: { outcome, green }. outcome as for any check (pending, passed, failed, none);
+// green: its green run passed on the tree it launched on. The proof's own lines decide when the result shows
+// them; else its run record. The command's own exit code, when it reached the tool, keeps deciding pass or
+// fail; behind `; echo` (outcome 'none') the record's exit code does: 0 passed, any other failed.
+function proofResult(st, rec, blk, entry, outcome) {
+  const t = entry.toolUseResult || {};
+  if (outcome === 'pending' || t.interrupted === true || /^(?:killed|cancelled|canceled)$/.test(t.task?.status || '')) return { outcome, green: false };
+  const text = resultText(blk, entry).replace(ANSI, '');
+  const said = greenInText(text);
+  if (said !== null) {
+    const exit = rec.hidden ? undefined : (t.task?.exitCode ?? t.exitCode ?? t.exit_code ?? (/^Exit code (-?\d+)/m.exec(text) || [])[1]);
+    return { outcome, green: said && (exit === undefined || exit === null || Number(exit) === 0 || Number(exit) === 1) };
+  }
+  const run = proofRunRecord(st, rec.proof, entry.timestamp);
+  if (!run) return { outcome, green: false };
+  const sameTree = /^[0-9a-f]{40,64}$/i.test(String(run.treeStart || '')) && run.treeStart === run.treeEnd;
+  const green = run.green === 'passed' && (run.exit === 0 || run.exit === 1) && sameTree;
+  if (outcome !== 'none') return { outcome, green };
+  return { outcome: run.exit === 0 ? (green ? 'passed' : 'none') : 'failed', green };
+}
+
 function isEvidenceCommand(segment) {
   const words = tokenize(segment);
   // The installed helper lives under some user's .claude folder; any other evidence.mjs is a stray script.
@@ -1171,7 +1247,7 @@ function openNotesMessage(open) {
 // later call continues where the last one stopped (2026-11-12, audit H17).
 function newScanState() {
   return {
-    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastNonSyncEdit: -1, syncMoves: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1,
+    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastNonSyncEdit: -1, syncMoves: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastGreenProof: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1,
       // Reviewer notes: { n, kind, text, outcome: null | 'fixed' | 'user', problem? }; the open ones are set by
       // finishScan. turnClaim: an assistant text since the user's last message has a REVIEW/GATE: PASS line or a
       // handed-over push (the stop gate's answer when the host does not send the last message).
@@ -1212,6 +1288,7 @@ function saveState(st) {
   const o = { ...st, finishedUncollected: [...st.finishedUncollected] };
   for (const k of STATE_MAPS) o[k] = [...st[k]];
   delete o.since;   // the start time belongs to the cache record, which is used only with the same one
+  delete o.proofRuns;   // set by each scan (see scanOpen)
   return o;
 }
 // A cached state of any other shape is ignored (the scan starts from zero).
@@ -1292,6 +1369,9 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
   if (!editsOnly && rec.verifySeq !== -1 && !rec.evidence) {
     const hidden = hiddenCheckRunners(String(blk.input.command || ''));
     if (hidden) rec.hidden = hidden;
+    // A red-proof run, the only check of its command: its arguments and launch time find its run record.
+    const proof = proofLaunch(segs, expanded, entry.timestamp);
+    if (proof) rec.proof = proof;
   }
 }
 const emptyRecord = (background) => ({ editSeq: -1, editPath: '', nonGitEditSeq: -1, nonRemoteEditSeq: -1, remotes: [], nonSyncEditSeq: -1, syncs: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background });
@@ -1356,7 +1436,7 @@ function feedLine(st, l) {
         try { output = note.file ? fs.readFileSync(note.file, 'utf8') : ''; } catch (e) { output = ''; }
         settle(st, { ...st.background.get(note.id), editSeq: -1, taskId: note.id },
           { type: 'tool_result', content: output, is_error: false },
-          { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } } });
+          { toolUseResult: { task: { id: note.id, status: note.status, exitCode: note.exitCode } }, timestamp: entry.timestamp });
       } else if (st.background.has(note.id)) st.finishedUncollected.add(note.id);
       if (st.helpersRunning.has(note.id) && /^(?:completed|failed|killed|cancelled|canceled|stopped)$/.test(note.status)) st.helpersRunning.delete(note.id);
       // An independent reviewer agent finished: credit the run it completed. A notice sent while it still
@@ -1512,7 +1592,10 @@ function settle(st, rec, blk, entry) {
   const res = st.res;
   if (userRejected(blk, entry)) return;              // nothing ran
   const isErr = blk.is_error === true;
-  const outcome = rec.hidden ? hiddenVerificationResult(blk, entry, rec.hidden) : verificationResult(blk, entry);
+  let outcome = rec.hidden ? hiddenVerificationResult(blk, entry, rec.hidden) : verificationResult(blk, entry);
+  // A red-proof run: its green run decides the stop gate's credit; its record stands in for output sent to a file.
+  let green = false;
+  if (rec.proof && rec.verifySeq !== -1) ({ outcome, green } = proofResult(st, rec, blk, entry, outcome));
   // The host names the task in the result's fields or only in its text ("…running in background with ID: b1a2…");
   // without the id, the finish notice can never be matched and the run stays "running" (2026-11-06).
   const taskId = entry.toolUseResult?.backgroundTaskId || entry.toolUseResult?.background_task_id || rec.taskId ||
@@ -1536,7 +1619,8 @@ function settle(st, rec, blk, entry) {
       if (launch?.outcome === 'pending' && launch.seq === rec.verifySeq) st.verificationStates.delete(key);
     } else {
       const previous = st.verificationStates.get(key);
-      if (!previous || rec.verifySeq >= previous.seq) st.verificationStates.set(key, { seq: rec.verifySeq, outcome: checkOutcome, command: rec.command });
+      // green: a failed proof whose green run passed (see finishScan).
+      if (!previous || rec.verifySeq >= previous.seq) st.verificationStates.set(key, { seq: rec.verifySeq, outcome: checkOutcome, command: rec.command, ...(green && checkOutcome === 'failed' ? { green: true } : {}) });
       if (checkOutcome === 'passed') st.passes.push({ seq: rec.verifySeq, command: rec.command });
       if (checkOutcome === 'passed') {
         if (receipt && rec.verifySeq > res.lastBoundCheck) { res.completedCheck = receipt.record; res.lastBoundCheck = rec.verifySeq; }
@@ -1765,6 +1849,9 @@ function scanOpen(transcriptPath, fd) {
   const cached = file ? cachedScan(file, transcript, fd, size, stamp, since) : null;
   let st = cached ? cached.st : newScanState();
   st.since = sinceMs;
+  // red-proof's run records (see "Red-proof runs"): read from the same state folder, under the same rule.
+  const proofRuns = allowed ? path.join(stateFolder(), 'proof', 'runs') : '';
+  st.proofRuns = proofRuns;
   let offset = cached ? cached.offset : 0;
   let helpers = cached ? cached.helpers : {};
   if (file && !cached) pruneCache(path.dirname(file));
@@ -1778,7 +1865,7 @@ function scanOpen(transcriptPath, fd) {
   const checkpoint = (at) => { if (file && Date.now() - savedAt > CHECKPOINT_MS) save(at); };
   let read = readHelpers(st, transcriptPath, helpers);
   if (!read) {
-    st = newScanState(); st.since = sinceMs; offset = 0; helpers = {};
+    st = newScanState(); st.since = sinceMs; st.proofRuns = proofRuns; offset = 0; helpers = {};
     read = readHelpers(st, transcriptPath, helpers) || { changed: true, tails: [] };
     read.changed = true;
   }
@@ -1806,6 +1893,9 @@ function finishScan(st) {
     if (outcome === 'failed' && !retired(state)) {
       res.lastFailedVerify = Math.max(res.lastFailedVerify, seq);   // push guard: every failure counts
       if (probed(state)) res.lastProbeFailure = Math.max(res.lastProbeFailure, seq);
+      // A proof that failed after its green run passed (NOT RED, a break not caught): the tests ran green, so
+      // the stop gate counts a test run; the push guard still counts the failure (2026-11-15).
+      else if (state.green === true) res.lastGreenProof = Math.max(res.lastGreenProof, seq);
       else if (seq > res.lastFailedVerifyStop) { res.lastFailedVerifyStop = seq; res.lastFailedVerifyStopCommand = state.command; }
     }
     if (outcome === 'pending') res.lastPendingVerify = Math.max(res.lastPendingVerify, seq);
