@@ -56,8 +56,8 @@ test('every check passes: lint, types, size, places, siblings and the project ch
   write('web/src/a.ts', 'export const a = 2;\n');
   const r = run(repo, closed(repo));
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /PRE-REVIEW: 8 of 8 checks passed/);
-  for (const name of ['lint web \\(1 file\\)', 'types web', 'test asserts', 'commits', 'size', 'places', 'siblings', 'mechanical']) assert.match(r.stdout, new RegExp('✓ ' + name));
+  assert.match(r.stdout, /PRE-REVIEW: 9 of 9 checks passed/);
+  for (const name of ['lint web \\(1 file\\)', 'types web', 'test asserts', 'commits', 'size', 'one job', 'places', 'siblings', 'mechanical']) assert.match(r.stdout, new RegExp('✓ ' + name));
   assert.match(r.stdout, /✓ places[^\n]*\n\s+PLACES: 1 place\(s\), 0 open/, 'the count shows also when it passes');
   assert.match(r.stdout, /✓ siblings[^\n]*\n\s+SIBLINGS: 1 found, 0 open/, 'the sibling count shows also when it passes');
   assert.match(r.stdout, /MECHANICAL: 0 bugs/, 'the project check got --repo');
@@ -70,7 +70,7 @@ test('siblings: a code change with no --siblings is NOT RUN and fails, with the 
   write('web/src/a.ts', 'export const a = 14;\n');
   const r = run(repo, ['--places', placesFor(repo)]);
   assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PRE-REVIEW: 6 of 7 checks passed · 3 skipped/m);
+  assert.match(r.stdout, /^PRE-REVIEW: 7 of 8 checks passed · 3 skipped/m);
   const cmd = `node ${siblingsScript.replace(/\\/g, '/')} --brief --notes <notes> --repo ${fs.realpathSync.native(repo).replace(/\\/g, '/')}`;
   assert.ok(r.stdout.toLowerCase().includes(`  ✗ siblings — NOT RUN\n      look for the places the list misses, before code: ${cmd}`.toLowerCase()), r.stdout);
   assert.match(r.stdout, /--record <report> --notes <notes>/);
@@ -123,7 +123,7 @@ test('places: a code change with no --places is NOT RUN and fails, with the comm
   const r = run(repo);
   assert.equal(r.status, 1, r.stdout + r.stderr);
   // 2026-11-14: the sibling check is owed too, and shows as its own NOT RUN line.
-  assert.match(r.stdout, /^PRE-REVIEW: 5 of 7 checks passed · 3 skipped/m);
+  assert.match(r.stdout, /^PRE-REVIEW: 6 of 8 checks passed · 3 skipped/m);
   // The repo as git names it: on CI the temp folder is RUNNER~1 to Node and runneradmin to git (2026-11-13).
   const cmd = `node ${placesScript.replace(/\\/g, '/')} --repo ${fs.realpathSync.native(repo).replace(/\\/g, '/')} --names <names> --out <notes>/places.md`;
   assert.ok(r.stdout.toLowerCase().includes(`  ✗ places — NOT RUN\n      list every place that uses what you change: ${cmd}`.toLowerCase()), r.stdout);
@@ -134,7 +134,7 @@ test('places and siblings: a text-only change needs neither, and says so as skip
   write('README.md', 'y\n');
   const r = run(repo);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PRE-REVIEW: 3 of 3 checks passed · 5 skipped: ticket lines, test labels, size growth, places, siblings · /m);
+  assert.match(r.stdout, /^PRE-REVIEW: 4 of 4 checks passed · 5 skipped: ticket lines, test labels, size growth, places, siblings · /m);
   assert.match(r.stdout, /\n {2}– places: skipped \(a text-only change\)\n {2}– siblings: skipped \(a text-only change\)/);
 });
 
@@ -310,7 +310,7 @@ test('a part left out for a missing option is named as skipped, and is not a fai
   write('web/src/a.ts', 'export const a = 7;\n');
   const r = run(repo, closed(repo));
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PRE-REVIEW: 7 of 7 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
+  assert.match(r.stdout, /^PRE-REVIEW: 8 of 8 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
   assert.match(r.stdout, /\n {2}– ticket lines: skipped \(no --lines\)\n {2}– test labels: skipped \(no --check\)\n {2}– size growth: skipped \(no --was\)/);
   const all = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md', was: 'small', places: 'p.md' });
   assert.deepEqual(all.skipped, [], 'every option given: nothing skipped');

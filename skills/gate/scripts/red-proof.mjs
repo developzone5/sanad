@@ -35,6 +35,10 @@
 //     nothing is BREAK INVALID.
 //   - A mustFail part whose words are in the title of a test this change added AND of an older test is
 //     BREAK AMBIGUOUS (2026-11-14): refused before any run, exit 2. A part may name older tests alone.
+//   - A new "nothing happens" check (check-test-asserts.mjs) in a test file this command runs, where no break
+//     names a test, is UNPROVEN: refused before any run, exit 2 (2026-11-15). Pre-review counts such a check
+//     only from a break run that caught a break naming a test in its own file; the old code never counts.
+//     --old with no --breaks is refused the same way; one --break is not checked (see the refusal in main).
 //   - --files may not name a test file; product files left out of it are named in a WARNING.
 //   - --log is emptied when the run starts and written however it ends; its first line names the tree.
 //
@@ -55,6 +59,7 @@
 //   The find text may be written with LF or CRLF line endings; it matches either.
 // --old with a fix file that only adds lines, and adds names the tests use (a new message, a new
 // constant): that file stays at the fix for the old-code run, so the old code compiles; the run says so.
+// The tests are read as code: a name only a comment or a string's text holds is not a use (2026-11-15).
 // --warm: at the task's start, the kept copies (below) are brought to the tree and built once.
 // A passing --breaks run records, under its command and folder, the changed test files that hold a test
 // a caught break named, and the files its breaks changed (see proof-record.mjs); pre-review's test check
@@ -105,9 +110,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { canonicalTop, changedTestFiles, declaredTests, defaultBase, recordKey, testFileHashes, writeEntry } from './proof-record.mjs';
+import { canonicalTop, changedTestFiles, declaredTests, defaultBase, provenTestFiles, readRecord, recordKey, testFileHashes, writeEntry } from './proof-record.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
+import { newLines, nothingChecks } from './new-lines.mjs';
+import { codeLines, codeOnly } from './size-check.mjs';
 import { isMain } from './is-main.mjs';
+import { keepRunRecord } from './run-record.mjs';
 
 // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
 // missing element, a type, reference or build error, or a timeout means the test itself (or the
@@ -353,7 +361,8 @@ export function displayNames(text) {
 // only added the new error message; the old code could not compile against the new tests, SETUP, and the
 // whole proof ran again). Such a file stays at the fixed version for the old-code run: its new names exist,
 // and every line the old code had is the same. A name counts when it is declared in an added line (`Name =`,
-// `Name(`, `Name {`, or `Name:` in a script file), not in the old file, and a whole word in the test files.
+// `Name(`, `Name {`, or `Name:` in a script file), not in the old file, and a whole word in the test files'
+// code (`testText` as testCode reads it).
 export function addedNames(diff, oldText, testText, file = '') {
   const lines = String(diff).split(/\r?\n/);
   if (lines.some(l => l.startsWith('-') && !l.startsWith('---'))) return []; // it changes or removes lines: it may hold the fix
@@ -370,6 +379,25 @@ export function addedNames(diff, oldText, testText, file = '') {
     }
   }
   return [...names];
+}
+
+// A test file as code only (2026-11-15: a comment, `// … (QuestionService.PictureNotAllowedMessage).`, kept a fix
+// file at the fix for the old-code run; it called a helper of another file that went back, and the old code did
+// not compile: SETUP). Comments (//, ///, /* */) and the text of strings are left out (size-check.mjs codeLines and
+// codeOnly): a name there is no compile-time use. The code inside an interpolated string stays: `${X}` in a
+// template, {X} in a C# $"…" string. A test file without // comments (Python) is read whole.
+export function testCode(text, file = '') {
+  const src = String(text);
+  if (!/\.(?:cs|[cm]?[jt]sx?|go)$/i.test(file)) return src;
+  const code = codeLines(src);
+  const cs = /\.cs$/i.test(file);
+  return src.split(/\r?\n/).map((line, i) => (code[i] ? [codeOnly(line), ...interpolated(line, cs)].join(' ') : '')).join('\n');
+}
+// The code inside one line's interpolated strings.
+function interpolated(line, cs) {
+  if (!cs) return [...line.matchAll(/\$\{([^{}]*)\}/g)].map(m => m[1]);
+  const at = line.search(/\$@?"|@\$"/);
+  return at < 0 ? [] : [...line.slice(at).matchAll(/(?<!\{)\{(?!\{)([^{}]+)\}/g)].map(m => m[1]);
 }
 
 // The KEY=VALUE lines of an env file. `bad` holds the numbers of the lines that are not, never their
@@ -418,6 +446,26 @@ export function proofScripts(dir) {
 // A `dotnet` command: its executable is dotnet or dotnet.exe, by any path.
 export function isDotnetCommand(command) {
   return /^dotnet(?:\.exe)?$/i.test(String(command[0] || '').split(/[\\/]/).pop());
+}
+
+// The changed test files a test command runs (2026-11-15). A dotnet command runs the C#, F# and VB tests and any
+// other command the rest, so the server proof and the page proof of one task each answer for their own files.
+// A command that runs in a subfolder of the repository (`cwd`, as --cwd gives it) runs the test files under it.
+// When the command's own words name some of them (a file or folder path; for dotnet also a test class by its
+// file's name, as a --filter does), only those: one side may be proved by two commands, each its own record entry.
+export function proofScope(command, files, cwd = '') {
+  const dotnet = isDotnetCommand(command);
+  const fold = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+  const under = fold(String(cwd).replace(/\\/g, '/').replace(/^(?:\.\/)+|\/+$/g, ''));
+  const inCwd = (f) => !under || under === '.' || under === '..' || under.startsWith('../') || fold(f).startsWith(under + '/');
+  const mine = files.filter(f => /\.(?:cs|fs|vb)$/i.test(f) === dotnet && inCwd(f));
+  const words = command.slice(1).map(a => String(a).replace(/\\/g, '/'))
+    .map(a => (a.startsWith('-') ? a.slice(a.indexOf('=') + 1 || a.length) : a).replace(/^(?:\.\/)+|\/+$/g, '')).filter(Boolean);
+  const paths = words.filter(a => a.includes('/') || /\.\w+$/.test(a));
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const named = mine.filter(f => paths.some(a => ('/' + f).endsWith('/' + a) || ('/' + a).endsWith('/' + f) || ('/' + f).includes('/' + a + '/')) ||
+    (dotnet && words.some(a => new RegExp(`(?<![\\w$])${esc(path.posix.basename(f).replace(/\.\w+$/, ''))}(?![\\w$])`).test(a))));
+  return named.length ? named : mine;
 }
 
 // The environment of a dotnet run in a kept copy (2026-11-13). The SDK writes the commit id into every
@@ -510,6 +558,12 @@ async function main() {
     const body = state.remoteLog != null ? state.remoteLog : said.join('\n') + '\n\n' + state.logs.join('\n');
     try { fs.writeFileSync(state.logPath, state.head + '\n' + body); } catch { /* the output above stands */ }
   });
+  // The run record the stop hook reads (run-record.mjs, 2026-11-15): a green run's result, kept when its output
+  // went to a file. Written on exit, after the handler above put any swapped file back. The test machine's plan
+  // run leaves it to the machine that asked.
+  if (repo && !plan && opts.includes('--then-green')) {
+    keepRunRecord({ argv: process.argv.slice(2), said: state.said, tree: () => treeId(repo), startTree: (/^RED-PROOF-LOG: tree ([0-9a-f]{40,64}) /.exec(state.head) || [])[1] });
+  }
   // Puts the swapped file back; false (with the reason said) when that fails.
   function putBack() {
     const dir = swapped;
@@ -659,10 +713,44 @@ async function main() {
       process.exit(2);
     }
   }
+  // A new "nothing happens" check this proof would leave unproven stops here too, before the test machine, the
+  // compile check or any copy (2026-11-15: one test file's checks were proven only by the old-code run; after a
+  // full PROVED proof pre-review said UNPROVEN ×6, and the whole proof ran again with one more break). Pre-review
+  // (check-test-asserts.mjs) counts such a check only when a current record entry holds its test file, and an entry
+  // holds the files with a test a caught break named (caughtTestFiles). So the lines it would refuse are the new
+  // "nothing happens" lines (newLines and nothingChecks of new-lines.mjs, which it reads too) in the test files this command runs (proofScope),
+  // less the files this run's breaks will credit and those another entry proves as they are now. A run with
+  // --breaks replaces its own entry (same command and folder), so that entry does not count; --old alone leaves
+  // the record as it is, so with such checks unproven it is refused the same way, and a file an earlier break run
+  // of this command proved still counts. One --break is not checked: it is for a test of code that already works
+  // and never writes the record. Any git or read error skips the check, so it never refuses by mistake.
+  if (!plan && testFiles?.length && (hasOld || breaks.some(b => !b.single))) {
+    let unproven = [];
+    try {
+      const parts = breaks.filter(b => !b.single).flatMap(b => b.mustFail.map(String));
+      const credited = new Set(parts.length ? caughtTestFiles(testFiles, parts, textAt) : []);
+      const entries = readRecord(repo);
+      const cwdRel = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
+      if (entries && parts.length) delete entries.entries[recordKey(command, cwdRel)];
+      const proven = provenTestFiles(repo, entries);
+      const scope = new Set(proofScope(command, testFiles, cwdRel));
+      unproven = nothingChecks(newLines(repo, base) || []).filter(l => scope.has(l.file) && !credited.has(l.file) && !proven.has(l.file));
+    } catch { unproven = []; }
+    if (unproven.length) {
+      const byFile = new Map();
+      for (const l of unproven) byFile.set(l.file, [...(byFile.get(l.file) || []), l]);
+      for (const [file, lines] of byFile) {
+        say(`  UNPROVEN ✗ ${file}: ${lines.length} new "nothing happens" check(s), and no break here names a test in this file`);
+        for (const l of lines.slice(0, 3)) say(`    ${file}:${l.line} — ${l.text.trim().slice(0, 160)}`);
+      }
+      say('RED-PROOF: NOT PROVED ✗ — pre-review counts a new "nothing happens" check only when a --breaks run caught a break whose mustFail names a test in that check\'s own file. Add a break whose mustFail names a test in each file above (a run on the old code does not count for these lines). Nothing ran; files untouched.');
+      process.exit(2);
+    }
+  }
   // Fix files that only add names the tests use stay at the fixed version for the old-code run (addedNames).
   const keptAtFix = [];
   if (oldRef && !plan && testFiles?.length) {
-    const testText = testFiles.map(f => { try { return fs.readFileSync(path.join(repo, f), 'utf8'); } catch { return ''; } }).join('\n');
+    const testText = testFiles.map(f => { try { return testCode(fs.readFileSync(path.join(repo, f), 'utf8'), f); } catch { return ''; } }).join('\n');
     for (const f of oldFiles) {
       let oldText = '', diff = '';
       try { oldText = git('show', `${oldRef}:${f}`).toString('utf8'); } catch { /* a new file: every line is added */ }

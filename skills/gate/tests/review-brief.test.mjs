@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildBrief, buildFreshBrief, buildLaunch, outsideItems, splitOutside, checkLines, decidedItems, checkSources, coverageProblems, chooseSize, sizeFacts } from '../scripts/review-brief.mjs';
+import { buildBrief, buildFreshBrief, buildLaunch, outsideItems, splitOutside, checkLines, decidedItems, checkSources, coverageProblems, chooseSize, sizeFacts, riskFiles, signalFiles } from '../scripts/review-brief.mjs';
 
 // 2026-11-08 (user: "check lines should comes from all tickets"): every ticket line has a Check line,
 // every Check line names its source, and cases outside the ticket are EXTRA TEST lines for the user.
@@ -115,6 +115,7 @@ test('launch lines name the briefs exactly: the fresh brief for both fresh-eyes 
   assert.match(launch, /Test designer[\s\S]*The task's brief: C:\/n\/brief\.md/);
   assert.match(launch, /FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
   assert.match(launch, /whole-diff pass\. Read and follow the brief at C:\/n\/brief\.md/);
+  assert.match(launch, /risk files pass \(Pass A\)\. Read and follow the brief at C:\/n\/brief\.md/);
   assert.match(launch, /codex exec -s read-only[\s\S]*brief at C:\/n\/brief-fresh\.md/);
 });
 
@@ -228,10 +229,95 @@ test('a medium change gets one review, the Claude fresh eyes with the full brief
     assert.doesNotMatch(one, /Fill the coverage checklist|whole-diff pass|codex exec/, size + ' keeps the focused review');
   }
   const big = buildLaunch({ ...args, size: 'big' });
-  assert.deepEqual(reviewers(big).map(l => l.split('. ')[0]), ['You are the independent reviewer — FRESH EYES whole-PR review', 'You are the independent reviewer — whole-diff pass']);
+  // 2026-11-15: a big change also gets the risk-files reviewer, right after the Claude fresh eyes.
+  assert.deepEqual(reviewers(big).map(l => l.split('. ')[0]), ['You are the independent reviewer — FRESH EYES whole-PR review', 'You are the independent reviewer — risk files pass (Pass A)', 'You are the independent reviewer — whole-diff pass']);
   assert.match(big, /codex exec -s read-only/);
   assert.doesNotMatch(reviewers(big)[0], /Fill the coverage checklist/, 'big: the fresh eyes line is unchanged');
   assert.doesNotMatch(big, /A medium change|A tiny or small change/);
+});
+
+// 2026-11-15: loop.md and CLAUDE.md give a Big change a risk reviewer on the risk files with a trace list, and
+// launch.md had no such line: the author typed its prompt by hand. The Test designer's area was a placeholder.
+const riskArgs = { brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b' };
+const riskChanged = [{ name: 'Api/Controllers/FilesController.cs' }, { name: 'Api/Services/Storage.cs', untracked: true }, { name: 'web/src/Page.tsx' }, { name: 'Api.Tests/FilesControllerTests.cs' }];
+const riskFacts = { stack: '', size: 'SIZE: big (diff) — server access rules (FilesController.cs); server file or URL handling (FilesController.cs, Storage.cs)', callers: '', signals: { access: ['FilesController.cs'], files: ['FilesController.cs', 'Storage.cs'] } };
+const riskBlock = launch => launch.split('## Risk files (Claude) — Agent independent-reviewer, run_in_background\n\n')[1].split('\n\n')[0];
+const ACCESS_Q = 'Can a caller without the right role, school/tenant or ownership read or change data through any changed path? Trace anonymous, wrong role, and a signed-in user who does not own the row.';
+const FILES_Q = 'Can a caller-supplied key, path, id or URL reach a stored object or URL it does not own (every spelling the code normalizes: encoded, relative, absolute, doubled prefixes, dot segments)?';
+const CLOSING_Q = 'Does a refused or failed request leave any row half-written, or leak an internal value (a key, a signature, whether an object exists)?';
+
+test('a big change adds the risk-files reviewer after the Claude fresh eyes: repo paths, one question per signal, the closing question', () => {
+  const launch = buildLaunch({ ...riskArgs, size: 'big', facts: riskFacts, changed: riskChanged });
+  assert.deepEqual(launch.split(/^## /m).slice(1).map(s => s.split('\n')[0]), ['Test designer — Agent braintrust-expert-sonnet, run_in_background',
+    'Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', 'Risk files (Claude) — Agent independent-reviewer, run_in_background',
+    'Whole diff (Claude) — Agent routine-reviewer, run_in_background', 'Fresh eyes (Codex) — Bash, run_in_background']);
+  const risk = riskBlock(launch);
+  assert.ok(risk.startsWith('You are the independent reviewer — risk files pass (Pass A). Read and follow the brief at C:/n/brief.md, including its Rules section. Do not open any other file in that folder.'), risk);
+  // The stop and push guards count a reviewer run by this start (hooks/lib/transcript-scan.js, REVIEWER_PROMPT).
+  assert.match(risk, /^\s*You are the independent reviewer\b/i);
+  assert.match(risk, /Read-only: no builds, no tests, no edits\./);
+  assert.match(risk, /^- Api\/Controllers\/FilesController\.cs — server access rules; server file or URL handling$/m);
+  assert.match(risk, /^- Api\/Services\/Storage\.cs — server file or URL handling \(new, not in git yet: read the whole file — `git diff` does not show it\)$/m);
+  assert.doesNotMatch(risk, /Page\.tsx|FilesControllerTests/, 'only the files the size check names');
+  assert.deepEqual(risk.split('\nTrace list:\n')[1].split('\n'), [`1. ${ACCESS_Q}`, `2. ${FILES_Q}`, `3. ${CLOSING_Q}`]);
+  // The Test designer's area: every changed file, code first, then the changed tests.
+  assert.match(launch, /Area: the changed files Api\/Controllers\/FilesController\.cs, Api\/Services\/Storage\.cs, web\/src\/Page\.tsx; the changed tests Api\.Tests\/FilesControllerTests\.cs\. Deliver per your guide\./);
+  assert.doesNotMatch(launch, /author fills/);
+});
+
+test('a tiny, small or medium change gets no risk-files line and no designer, whatever the size check named', () => {
+  for (const size of ['tiny', 'small', 'medium']) {
+    const plain = buildLaunch({ ...riskArgs, size });
+    assert.equal(buildLaunch({ ...riskArgs, size, facts: riskFacts, changed: riskChanged }), plain, size);
+    assert.doesNotMatch(plain, /Risk files|risk files pass|Area:/, size);
+  }
+});
+
+test('a big change with no risk file named puts every changed file that is not a test in scope and asks every question', () => {
+  const unknown = riskBlock(buildLaunch({ ...riskArgs, size: 'big', facts: { stack: '', size: '', callers: '', failed: 'x', signals: null }, changed: riskChanged }));
+  assert.match(unknown, /\nRisk files \(the size check gave no signals: every changed file that is not a test\):\n- Api\/Controllers\/FilesController\.cs\n- Api\/Services\/Storage\.cs \(new, not in git yet[^\n]*\n- web\/src\/Page\.tsx\nTrace list \(the size check gave no signals: answer each question that applies; n\/a for the rest\):\n1\. /);
+  const questions = unknown.split(/\nTrace list[^\n]*\n/)[1].split('\n');
+  assert.equal(questions.length, 16, 'fifteen signal questions and the closing one');
+  assert.ok(questions.includes(`1. ${ACCESS_Q}`) && questions.some(q => q.endsWith(FILES_Q)));
+  assert.equal(questions[questions.length - 1], `16. ${CLOSING_Q}`);
+  // Routed big, measured with no risk signal: the same, with its own reason.
+  assert.match(riskBlock(buildLaunch({ ...riskArgs, size: 'big', facts: { ...riskFacts, signals: { clientState: ['Page.tsx'] } }, changed: riskChanged })), /\nRisk files \(the size check named no risk file: every changed file that is not a test\):\n/);
+  const empty = buildLaunch({ ...riskArgs, size: 'big', facts: riskFacts, changed: [] });
+  assert.match(riskBlock(empty), /^- FilesController\.cs — server access rules; server file or URL handling$/m, 'a name no changed file has stays as the check gave it');
+  assert.match(riskBlock(buildLaunch({ ...riskArgs, size: 'big' })), /\n- none yet: the files in the brief's Changed files section\n/);
+  assert.match(empty, /Area: no changed file yet: the places on the brief's places list\. Deliver per your guide\./);
+});
+
+test('risk files: a base name two changed files share names both; a function with many callers names its file; the split and client state name none', () => {
+  const changed = [{ name: 'a/Service.cs' }, { name: 'b/Service.cs' }, { name: 'src/Rules.cs' }];
+  assert.deepEqual(riskFiles({ money: ['Gone.cs'], access: ['Service.cs'] }, changed).map(f => f.name), ['a/Service.cs', 'b/Service.cs', 'Gone.cs']);
+  const signals = signalFiles({ signals: { callersMany: ['Apply ×18'], split: ['31 code files, 500 lines'], clientState: ['Page.tsx'] },
+    callers: [{ name: 'Apply', file: 'src/Rules.cs', count: 18 }, { name: 'Other', file: 'src/O.cs', count: 2 }] });
+  assert.deepEqual(signals, { callersMany: ['src/Rules.cs'], split: [], clientState: ['Page.tsx'] });
+  assert.deepEqual(riskFiles(signals, changed).map(f => [f.name, f.labels.join('; ')]), [['src/Rules.cs', 'a changed function with more than 10 callers']]);
+});
+
+test('the command gives a big change its risk-files line from the size check, as repo paths', () => {
+  const repo = fs.mkdtempSync(path.join(root, 'repo-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid');
+  fs.mkdirSync(path.join(repo, 'Api/Controllers'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'Api/Controllers/FilesController.cs'), 'public class FilesController\n{\n    public int Upload(int file) => 1;\n}\n');
+  git('add', '-A'); git('commit', '-qm', 'base'); git('switch', '-q', '-c', 'fix/r');
+  fs.writeFileSync(path.join(repo, 'Api/Controllers/FilesController.cs'), 'public class FilesController\n{\n    [Authorize(Roles = "Admin")]\n    public int Upload(IFormFile file) => 1;\n}\n');
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
+  fs.writeFileSync(ticket, 'only admins upload\n'); fs.writeFileSync(lines, '- only admins upload\n'); fs.writeFileSync(check, '- [T1] only admins upload\n');
+  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'),
+    '--places', placesFor(repo, 'Upload', 'C1')], { encoding: 'utf8', env, windowsHide: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(fs.readFileSync(out, 'utf8'), /^SIZE: big \(diff\) — server access rules \(FilesController\.cs\); server file or URL handling \(FilesController\.cs\)$/m, 'the brief keeps the size check\'s own text line');
+  const launch = fs.readFileSync(path.join(notes, 'launch.md'), 'utf8');
+  const risk = riskBlock(launch);
+  assert.match(risk, /^You are the independent reviewer — risk files pass \(Pass A\)\. Read and follow the brief at .*\/brief\.md, including its Rules section\./);
+  assert.match(risk, /^- Api\/Controllers\/FilesController\.cs — server access rules; server file or URL handling$/m);
+  assert.deepEqual(risk.split('\nTrace list:\n')[1].split('\n'), [`1. ${ACCESS_Q}`, `2. ${FILES_Q}`, `3. ${CLOSING_Q}`]);
+  assert.match(launch, /Area: the changed files Api\/Controllers\/FilesController\.cs\. Deliver per your guide\./);
 });
 
 test('the command gives a change measured medium one review, with the full brief', () => {
@@ -371,5 +457,6 @@ test('a failed size check is named in the brief', () => {
   fs.writeFileSync(crash, "process.stderr.write('SIZE: fatal: Not a valid object name main\\nUsage: x\\n'); process.exit(2);\n");
   fs.writeFileSync(slow, 'setTimeout(() => {}, 20000);\n');
   assert.equal(sizeFacts(dir, 'main', { script: crash }).failed, 'fatal: Not a valid object name main');
+  assert.equal(sizeFacts(dir, 'main', { script: crash }).signals, null, 'no answer, no signals: launch.md then asks every question');
   assert.match(sizeFacts(dir, 'main', { script: slow, timeout: 700 }).failed, /^timed out after \d+ s$/);
 });

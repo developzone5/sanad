@@ -34,6 +34,9 @@ function fixture() {
 // The fixtures must not see this machine's git settings (a test machine there sends runs away).
 const emptyConfig = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'red-proof-git-')), 'config');
 fs.writeFileSync(emptyConfig, ['[user]', '\tname = Fixture', '\temail = fixture@example.invalid', ''].join('\n'));
+// Proof and run records go to a temp state folder, never the live ~/.claude/state (2026-11-15: a --then-green run
+// now leaves a run record; breakFixture below still gives its proofs a folder of their own).
+process.env.SANAD_STATE_DIR ??= fs.mkdtempSync(path.join(os.tmpdir(), 'red-proof-state-'));
 // A proof that hangs is stopped here after 2 minutes, so a hang fails the test instead of the suite.
 const run = (args, env = {}) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', windowsHide: true, timeout: 120000, env: { ...process.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: '1', ...env } });
 
@@ -724,7 +727,7 @@ test('a fix file that only adds names the tests use stays at the fix for the old
   git('add', 'names.cjs'); git('commit', '-qm', 'names');
   fs.writeFileSync(path.join(repo, 'names.cjs'), 'module.exports = {\n  OLD_NAME: 1,\n  NEW_NAME: 2,\n};\n');
   fs.mkdirSync(path.join(repo, 'src'));
-  fs.writeFileSync(path.join(repo, 'src', 'a.test.cjs'), '// expects NEW_NAME\n');
+  fs.writeFileSync(path.join(repo, 'src', 'a.test.cjs'), "it('reads the new name', () => expect(require('../names.cjs').NEW_NAME).toBe(2));\n");
   fs.writeFileSync(path.join(repo, 'check.cjs'), [
     'if (require("./names.cjs").NEW_NAME === undefined) { console.log("Build FAILED.\\nA.cs(3,1): error CS0117: \'Names\' does not contain a definition for \'NEW_NAME\'"); process.exit(1); }',
     'if (require("./app.cjs") !== 2) { console.log(" FAIL  src/a.test.cjs > fix > is applied\\nAssertionError: expected 1 to be 2"); process.exit(1); }',
@@ -752,6 +755,52 @@ test('a fix file that only adds names the tests use stays at the fix for the old
   assert.equal(remote.status, 1, remote.stdout);
   assert.match(remote.stdout, /NOT RED ✗/);
   assert.match(remote.stdout, /names\.cjs stayed at the fix \(see above\)/);
+});
+
+// 2026-11-15: the proof kept QuestionService.cs at the fix because a test COMMENT named its new constant
+// (`// … (QuestionService.PictureNotAllowedMessage).`); that file called a helper of another file that went back,
+// so the old code did not compile (SETUP) and the proof ran again. The tests are now read as code.
+test('the tests are read as code: comments and a string\'s text are no use of a name; interpolated code is', async () => {
+  const { testCode, addedNames } = await import('../scripts/red-proof.mjs');
+  const cs = testCode([
+    '    // The refusal every save path answers with (QuestionService.PictureNotAllowedMessage).',
+    '    /// <summary>QuestionService.DocName</summary>',
+    '    /*', '     * QuestionService.BlockName', '     */',
+    '    [Fact(DisplayName = "TitleName is refused")]',
+    '    result.Error.Should().Be(QuestionService.RealUse); // QuestionService.TrailName',
+    '    act.Should().Throw<X>().WithMessage($"*{QuestionService.HoleName}*");',
+  ].join('\n'), 'Tests/QuestionServiceTests.cs');
+  for (const n of ['PictureNotAllowedMessage', 'DocName', 'BlockName', 'TitleName', 'TrailName']) assert.doesNotMatch(cs, new RegExp(n), n + ' is in a comment or a string');
+  for (const n of ['RealUse', 'HoleName']) assert.match(cs, new RegExp(n), n + ' is code');
+  const ts = testCode(["// uses Messages.CommentName", "it('shows TitleName', () => {", "  expect(x).toBe(`${Messages.TemplateName} saved`); /* Messages.BlockName */",
+    "  {/* Messages.JsxName */}", "  expect(Messages.RealName).toBe(1);", "});"].join('\n'), 'src/a.test.tsx');
+  for (const n of ['CommentName', 'TitleName', 'BlockName', 'JsxName']) assert.doesNotMatch(ts, new RegExp(n), n);
+  for (const n of ['TemplateName', 'RealName']) assert.match(ts, new RegExp(n), n);
+  assert.equal(testCode('# PyName\n', 'tests/test_a.py'), '# PyName\n', 'a file without // comments is read whole');
+  const decl = '+    public const string PictureNotAllowedMessage = "…";';
+  assert.deepEqual(addedNames(['@@ -10,0 +11 @@', decl].join('\n'), 'class QuestionService { }', testCode('// (QuestionService.PictureNotAllowedMessage)\n', 'Tests/QTests.cs'), 'QuestionService.cs'), []);
+});
+
+test('a fix file whose new name only a test comment, block comment or title holds goes back with the others; a use in code keeps it', () => {
+  const { repo, git } = fixture();
+  fs.writeFileSync(path.join(repo, 'names.cjs'), 'module.exports = {\n  OLD_NAME: 1,\n};\n');
+  git('add', 'names.cjs'); git('commit', '-qm', 'names');
+  fs.writeFileSync(path.join(repo, 'names.cjs'), 'module.exports = {\n  OLD_NAME: 1,\n  NEW_NAME: 2,\n};\n');
+  fs.mkdirSync(path.join(repo, 'src'));
+  const testFile = path.join(repo, 'src', 'a.test.cjs');
+  fs.writeFileSync(testFile, ["// The answer every save path gives (names.NEW_NAME).", "/* NEW_NAME */", "it('NEW_NAME is shown', () => expect(require('../app.cjs')).toBe(2));", ''].join('\n'));
+  const before = fs.readFileSync(path.join(repo, 'names.cjs'));
+  const free = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs,names.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(free.status, 0, free.stdout);
+  assert.doesNotMatch(free.stdout, /stays at the fix/);
+  assert.match(free.stdout, /RED ✓ — the tests fail on HEAD for app\.cjs, names\.cjs \(/);
+  assert.deepEqual(fs.readFileSync(path.join(repo, 'names.cjs')), before);
+  // A real use in the test code still keeps it.
+  fs.appendFileSync(testFile, "it('reads it', () => expect(require('../names.cjs').NEW_NAME).toBe(2));\n");
+  const kept = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs,names.cjs', '--', process.execPath, 'check.cjs']);
+  assert.equal(kept.status, 0, kept.stdout);
+  assert.match(kept.stdout, /names\.cjs stays at the fix for the old-code run: it only adds lines, and the tests use its new names \(NEW_NAME\)/);
+  assert.match(kept.stdout, /RED ✓ — the tests fail on HEAD for app\.cjs \(/);
 });
 
 // 2026-11-10: the first proof of a task found its copies cold; each run built the whole solution.

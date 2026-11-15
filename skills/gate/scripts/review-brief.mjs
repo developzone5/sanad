@@ -9,10 +9,12 @@
 //                  known items and the rules, and no other author text (no Check lines, no callers, no
 //                  proof result). 2026-11-12 (user: the workflow must not depend on a list of old bugs):
 //                  the missed-bug classes left this brief; --missed is accepted and ignored.
-//   launch.md      the exact launch lines for the designer and the reviewers, next to <out>: three
-//                  reviewers on a big change (or a size not known); on a tiny, small or medium change only
-//                  the Claude fresh eyes (tiny and small 2026-11-11; medium 2026-11-12, user-approved sizes).
-//                  A medium change keeps the full brief, and its one review gets the checklist sentence.
+//   launch.md      the exact launch lines for the designer and the reviewers, next to <out>: four
+//                  reviewers on a big change (or a size not known): the Claude fresh eyes, the risk files
+//                  with their trace list, the whole diff and the Codex fresh eyes (the risk files 2026-11-15);
+//                  on a tiny, small or medium change only the Claude fresh eyes (tiny and small 2026-11-11;
+//                  medium 2026-11-12, user-approved sizes). A medium change keeps the full brief, and its one
+//                  review gets the checklist sentence.
 //
 // 2026-11-07: a brief copied by hand from the last round lacked the newest rule; the designer got
 // other lines than the reviewers; launch prompts drifted between rounds; the diff named a moving
@@ -50,13 +52,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readLines } from './check-ticket-lines.mjs';
+import { readLines, TEST_FILE } from './check-ticket-lines.mjs';
 import { treeId } from './red-proof.mjs';
 import { refreshPlaces, checkPlaces, placeLine } from './places.mjs';
+// The size check still runs as a child process (sizeFacts: a timeout ends it); its sizes, signal labels and
+// text form come from the module itself, which places.mjs loads anyway.
+import { SIZES, SIGNALS, format } from './size-check.mjs';
 import { isMain } from './is-main.mjs';
-
-// The sizes in order, as size-check.mjs names them (kept here: that script runs as a child process).
-const SIZES = ['tiny', 'small', 'medium', 'big'];
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -141,19 +143,35 @@ export function checkLines(text) {
 
 // The size check's lines that the brief carries: stack, size and callers. A crash or a timeout is `failed`
 // (its first error line), so the brief says SIZE CHECK FAILED (2026-11-12: it said "Callers: none yet").
+// 2026-11-15: it runs with --json, and `signals` keeps each signal's files for the risk-files line of
+// launch.md (that reviewer's prompt was typed by hand); the text lines are the check's own format() of the
+// same answer. Output that is not its JSON is read as text, with no signals (null).
 export function sizeFacts(repo, base, { script = path.join(here, 'size-check.mjs'), timeout = 60000 } = {}) {
   let out = '', failed = '';
-  try { out = execFileSync(process.execPath, [script, '--repo', repo, '--base', base], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout }); }
+  try { out = execFileSync(process.execPath, [script, '--repo', repo, '--base', base, '--json'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], timeout }); }
   catch (e) {
     out = String(e.stdout || '');
     const errLines = String(e.stderr || e.message || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     failed = e.code === 'ETIMEDOUT' ? `timed out after ${Math.round(timeout / 1000)} s`
       : (errLines.find(l => /^(?:SIZE: |\w*Error\b)/.test(l)) || errLines[0] || 'exit ' + e.status).replace(/^SIZE:\s*/, '');
   }
-  const line = re => (out.split(/\r?\n/).find(l => re.test(l)) || '').trim();
+  let text = out, signals = null;
+  try { const r = JSON.parse(out); text = format(r); signals = signalFiles(r); } catch { /* not its JSON: read as text */ }
+  const line = re => (text.split(/\r?\n/).find(l => re.test(l)) || '').trim();
   const size = line(/^SIZE/);
   if (!failed && !size) failed = 'no SIZE line in its output';
-  return { stack: line(/^Stack:/), size, callers: line(/^\s*callers:/).replace(/^callers:\s*/, ''), failed };
+  return { stack: line(/^Stack:/), size, callers: line(/^\s*callers:/).replace(/^callers:\s*/, ''), failed, signals };
+}
+
+// Each signal's files, as the size check's JSON names them: base names, at most three per signal; for a function
+// with many callers (evidence "name ×count") the file that defines it; none for the 400-line split.
+export function signalFiles(r) {
+  const files = {};
+  for (const [key, where] of Object.entries(r.signals)) {
+    files[key] = key === 'callersMany' ? r.callers.filter(c => where.includes(`${c.name} ×${c.count}`)).map(c => c.file)
+      : key === 'split' ? [] : where.map(String);
+  }
+  return files;
 }
 
 // The size the size check measured ('' when it failed or printed none).
@@ -171,7 +189,7 @@ export function chooseSize(facts, routed) {
   return { size, note: asked && measured && asked !== measured ? `size: routed ${asked}, measured ${measured} → using ${size}` : '' };
 }
 
-const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`; or "no findings" and what you checked. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any.';
+const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`; or "no findings" and what you checked. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any. Last, one line `ONE JOB: yes|no`: does this PR do more than one thing? A yes is also a `Question` finding that names the jobs (user rule 2026-11-15).';
 // Three standing rules. A new rule replaces one of these or becomes a script check.
 const RULES = [
   '- A `Question` is only for what the ticket lines above leave open: quote the line that leaves it open. A question those lines already answer (an "Expected" line, a rule row) is not listed; check the change against that answer instead.',
@@ -295,8 +313,80 @@ const ONE_REVIEW = {
   medium: '(A medium change: one review, with the full brief; user-approved sizes 2026-11-12.)',
 };
 
-// `size`: the size used (chooseSize); big or an unknown size gets the full round.
-export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '' }) {
+// The risk-files reviewer's trace list (2026-11-15: loop.md and CLAUDE.md give a Big change a risk reviewer on the
+// risk files with a trace list, and launch.md had no such line, so its prompt was typed by hand). One fixed
+// question per risk signal the size check names, in this order, then CLOSING. The client-state lens (the
+// whole-diff checklist covers it) and the 400-line split (it names no risk) have none.
+const TRACE = {
+  access: 'Can a caller without the right role, school/tenant or ownership read or change data through any changed path? Trace anonymous, wrong role, and a signed-in user who does not own the row.',
+  accessUi: 'Does the server refuse every action this screen hides or disables for a role, when the request is sent directly, without the screen?',
+  files: 'Can a caller-supplied key, path, id or URL reach a stored object or URL it does not own (every spelling the code normalizes: encoded, relative, absolute, doubled prefixes, dot segments)?',
+  filesUi: 'Does the server check every file name, type, size, key or URL the page sends, so a hand-made request cannot pass what the page would block?',
+  schema: 'Does the schema change apply to a database that already has rows, including rows that break the new rule (nulls, duplicates, too-long values), and apply again safely after it stopped part-way?',
+  query: 'Does the changed query return only the rows this caller may see, with no duplicates and a stable order across pages, and keep the same number of database calls as the rows grow?',
+  concurrency: 'What happens when the same request runs twice at once, or is retried after a timeout? Trace two callers on the same row: the result must be one correct write, never a lost or a double one.',
+  concurrencyUi: 'What happens with two tabs open, a timer that fires after the page closed or the user signed out, or an answer that arrives after the user moved on?',
+  money: 'Can an amount be negative, zero, rounded wrong, in another currency, or counted twice on a retry? Trace each amount from the input to the stored value.',
+  contract: 'Does every reader and sender of the changed request or response shape (the other half of the app, an older client, stored data) still use each field with the same name, type, empty value and meaning?',
+  serverEntry: 'Does every new server entry point check who the caller is and what they may do before it reads or writes, as the entry points beside it do?',
+  bothSides: 'Do the page and the server apply the same rule to the same cases? Trace one input the page allows and the server refuses, and one the other way round.',
+  dependency: 'Is the new or changed package the one intended (name, version, publisher), free of known High or Critical advisories, and is every use of its changed API updated?',
+  callersMany: 'For each caller of the changed function, is the result it relies on unchanged, for empty, missing and failing inputs too? Name every caller whose result changes.',
+  infra: 'Does the app still start with the new or changed setting missing, empty or wrong, and is each startup step safe to run again after a crash?',
+};
+const CLOSING = 'Does a refused or failed request leave any row half-written, or leak an internal value (a key, a signature, whether an object exists)?';
+
+// The risk files: each file the size check names for a signal on the trace list, as its repo path from the
+// changed files, with the labels of the signals that name it. The check names base names; one that two changed
+// files share names both, and one that no changed file has stays as it is.
+export function riskFiles(signals, changed = []) {
+  const files = new Map();
+  for (const key of Object.keys(TRACE)) {
+    for (const n of (signals && signals[key]) || []) {
+      const exact = changed.filter(f => f.name === n);
+      const hits = exact.length ? exact : changed.filter(f => path.posix.basename(f.name) === n);
+      for (const f of hits.length ? hits : [{ name: n }]) {
+        if (!files.has(f.name)) files.set(f.name, { name: f.name, untracked: !!f.untracked, labels: [] });
+        const labels = files.get(f.name).labels;
+        if (!labels.includes(SIGNALS[key].label)) labels.push(SIGNALS[key].label);
+      }
+    }
+  }
+  return [...files.values()];
+}
+
+// The risk-files launch line of a big change. With no file named (the size check failed, or the size was set
+// above what it measured), every changed file that is not a test is in scope, and every question is asked.
+function riskLaunch({ brief, facts, changed = [] }) {
+  const signals = facts && facts.signals;
+  const listed = riskFiles(signals, changed);
+  const named = Object.keys(TRACE).filter(k => signals && signals[k]);
+  const files = listed.length ? listed : changed.filter(f => !TEST_FILE.test(f.name)).map(f => ({ ...f, labels: [] }));
+  const why = !signals ? 'the size check gave no signals' : 'the size check named no risk file';
+  return [
+    '## Risk files (Claude) — Agent independent-reviewer, run_in_background', '',
+    `You are the independent reviewer — risk files pass (Pass A). Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. Review the risk files below with their callers and writers: answer each trace question for each file by following real inputs through the changed code. Read-only: no builds, no tests, no edits.`,
+    listed.length ? 'Risk files (the size check names at most three per signal: another changed file on the same boundary is in scope too):'
+      : `Risk files (${why}: every changed file that is not a test):`,
+    ...(files.length ? files.map(f => `- ${f.name}${f.labels.length ? ' — ' + f.labels.join('; ') : ''}${f.untracked ? ' ' + NEW_FILE : ''}`) : ["- none yet: the files in the brief's Changed files section"]),
+    named.length ? 'Trace list:' : `Trace list (${why}: answer each question that applies; n/a for the rest):`,
+    ...[...(named.length ? named : Object.keys(TRACE)).map(k => TRACE[k]), CLOSING].map((q, i) => `${i + 1}. ${q}`),
+    '',
+  ];
+}
+
+// The Test designer's area: every changed file, code first, then the changed tests (2026-11-15: the line held an
+// "author fills" placeholder).
+function areaLine(changed = []) {
+  const code = changed.filter(f => !TEST_FILE.test(f.name)).map(f => f.name), tests = changed.filter(f => TEST_FILE.test(f.name)).map(f => f.name);
+  if (!changed.length) return "Area: no changed file yet: the places on the brief's places list.";
+  return `Area: ${[code.length ? 'the changed files ' + code.join(', ') : '', tests.length ? 'the changed tests ' + tests.join(', ') : ''].filter(Boolean).join('; ')}.`;
+}
+
+// `size`: the size used (chooseSize); big or an unknown size gets the full round. `facts` (sizeFacts) gives the
+// risk files their signals; `changed` (the changed files, as the briefs list them) gives their repo paths and
+// the Test designer's area.
+export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '', facts = null, changed = [] }) {
   const one = ONE_REVIEW[size];
   return [
     '# Launch lines (copy as they are)', '',
@@ -304,10 +394,11 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
     // The Test designer is a Big-task seat (loop-rare-cases.md, the expert panel); a tiny, small or medium change
     // listed it too, and the line looked like a step to run (2026-11-13).
     ...(one ? [] : ['## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
-    `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. Area: <the files and the field or endpoint — author fills>. Deliver per your guide.`, '']),
+    `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. ${areaLine(changed)} Deliver per your guide.`, '']),
     '## Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', '',
     `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}Read-only: no builds, no tests, no edits.`, '',
     ...(one ? [one, ''] : [
+      ...riskLaunch({ brief, facts, changed }),
       '## Whole diff (Claude) — Agent routine-reviewer, run_in_background', '',
       `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${WHOLE_DIFF_FULL} Read-only: no builds, no tests, no edits.`, '',
       // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
@@ -368,7 +459,7 @@ if (isMain(import.meta.url)) {
     const chosen = chooseSize(facts, o.size);
     fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof, changed: changedFiles, places }));
     fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size: o.size, changed: changedFiles, places }));
-    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, size: chosen.size, sizeNote: chosen.note }));
+    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, size: chosen.size, sizeNote: chosen.note, facts, changed: changedFiles }));
     process.stdout.write((chosen.note ? chosen.note + '\n' : '') + (facts.failed ? `SIZE CHECK FAILED: ${facts.failed}\n` : '') +
       `BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.failed ? 'SIZE CHECK FAILED' : facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'} · ${changedFiles.length} changed file(s), ${changedFiles.length - tracked.length} new untracked · places: ${placesState ? `${placesState.count}, ${placesState.open.length} open` : 'none (text-only change)'}\n` +
       `FRESH: ${fresh}\nLAUNCH: ${launch}\n`);

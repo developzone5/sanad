@@ -285,6 +285,123 @@ test('plan mode sizes the planned files by their paths', () => {
   assert.equal(sizeTask({ repo, files: ['web/src/types/user.ts'] }).size, 'medium');
 });
 
+// 2026-11-15: a plan that removed four controller actions deleting stored objects by a client key read only the file
+// names and sized "small"; the same change measured on its diff sized "big". With --names (the places list names) the
+// plan reads each named function whole: the attributes above it, its signature and its body.
+const mediaController = [
+  'public class QuestionsController : ControllerBase',
+  '{',
+  '    private readonly IFileStorageService _fileStorage;',
+  '',
+  '    [HttpGet("{id:long}")]',
+  '    public IActionResult Get(long id)',
+  '    {',
+  '        return Ok(id);',
+  '    }',
+  '',
+  '    public int Pages(int rows, int perPage)',
+  '    {',
+  '        return (rows + perPage - 1) / perPage;',
+  '    }',
+  '',
+  '    // DELETE /api/questions/{id}/media',
+  '    [HttpDelete("{id:long}/media")]',
+  '    public async Task<IActionResult> DeleteQuestionMedia(',
+  '        long id,',
+  '        [FromQuery] string filePath',
+  '    )',
+  '    {',
+  '        var deleted = await _fileStorage.DeleteAsync(filePath);',
+  '        return deleted ? Ok() : NotFound();',
+  '    }',
+  '}',
+  '',
+].join('\n');
+const controllerPath = 'Api/Controllers/QuestionsController.cs';
+
+test('plan mode with --names: a named action that deletes a stored object by a client key is big, named file:Function', () => {
+  const repo = change({ [controllerPath]: mediaController }, {});
+  assert.equal(sizeTask({ repo, files: [controllerPath] }).size, 'small', 'by file name alone the plan sees no risk');
+  const r = sizeTask({ repo, files: [controllerPath], names: ['DeleteQuestionMedia'] });
+  assert.equal(r.size, 'big', JSON.stringify(r.signals));
+  assert.deepEqual(r.signals.files, ['QuestionsController.cs:DeleteQuestionMedia']);
+  assert.deepEqual(r.signals.contract, ['QuestionsController.cs:DeleteQuestionMedia'], 'its route attribute is read with it');
+  assert.deepEqual(r.read, ['QuestionsController.cs:DeleteQuestionMedia']);
+});
+
+test('plan mode with --names: a named action with [HttpDelete("{id}/media")] is the shared API contract', () => {
+  const ctl = [
+    'public class ThingsController : ControllerBase',
+    '{',
+    '    /// <summary>Removes the thing\'s media.</summary>',
+    '    [HttpDelete("{id}/media")]',
+    '    public IActionResult RemoveMedia(long id)',
+    '    {',
+    '        return NoContent();',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  const repo = change({ 'Api/Controllers/ThingsController.cs': ctl }, {});
+  const r = sizeTask({ repo, files: ['Api/Controllers/ThingsController.cs'], names: ['RemoveMedia'] });
+  assert.deepEqual(r.signals.contract, ['ThingsController.cs:RemoveMedia'], JSON.stringify(r.signals));
+  assert.equal(r.signals.files, undefined);
+  assert.equal(r.size, 'medium');
+});
+
+test('plan mode with --names: a named method that is pure arithmetic raises nothing; other members of its file are not read', () => {
+  const repo = change({ [controllerPath]: mediaController }, {});
+  const r = sizeTask({ repo, files: [controllerPath], names: ['Pages'] });
+  assert.deepEqual(Object.keys(r.signals), [], 'not the [HttpGet] of the action above it, not the storage call below it: ' + JSON.stringify(r.signals));
+  assert.equal(r.size, 'small');
+  assert.deepEqual(r.read, ['QuestionsController.cs:Pages']);
+});
+
+test('plan mode with --names: a TSX component that reads the URL adds the Client state checks; a sibling component does not', () => {
+  const page = [
+    "import { useSearchParams } from 'react-router-dom';",
+    '',
+    'export function QuestionList() {',
+    '  const [params] = useSearchParams();',
+    "  return <ul data-tab={params.get('tab')} />;",
+    '}',
+    '',
+    'export function Empty() {',
+    '  return <p>none</p>;',
+    '}',
+    '',
+  ].join('\n');
+  const repo = change({ 'web/src/pages/QuestionList.tsx': page }, {});
+  const r = sizeTask({ repo, files: ['web/src/pages/QuestionList.tsx'], names: ['QuestionList'] });
+  assert.deepEqual(r.signals.clientState, ['QuestionList.tsx:QuestionList'], JSON.stringify(r.signals));
+  assert.equal(r.size, 'small');
+  const sibling = sizeTask({ repo, files: ['web/src/pages/QuestionList.tsx'], names: ['Empty'] });
+  assert.equal(sibling.signals.clientState, undefined, 'the import line sits in no named function: ' + JSON.stringify(sibling.signals));
+});
+
+test('plan mode without --names sizes by name as before and prints the --names hint; with --names it prints what it read', () => {
+  const repo = change({ [controllerPath]: mediaController }, {});
+  const plain = spawnSync(process.execPath, [script, '--repo', repo, '--files', controllerPath], { encoding: 'utf8', env: process.env });
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.match(plain.stdout, /^SIZE: small \(plan\) — behavior code with no risk signal$/m, plain.stdout);
+  assert.match(plain.stdout, /^ {2}hint: pass --names <the places list names> so the plan reads the code it will change$/m);
+  const named = spawnSync(process.execPath, [script, '--repo', repo, '--files', controllerPath, '--names', 'DeleteQuestionMedia,QuestionImage'], { encoding: 'utf8', env: process.env });
+  assert.equal(named.status, 0, named.stderr);
+  assert.match(named.stdout, /^SIZE: big \(plan\) — .*server file or URL handling \(QuestionsController\.cs:DeleteQuestionMedia\)/m, named.stdout);
+  assert.doesNotMatch(named.stdout, /hint:/);
+  assert.match(named.stdout, /^ {2}read: QuestionsController\.cs:DeleteQuestionMedia$/m);
+  assert.match(named.stdout, /^ {2}not read \(no definition in the planned files\): QuestionImage$/m, 'a field name is listed, not silently dropped');
+});
+
+test('--names is a usage error with --base, and when it names nothing', () => {
+  const repo = change({ [controllerPath]: mediaController }, {});
+  const withBase = spawnSync(process.execPath, [script, '--repo', repo, '--base', 'base', '--names', 'DeleteQuestionMedia'], { encoding: 'utf8', env: process.env });
+  assert.equal(withBase.status, 2, withBase.stdout + withBase.stderr);
+  assert.match(withBase.stderr, /--names goes with --files/);
+  assert.match(withBase.stderr, /Usage: .*--names <n1,n2,\.\.\.>/);
+  assert.equal(spawnSync(process.execPath, [script, '--repo', repo, '--files', controllerPath, '--names', ' , '], { encoding: 'utf8', env: process.env }).status, 2);
+});
+
 test('uncommitted work counts; --was fails when the change grew, and usage errors exit 2', () => {
   const svc = 'public class S {\n  private readonly AppDbContext _context;\n  public object Get() { return _context.Items.ToList(); }\n}\n';
   const repo = change({ 'Api/S.cs': svc }, { 'Api/S.cs': svc.replace('.ToList()', '.Where(i => i.Active).ToList()') }, { commit: false });
@@ -448,6 +565,24 @@ test('i18n setup code is code; locale data under a locales folder is text', () =
   const text = size(change({ 'web/src/i18n/locales/en/actions.ts': "export default { save: 'Save' };\n", 'web/src/locales/ar/a.json': '{"a":"b"}\n', 'Api/Resources/messages.en.json': '{"a":"b"}\n' },
     { 'web/src/i18n/locales/en/actions.ts': "export default { save: 'Save it' };\n", 'web/src/locales/ar/a.json': '{"a":"c"}\n', 'Api/Resources/messages.en.json': '{"a":"c"}\n' }));
   assert.equal(text.size, 'tiny', JSON.stringify(text));
+});
+
+// User rule 2026-11-15 ("one job per PR"; "the risk size does not change"): a large change is a question
+// for the user (one-job.mjs), never a larger risk size; generated code is not counted toward it.
+test('over 400 logic lines is the one-job signal but keeps the risk size; generated files do not count', () => {
+  const many = (n, w) => Array.from({ length: n }, (_, i) => `export const ${w}${i} = ${i};`).join('\n') + '\n';
+  const big = size(change({ 'src/a.ts': 'export const a = 1;\n' }, { 'src/a.ts': many(450, 'a') }));
+  assert.ok(big.signals.split, JSON.stringify(big.signals));
+  assert.equal(big.size, 'small', 'the line count alone raises no risk size');
+  const generated = size(change({ 'src/a.ts': 'export const a = 1;\n' }, {
+    'src/a.ts': 'export const a = 2;\n',
+    'Api/Migrations/20261115_Add.Designer.cs': many(450, 'd'),
+    'Api/Forms/Main.Designer.cs': many(450, 'f'),
+    'Api/Obj/Thing.g.cs': many(450, 'g'),
+    'web/src/__generated__/types.ts': many(450, 't'),
+  }));
+  assert.equal(generated.signals.split, undefined, JSON.stringify(generated.signals));
+  assert.equal(generated.codeFiles, 1, 'only src/a.ts holds logic lines');
 });
 
 test('JSON fixtures, snapshots, SVG and binary files are not logic lines; renames and binaries are listed by name', () => {

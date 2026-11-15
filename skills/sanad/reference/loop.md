@@ -20,14 +20,16 @@ Loaded by the `sanad-implementation` stage. "Sanad Step N" anywhere means the st
 
 ## Size — the size check picks it
 
-Before code: `node <gate>/size-check.mjs --repo <repo> --files <planned files, comma-separated>`. It runs again on the real change inside `pre-review`. Size up freely; size down only on the user's verbatim words. `SIZE GREW` means: add what the larger size needs, now.
+Before code: `node <gate>/size-check.mjs --repo <repo> --files <planned files, comma-separated> --names <the places list names>`. With the names of the places list (Step 1, item 4) it reads each named function whole; without them, file names only. It runs again on the real change inside `pre-review`. Size up freely; size down only on the user's verbatim words. `SIZE GREW` means: add what the larger size needs, now.
 
 - **Small** — one side (page or server) and no risk signal. No experts, no waiting. One quick review, started right after the proof, so it runs while the user checks the browser. A slow suite is left to CI and the PR text says so. Target: 5–10 minutes.
 - **Medium** — both sides, a database query, the shared API contract, or another medium signal. A changed query is read by one Database seat before code. The proof, one full review, the full suite. Target: 20–30 minutes.
-- **Big** — access, money, a migration, concurrency, files or URLs, a dependency, a function with more than 10 callers, or more than 400 logic lines. The boss routes ([boss-routing.md](boss-routing.md)); experts plan first (`/braintrust`); then the full review round.
+- **Big** — access, money, a migration, concurrency, files or URLs, a dependency, or a function with more than 10 callers. The boss routes ([boss-routing.md](boss-routing.md)); experts plan first (`/braintrust`); then the full review round.
 - **Text only** (the check says tiny) — Small without rules 1 to 3: no list and no test. Lint, a look at the screen, one review.
 
 The size changes the depth only. The six rules are the same in every size.
+
+**One job per PR.** Over about 400 logic lines or 30 code files (tests, texts and generated files not counted), `pre-review` asks the user: split it, or keep it as one job? A keep: `one-job.mjs --keep "<their words>"`, and a `One job: <why>` line in the PR text.
 
 ## Step 1 — Understand
 
@@ -79,7 +81,7 @@ Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
    `node <gate>/pre-review.mjs --was <size> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --siblings <notes>/siblings.md`
 2. **The brief**, always from the tool, never typed or copied:
    `node <gate>/review-brief.mjs --out <notes>/brief.md --ticket <ticket text file> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --proof-log <notes>/proof.log`
-3. **Launch** every line of `<notes>/launch.md` in one message. Small and Medium: one review, fresh eyes, which gets only the user's words, the ticket, the diff and the places list. Big: the risk files, the whole diff, fresh eyes and the other engine, together. Every prompt starts `You are the independent reviewer`. No source edit while they read.
+3. **Launch** every line of `<notes>/launch.md` in one message. Small and Medium: one review, fresh eyes, which gets only the user's words, the ticket, the diff and the places list. Big: the risk files with their trace list, the whole diff, fresh eyes and the other engine, together. `launch.md` carries every one of these lines, the risk files included: never type a reviewer prompt by hand. Every prompt starts `You are the independent reviewer`. No source edit while they read.
 4. **Notes (rule 5).** Every report line that starts with `Blocker`, `Bug`, `Gap`, `Question` or `EXTRA TEST` is a note, and the guards number it. Each note gets one of two answers, on its own line in chat:
    `NOTE <n>: fixed — <what changed and the test that proves it>`
    `NOTE <n>: user — "<the user's exact words>"`

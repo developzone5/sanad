@@ -11,7 +11,9 @@
 // A line passes when it quotes the user (`user said`, `user:` or `the user's words`, then their words
 // in "…", “…” or «…») or a ticket (a key like TUW-160 and a quoted phrase) — the authority for leaving
 // it as it is.
+// A branch the user kept as one job (one-job.mjs --keep) also needs a `One job: <why>` line.
 import fs from 'node:fs';
+import { keptWords } from './one-job.mjs';
 
 // Words that leave a known problem in place. Matched case-insensitively on each line.
 // 2026-11-12 (audit C13): "out of scope", "by design" and the others below parked findings unseen.
@@ -76,13 +78,25 @@ export function check(text) {
   return findings;
 }
 
+// A change the user kept as one job says why in the PR text (user rule 2026-11-15).
+const ONE_JOB_LINE = /^\s*(?:[-*+]\s+)?(?:\*\*)?One job\b(?:\*\*)?\s*:/im;
+export function missingOneJob(text, kept) {
+  return Boolean(kept) && !ONE_JOB_LINE.test(text);
+}
+
 function main(argv) {
   const file = argv[2];
   if (!file || !fs.existsSync(file)) {
     console.error('Usage: node check-pr-body.mjs <pr-body.md>');
     return 2;
   }
-  const findings = check(fs.readFileSync(file, 'utf8'));
+  const text = fs.readFileSync(file, 'utf8');
+  const kept = keptWords(process.cwd());
+  if (missingOneJob(text, kept)) {
+    console.log(`ONE JOB — the user kept this change as one PR ("${kept}"): add a line "One job: <why this is one PR>"`);
+    return 1;
+  }
+  const findings = check(text);
   if (!findings.length) {
     console.log('PR BODY: clean');
     return 0;

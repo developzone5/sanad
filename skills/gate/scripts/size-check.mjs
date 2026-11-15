@@ -8,9 +8,13 @@
 // database, money, files and URLs, concurrency, dependencies, the shared API contract, how many
 // callers each changed function has — and maps those facts to a size by fixed rules. It runs
 // twice: on the planned files before code (--files) and on the real diff before review (--base);
-// with --was <size> it fails when the real change grew past the size it was routed at.
+// with --was <size> it fails when the real change grew past the size it was routed at. Before code,
+// --names gives the names the places list searched: each named function in the planned files is read
+// whole (attributes, signature, body) by the same content rules as a diff; without it a plan reads
+// file names only (2026-11-15: a plan that removed four actions deleting stored objects by a client
+// key sized small; its diff sized big).
 //
-// Usage: node size-check.mjs --repo <path> (--base <ref> | --files <a,b,...>) [--was <size>] [--json]
+// Usage: node size-check.mjs --repo <path> (--base <ref> | --files <a,b,...> [--names <n1,n2,...>]) [--was <size>] [--json]
 // Exit 0: sized (and not grown). 1: --was given and the change grew. 2: usage error.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,6 +33,8 @@ const LOCALE = /(?:^|\/)(?:locales?|translations?|langs?)\/(?:[^/]+\/)*[^/]+\.(?
 // Data and pictures hold no logic lines (2026-11-12: a JSON fixture, a test snapshot or an SVG counted
 // toward the 400-line split). Binary files are listed by name and never read as lines.
 const NOT_LOGIC = /\.(?:json|snap|svg)$/i;
+// Generated code (designer files, migration snapshots, source-generator output) is not reviewed logic.
+const GENERATED = /\.(?:Designer|g|g\.i|generated)\.[^/.]+$|ModelSnapshot\.cs$|(?:^|\/)(?:__generated__|generated)\//i;
 const STYLE = /\.(?:css|scss|sass|less)$/i;
 const SERVER_TS = /(?:^|\/)(?:app\/(?:.+\/)?route\.[jt]s|pages\/api\/.+\.[jt]s|middleware\.[jt]s|[^/]+\.server\.[jt]sx?)$/i;
 
@@ -48,7 +54,8 @@ export const SIGNALS = {
   filesUi: { size: 'medium', seat: 'server check of what the client sends', label: 'file or URL handling in the client' },
   concurrencyUi: { size: 'medium', seat: 'Skeptic', label: 'timers or cross-tab state in the client' },
   infra: { size: 'medium', seat: 'deploy check', label: 'infrastructure or startup config' },
-  split: { size: 'medium', seat: 'PR plan: split it', label: 'more than 400 logic lines or 30 files' },
+  // 2026-11-15 (user rule "one job per PR"): a large change is a question for the user, never a risk size.
+  split: { size: 'small', seat: 'one job per PR: the user decides split or keep (one-job.mjs)', label: 'more than 400 logic lines or 30 files' },
   // 2026-11-12 (three sizes, user-approved): Small is one side only. Logic on both sides is Medium.
   bothSides: { size: 'medium', seat: 'the page rule and the server rule agree (the same cases tested on both)', label: 'server and page code in one change' },
   // Does not raise the size; adds the Client state lens (the seat on a panel, its checks in every review brief).
@@ -201,24 +208,32 @@ const PAGE_CODE = /\.(?:[cm]?[jt]sx?|vue|svelte)$/i;
 export function signals(files, { plan = false, repo } = {}) {
   const found = new Map();
   const sides = { server: '', page: '' };
-  const add = (key, where) => { if (!found.has(key)) found.set(key, []); if (found.get(key).length < 3) found.get(key).push(where); };
+  const add = (key, where) => {
+    if (!found.has(key)) found.set(key, []);
+    const list = found.get(key);
+    if (list.length < 3 && !list.includes(where)) list.push(where);
+  };
   for (const f of files) {
     const kind = KIND(f.name);
     if (kind !== 'code' && !RE.infra.test(f.name) && !RE.lockfile.test(f.name) && !/package\.json$|\.csproj$/i.test(f.name)) continue;
     const base = path.basename(f.name);
     const lines = plan ? [] : [...f.added, ...f.removed];
-    // Each signal reads the changed lines as code (comments and strings out); `raw` reads the whole line.
-    const code = plan ? [] : changedCode(repo, f);
-    const hit = (re, raw) => code.some(l => re.test(l)) || (!!raw && lines.some(l => raw.test(l)));
     const server = /\.cs$|\.py$|\.go$|\.java$|\.kt$|\.rb$|\.php$|\.sql$/i.test(f.name) || SERVER_TS.test(f.name) || (!plan && f.added.some(l => /^\s*['"]use server['"]/.test(l))) || (repo && /\.[cm]?[jt]sx?$/.test(f.name) && fileText(repo, f.name).slice(0, 200).includes('use server'));
     if (RE.lockfile.test(f.name) || ((/package\.json$|\.csproj$/i.test(f.name)) && (plan || lines.some(l => RE.depLine.test(l))))) add('dependency', base);
     if (RE.infra.test(f.name)) add('infra', base);
     if (kind !== 'code') continue;
     if (server) sides.server ||= base;
     else if (PAGE_CODE.test(f.name)) sides.page ||= base;
-    if (RE.schemaPath.test(f.name) || hit(RE.schemaLine, RAW.schema)) add('schema', base);
-    if (!plan && repo && DB_FILE.test(fileText(repo, f.name)) && queryChanged(repo, f)) add('query', base);
-    if (RE.contractPath.test(f.name) || hit(RE.contractLine)) add('contract', base);
+    // What the content rules read, and the name a hit carries: the changed lines of the file (diff mode), or each
+    // function --names names, whole (plan mode, `file:Function`). A plan without --names reads names only.
+    const db = !!repo && DB_FILE.test(fileText(repo, f.name));
+    const read = plan
+      ? (f.named || []).map(d => ({ where: `${base}:${d.name}`, keys: contentSignals(d.code, d.raw, { server, db }) }))
+      : [{ where: base, keys: contentSignals(changedCode(repo, f), lines, { server }) }];
+    const content = key => { for (const r of read) if (r.keys.has(key)) add(key, r.where); };
+    if (RE.schemaPath.test(f.name)) add('schema', base); else content('schema');
+    if (!plan && db && queryChanged(repo, f)) add('query', base); else content('query');
+    if (RE.contractPath.test(f.name)) add('contract', base); else content('contract');
     if (RE.contractClient.test(f.name)) add('contract', base);
     if (SERVER_TS.test(f.name) || (!plan && f.added.some(l => /^\s*['"]use server['"]/.test(l)))) add('serverEntry', base);
     if (/(?:^|\/)middleware\.[jt]s$/i.test(f.name)) add('access', base);
@@ -226,17 +241,33 @@ export function signals(files, { plan = false, repo } = {}) {
     // diff mode, where the text can be read, such a file counts only when it speaks of authorization.
     const policyOnly = !plan && repo && !AUTH_NAME.test(f.name) && !/authoriz|ClaimsPrincipal|\[Authorize|\bIdentity\b|\bRoles?\b/i.test(fileText(repo, f.name));
     if (AUTH_FILE.test(f.name) && !policyOnly) add(server ? 'access' : 'accessUi', base);
-    if (plan) continue;
-    const scopedFilter = code.some(l => RE.accessField.test(l) && RE.compare.test(l));
-    if (server ? hit(RE.access) || scopedFilter : hit(RE.accessUi)) add(server ? 'access' : 'accessUi', base);
-    if (hit(RE.files, RAW.files)) add(server ? 'files' : 'filesUi', base);
-    if (hit(RE.concurrency, RAW.concurrency) && server) add('concurrency', base);
-    if (hit(RE.concurrencyUi, RAW.concurrencyUi)) add('concurrencyUi', base);
-    if (!server && hit(RE.clientState)) add('clientState', base);
-    if (hit(RE.money) || hit(RE.tax)) add('money', base);
+    for (const key of ['access', 'accessUi', 'files', 'filesUi', 'concurrency', 'concurrencyUi', 'clientState', 'money']) content(key);
   }
   if (sides.server && sides.page) found.set('bothSides', [sides.server, sides.page]);
   return found;
+}
+
+/**
+ * The signals a piece of code raises by what it says, as a Set of SIGNALS keys. Diff mode gives a file's changed
+ * lines; plan mode with --names gives one named function whole. One rule set for both, so a plan and its diff
+ * read code alike. `code`: its code lines (codeOnly); `raw`: the same lines whole, for RAW (SQL, header names).
+ * `db`: a database file, where a query call is a query (plan mode only: diff mode reads the query statement
+ * around each hunk, queryChanged).
+ */
+function contentSignals(code, raw, { server, db = false }) {
+  const hit = (re, rawRe) => code.some(l => re.test(l)) || (!!rawRe && raw.some(l => rawRe.test(l)));
+  const keys = new Set();
+  if (hit(RE.schemaLine, RAW.schema)) keys.add('schema');
+  if (db && hit(RE.query, RAW.query)) keys.add('query');
+  if (hit(RE.contractLine)) keys.add('contract');
+  const scopedFilter = code.some(l => RE.accessField.test(l) && RE.compare.test(l));
+  if (server ? hit(RE.access) || scopedFilter : hit(RE.accessUi)) keys.add(server ? 'access' : 'accessUi');
+  if (hit(RE.files, RAW.files)) keys.add(server ? 'files' : 'filesUi');
+  if (server && hit(RE.concurrency, RAW.concurrency)) keys.add('concurrency');
+  if (hit(RE.concurrencyUi, RAW.concurrencyUi)) keys.add('concurrencyUi');
+  if (!server && hit(RE.clientState)) keys.add('clientState');
+  if (hit(RE.money) || hit(RE.tax)) keys.add('money');
+  return keys;
 }
 
 const texts = new Map();
@@ -513,6 +544,54 @@ function attributeTarget(lines, i) {
     for (const c of codeOnly(line)) { if (c === '[') depth++; else if (c === ']') depth--; }
   }
   return -1;
+}
+
+/**
+ * Plan mode with --names: each definition of a named function in one planned C#, JS or TS file, as
+ * `{ name, line, raw, code }`: the attributes or decorators stacked right above it, its signature and its whole body
+ * (`raw` the lines whole, `code` its code lines through codeOnly). [] for a missing file or another language.
+ */
+function namedDefinitions(repo, file, names) {
+  const cs = CS.test(file);
+  if (!names || !names.length || !(cs || JS.test(file))) return [];
+  const text = fileText(repo, file);
+  if (!text) return [];
+  const lines = text.split(/\r?\n/), isCode = codeLines(text), wanted = new Set(names), out = [];
+  for (let at = 0; at < lines.length; at++) {
+    if (!isCode[at]) continue;
+    const name = defName(lines[at]);
+    if (!name || !wanted.has(name)) continue;
+    const from = attributesAbove(lines, at, cs), to = definitionEnd(lines, at, isCode);
+    const raw = lines.slice(from, to + 1);
+    out.push({ name, line: at + 1, raw, code: raw.filter((_, k) => isCode[from + k]).map(codeOnly) });
+  }
+  return out;
+}
+// The first line of the attributes (C#, attributeTarget) or decorators (JS/TS, one per line) stacked right above the
+// definition on line `at`; `at` when there are none. A route attribute is the API contract, so it is read too.
+function attributesAbove(lines, at, cs) {
+  let top = at;
+  if (cs) { for (let k = at - 1; k >= Math.max(0, at - 30); k--) if (attributeTarget(lines, k) === at) top = k; }
+  else while (top > 0 && /^\s*@[A-Za-z_$]/.test(lines[top - 1])) top--;
+  return top;
+}
+// The last line of the definition on line `at`: the `}` that closes its block body or the `;` that ends its expression
+// body (bodyAfterSignature reads a signature over several lines); else, for a one-line body, an interface member or
+// a wrapped definition (`useCallback(…)`), the first line where its brackets are closed and its statement ends.
+// `at` when no end is found.
+function definitionEnd(lines, at, isCode) {
+  const body = bodyAfterSignature(lines, at);
+  if (body && body.expr) return body.expr[1];
+  let depth = 0;
+  for (let k = at; k < lines.length; k++) {
+    if (!isCode[k]) continue;
+    const code = codeOnly(lines[k]);
+    for (const c of code) { if (c === '{' || c === '(' || c === '[') depth++; else if (c === '}' || c === ')' || c === ']') depth--; }
+    if (depth > 0) continue;
+    if (body) { if (k >= body.block) return k; continue; }
+    if (/[;})\]]\s*$/.test(code)) return k;
+  }
+  return at;
 }
 
 // A moved body is not a change (2026-11-13, PR #773: HomeworkLifecycle.MinuteOf became a one-line call to a new
@@ -831,7 +910,7 @@ export function callers(repo, symbols) {
 const SKIP_PATH = /(?:^|\/)(?:node_modules|dist|build|bin|obj|\.claude|\.agents|docs\/db)\//i;
 
 export function decide(found, callerRows, files) {
-  const logic = files.filter(f => KIND(f.name) === 'code' && !NOT_LOGIC.test(f.name));
+  const logic = files.filter(f => KIND(f.name) === 'code' && !NOT_LOGIC.test(f.name) && !GENERATED.test(f.name));
   const lines = logic.reduce((n, f) => n + f.added.length + f.removed.length, 0);
   if (lines > 400 || logic.length > 30) found.set('split', [`${logic.length} code files, ${lines} lines`]);
   const many = callerRows.filter(c => c.count > 10);
@@ -853,23 +932,28 @@ export function roles(size, found) {
   return ['boss + expert panel before code (Pragmatist + a seat per open question)', ...seats.map(s => '+ ' + s), 'risk reviewer (Opus) on the risk files', reviewers];
 }
 
-export function sizeTask({ repo, base, files: planned }) {
+// `names` (plan mode only): the names the places list searched; each one defined in a planned file is read whole.
+export function sizeTask({ repo, base, files: planned, names = null }) {
   const root = path.resolve(git(path.resolve(repo), ['rev-parse', '--show-toplevel']).trim());
   texts.clear();
   oldTexts.clear();
   importsCache.clear();
   skipCache.clear();
   const plan = !base;
+  const named = plan && names && names.length ? names : null;
   const extra = { renamed: [], binary: [] };
-  const files = plan ? planned.map(n => ({ name: n.replace(/\\/g, '/'), added: [], removed: [], hunks: [] })) : readDiff(root, base, extra);
+  const files = plan ? planned.map(n => n.replace(/\\/g, '/')).map(name => ({ name, added: [], removed: [], hunks: [], named: named && KIND(name) === 'code' ? namedDefinitions(root, name, named) : [] })) : readDiff(root, base, extra);
   const found = signals(files, { plan, repo: root });
   const moved = [];
   const symbols = plan ? [] : allChangedSymbols(root, files, moved);
   const callerRows = callers(root, symbols.slice(0, MAX_SYMBOLS));
   const { size, lines, codeFiles } = decide(found, callerRows, files);
   let stack = null; try { stack = readStack(root); } catch { /* not fatal */ }
+  const read = [...new Set(files.flatMap(f => (f.named || []).map(d => `${path.basename(f.name)}:${d.name}`)))];
+  const unread = named ? named.filter(n => !files.some(f => (f.named || []).some(d => d.name === n))) : [];
   return { mode: plan ? 'plan' : 'diff', size, stack: stack && stack.line, signals: Object.fromEntries(found), roles: roles(size, found), callers: callerRows,
-    moreSymbols: Math.max(0, symbols.length - MAX_SYMBOLS), moved, files: files.length, codeFiles, lines, renamed: extra.renamed, binary: extra.binary };
+    moreSymbols: Math.max(0, symbols.length - MAX_SYMBOLS), moved, files: files.length, codeFiles, lines, renamed: extra.renamed, binary: extra.binary,
+    names: named, read, unread };
 }
 
 export function format(r, was) {
@@ -882,6 +966,10 @@ export function format(r, was) {
   if (r.moreSymbols) named.push(`+${r.moreSymbols} more changed functions not counted`);
   if (named.length) out.push('  callers: ' + named.join('; '));
   if (r.moved && r.moved.length) out.push('  moved, callers not counted: ' + r.moved.map(m => `${m.name} (${m.file} → ${m.to})`).join(', '));
+  if (r.mode === 'plan' && !r.names) out.push('  hint: pass --names <the places list names> so the plan reads the code it will change');
+  if (r.read && r.read.length) out.push('  read: ' + r.read.join(', '));
+  // A name with no definition here was not read: a field or a text key, or a function in a file not planned.
+  if (r.unread && r.unread.length) out.push('  not read (no definition in the planned files): ' + r.unread.join(', '));
   if (r.mode === 'diff') out.push(`  files: ${r.files} (${r.codeFiles} code, ${r.lines} code lines changed)`);
   if (r.renamed && r.renamed.length) out.push('  renamed: ' + r.renamed.join(', '));
   if (r.binary && r.binary.length) out.push('  binary: ' + r.binary.join(', '));
@@ -894,22 +982,26 @@ function args(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--json') { o.json = true; continue; }
-    if (!['--repo', '--base', '--files', '--was'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
+    if (!['--repo', '--base', '--files', '--was', '--names'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
   if (!o.repo || (!o.base === !o.files)) throw new Error('--repo and exactly one of --base or --files are required.');
   if (o.was && !SIZES.includes(o.was)) throw new Error('--was must be one of ' + SIZES.join(', ') + '.');
+  // The real diff is read as it is; --names only tells a plan which code it will change.
+  if (o.names !== undefined && o.base) throw new Error('--names goes with --files (plan mode), not with --base.');
+  if (o.names !== undefined && !commaList(o.names).length) throw new Error('--names needs at least one name.');
   return o;
 }
+const commaList = s => s ? s.split(',').map(n => n.trim()).filter(Boolean) : null;
 
 if (isMain(import.meta.url)) {
   try {
     const o = args(process.argv.slice(2));
-    const r = sizeTask({ repo: o.repo, base: o.base, files: o.files ? o.files.split(',').map(s => s.trim()).filter(Boolean) : null });
+    const r = sizeTask({ repo: o.repo, base: o.base, files: commaList(o.files), names: commaList(o.names) });
     process.stdout.write((o.json ? JSON.stringify(r) : format(r, o.was)) + '\n');
     process.exitCode = o.was && SIZES.indexOf(r.size) > SIZES.indexOf(o.was) ? 1 : 0;
   } catch (error) {
-    process.stderr.write('SIZE: ' + String(error.message).split('\n')[0] + '\nUsage: node size-check.mjs --repo <path> (--base <ref> | --files <a,b,...>) [--was <size>] [--json]\n');
+    process.stderr.write('SIZE: ' + String(error.message).split('\n')[0] + '\nUsage: node size-check.mjs --repo <path> (--base <ref> | --files <a,b,...> [--names <n1,n2,...>]) [--was <size>] [--json]\n');
     process.exitCode = 2;
   }
 }

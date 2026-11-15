@@ -15,6 +15,9 @@
 //   tags   with --check <file>, every check line Cn (numbered in order, as review-brief.mjs prints
 //          them) has a test that carries `[Cn]` in its name or a comment; not a skipped one.
 //
+// The new lines and the "nothing happens" test live in new-lines.mjs (2026-11-15): red-proof.mjs reads the same
+// lines the same way before any run, and refuses a proof that would leave one of them unproven here.
+//
 // Usage: node check-test-asserts.mjs --repo <path> [--base <ref>] [--check <file>] [--before-proof]
 //   --before-proof: skip the proof part (pre-review.mjs --before-proof, run before red-proof.mjs).
 // Exit 0: all clear. 1: found (each printed). 2: usage error.
@@ -24,18 +27,15 @@ import { execFileSync } from 'node:child_process';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { provenTestFiles, skippedLines } from './proof-record.mjs';
 import { checkLines } from './review-brief.mjs';
+import { addedLines, newLines, nothingChecks } from './new-lines.mjs';
 import { isMain } from './is-main.mjs';
+
+export { addedLines, newLines, nothingChecks };
 
 // FluentAssertions forms too (2026-11-12: the backend asserts with .Should(); 36 of its range checks
 // were never flagged).
 const RANGE = /\.(?:toBeLessThan|toBeLessThanOrEqual|toBeGreaterThan|toBeGreaterThanOrEqual)\s*\(|\bAssert\.InRange\s*\(|\bShould\(\)[^;]*?\.(?:Be(?:Greater|Less)Than(?:OrEqualTo)?|Be(?:Greater|Less)OrEqualTo|BeInRange)\s*\(/;
 const REASON = /(?:\/\/|#)\s*range:\s*\S/;
-// "Nothing happens" checks: a call that did not happen, an element or value that is absent, zero.
-const NOTHING = /\.not\.toHaveBeenCalled|\.toHaveBeenCalledTimes\(\s*0\s*\)|\.not\.toBeInTheDocument\(|\.toBeNull\(\)|\.toBeUndefined\(\)|\.toHaveLength\(\s*0\s*\)|\.toBe\(\s*0\s*\)|\.toEqual\(\s*\[\s*\]\s*\)|\bTimes\.Never\b|\bAssert\.(?:Null|Empty)\s*\(|\.Should\(\)\.(?:BeNull|BeEmpty|BeFalse|NotContain)\s*\(|\.Should\(\)\.(?:Be|HaveCount)\(\s*0[mMdDfFlLuU]?\s*\)|\.DidNotReceive\(/;
-
-export function nothingChecks(lines) {
-  return lines.filter(l => TEST_FILE.test(l.file) && NOTHING.test(l.text));
-}
 
 // A value read inside an assertion with `!` (2026-11-07: when a break removed the element, the
 // `!` made a type error, the proof called it a broken test, and the whole proof ran twice). With
@@ -61,19 +61,6 @@ function git(cwd, args) {
   catch { return null; }
 }
 
-// Added lines of a unified diff with -U0, as { file, line, text }.
-export function addedLines(diff) {
-  const found = [];
-  let file = null, line = 0;
-  for (const raw of String(diff).split(/\r?\n/)) {
-    if (raw.startsWith('+++ ')) { file = raw === '+++ /dev/null' ? null : raw.slice(4).replace(/^b\//, ''); continue; }
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
-    if (hunk) { line = Number(hunk[1]); continue; }
-    if (file && raw.startsWith('+')) { found.push({ file, line, text: raw.slice(1) }); line++; }
-  }
-  return found;
-}
-
 export function rangeAsserts(lines) {
   return lines.filter(l => TEST_FILE.test(l.file) && RANGE.test(l.text) && !REASON.test(l.text));
 }
@@ -85,13 +72,8 @@ if (isMain(import.meta.url)) {
   const top = (git(repo, ['rev-parse', '--show-toplevel']) || '').trim();
   if (!top) { console.error('check-test-asserts: not inside a git repository: ' + repo); process.exit(2); }
   const base = opt('--base') || 'origin/' + ((git(top, ['config', '--get', 'sanad.integration']) || '').trim() || 'staging');
-  const from = (git(top, ['merge-base', base, 'HEAD']) || '').trim();
-  if (!from) { console.error('check-test-asserts: no merge base with ' + base); process.exit(2); }
-  const lines = addedLines(git(top, ['diff', '-U0', '--no-color', '--no-ext-diff', from]) || '');
-  for (const f of (git(top, ['ls-files', '--others', '--exclude-standard']) || '').split(/\r?\n/).filter(Boolean)) {
-    if (!TEST_FILE.test(f)) continue;
-    fs.readFileSync(path.join(top, f), 'utf8').split(/\r?\n/).forEach((text, i) => lines.push({ file: f, line: i + 1, text }));
-  }
+  const lines = newLines(top, base);
+  if (!lines) { console.error('check-test-asserts: no merge base with ' + base); process.exit(2); }
   const found = rangeAsserts(lines);
   for (const f of found) console.log(`RANGE ASSERT: ${f.file}:${f.line} — ${f.text.trim()} → assert the exact value, or say why on the line: // range: <why>`);
   // Proof: a new "nothing happens" check needs a passing break run that named a test in its own file,
