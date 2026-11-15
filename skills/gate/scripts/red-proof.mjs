@@ -121,6 +121,7 @@ import { newLines, nothingChecks } from './new-lines.mjs';
 import { codeLines, codeOnly } from './size-check.mjs';
 import { isMain } from './is-main.mjs';
 import { keepRunRecord } from './run-record.mjs';
+import { bashEnv, gitBash } from './git-bash.mjs';
 
 // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
 // missing element, a type, reference or build error, or a timeout means the test itself (or the
@@ -835,7 +836,7 @@ async function main() {
     // sent; the preflight also renews the hold that keeps it up between runs. A warm-up builds only.
     const dbContainer = gitText(['config', '--get', 'sanad.remoteDbContainer']);
     if (dotnetRun && !warm && dbContainer) {
-      const pre = spawnSync('bash', [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-preflight.sh'), '--db'], { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 8 * 60 * 1000 });
+      const pre = spawnSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-preflight.sh'), '--db'], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 8 * 60 * 1000 });
       const preOut = (pre.stdout || '') + (pre.stderr || '');
       if (pre.status === 4 || /REMOTE-DOWN/.test(preOut)) { say('RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).'); process.exit(4); }
       if (pre.status !== 0 || !/^READY\b/m.test(preOut)) {
@@ -845,7 +846,7 @@ async function main() {
       }
       say(`RED-PROOF: database ${dbContainer} ready on ${remoteHost}`);
     }
-    const sync = spawnSync('bash', [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000 });
+    const sync = spawnSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000 });
     const syncOut = (sync.stdout || '') + (sync.stderr || '');
     if (/REMOTE-DOWN/.test(syncOut)) { say('RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).'); process.exit(4); }
     const synced = /SYNCED \S+ (\w+) tree (\w+)/.exec(syncOut);

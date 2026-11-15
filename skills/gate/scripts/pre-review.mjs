@@ -51,6 +51,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { isMain } from './is-main.mjs';
+import { bashEnv, gitBash } from './git-bash.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = /\.(?:[cm]?[jt]sx?)$/i;
@@ -281,7 +282,7 @@ function syncRemote(repo, remote) {
   if (other) return { ok: false, text: `another task's check runs on ${remote.host} now (${other}), and a sync would change the code under it. Run pre-review again when it ends.` };
   let out = '';
   try {
-    out = execFileSync('bash', [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000, stdio: ['ignore', 'pipe', 'pipe'] });
+    out = execFileSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) { out = String(e.stdout || '') + String(e.stderr || '') || String(e.message); }
   const synced = /^SYNCED \S+ \S+ tree (\S+)/m.exec(out);
   const via = /^VIA (\S+)/m.exec(out);
