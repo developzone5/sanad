@@ -62,14 +62,18 @@ import { isMain } from './is-main.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-// Each Check line's sources: "[T1, T3]", "[change]", "[rule: both languages]" or a mix, at its start — in one
-// bracket or several ("[T1] [T2] …", 2026-11-09: only the first bracket was read, so steps needed a line each).
+// Each Check line's sources: "[T1, T3]", "[change]", "[rule: both languages]", "[design]" or a mix, at its start —
+// in one bracket or several ("[T1] [T2] …", 2026-11-09: only the first bracket was read, so steps needed a line each).
+// [design] (2026-11-16, PR #784): the author's own design choice ("remove only what this edit removed"). Written as
+// a plain goal, five reviewers checked the code against it and none asked whether it was the best design; a
+// teammate then found a better one. Both briefs list these lines for the reviewers to attack.
 export function checkSources(line) {
   const lead = /^(?:\[[^\]]+\]\s*)+/.exec(String(line).trim());
   if (!lead) return null;
   const parts = [...lead[0].matchAll(/\[([^\]]+)\]/g)].flatMap(m => m[1].split(',')).map(p => p.trim()).filter(Boolean);
-  return parts.every(p => /^T\d+$/i.test(p) || /^change$/i.test(p) || /^rule:\s*\S/i.test(p)) ? parts : null;
+  return parts.every(p => /^T\d+$/i.test(p) || /^(?:change|design)$/i.test(p) || /^rule:\s*\S/i.test(p)) ? parts : null;
 }
+export const isDesignLine = (line) => (checkSources(line) || []).some(p => /^design$/i.test(p));
 
 // Problems that stop the brief: a ticket line with no Check line, a Check line with no source, or a
 // source that names a ticket line that does not exist.
@@ -78,7 +82,7 @@ export function coverageProblems(ticketLines, checks) {
   const covered = new Set();
   checks.forEach((c, i) => {
     const sources = checkSources(c);
-    if (!sources) { problems.push(`C${i + 1} names no source ([T1], [change] or [rule: ...]): ${c}`); return; }
+    if (!sources) { problems.push(`C${i + 1} names no source ([T1], [change], [rule: ...] or [design]): ${c}`); return; }
     for (const s of sources) {
       const n = /^T(\d+)$/i.exec(s);
       if (!n) continue;
@@ -190,12 +194,22 @@ export function chooseSize(facts, routed) {
 }
 
 const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`; or "no findings" and what you checked. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any. Last, one line `ONE JOB: yes|no`: does this PR do more than one thing? A yes is also a `Question` finding that names the jobs (user rule 2026-11-15).';
-// Three standing rules. A new rule replaces one of these or becomes a script check.
+// The standing rules. A new rule replaces one of these or becomes a script check. The last two (2026-11-16, PR #784:
+// a teammate found 6 real issues after 5 reviewers passed the PR): the author's design was never attacked, and weak
+// spots passed because "the old code does it too".
 const RULES = [
-  '- A `Question` is only for what the ticket lines above leave open: quote the line that leaves it open. A question those lines already answer (an "Expected" line, a rule row) is not listed; check the change against that answer instead.',
+  '- A `Question` is only for what the ticket lines above leave open: quote the line that leaves it open. A question those lines already answer (an "Expected" line, a rule row) is not listed; check the change against that answer instead. A better design is a different `Question`: see the design rule below.',
   '- A test weakness on a Check line is reported as a concrete break: the change to the product code (file, what changes) that the tests would let through, and the test that should then fail. A case that no Check line covers and the ticket does not name is an `EXTRA TEST:` line (one line: the case and why it matters), not a finding: the user decides it.',
   '- A defect on a path the change neither touches, exposes nor makes reachable goes under `OUTSIDE PR:`. A problem outside the ticket that is already listed is not reported, unless this change alters or worsens it; then it is a finding.',
+  '- Attack the design, not only the code: is this the best way to do the job, and does the repo already do the same kind of job another way (a queue table and its worker, a shared helper, an existing screen)? A better way is a `Question` finding that names it, with file:line. A `[design]` Check line is the author\'s choice, never a goal: a change that only matches it has not passed.',
+  '- "The old code does it too" or "the other calls do the same" is never a pass. When the change relies on, copies or widens a weak spot (a token never cleared, an error kept as text, a missing retry), it is a `Gap` or `Bug` finding that names the weak spot; the user decides it.',
 ];
+// The author's design choices (Check lines tagged [design]), for both briefs: claims to attack, not goals.
+function designBlock(checks = []) {
+  const lines = checks.map((c, i) => ({ c, i })).filter(({ c }) => isDesignLine(c));
+  return lines.length ? ["## Author's design choices — attack these: is there a better way, or one the repo already uses?", '',
+    ...lines.map(({ c, i }) => `- C${i + 1}. ${c}`), ''] : [];
+}
 
 function diffLine({ repo, branch, base, mergeBase }) {
   return `Repo: ${repo}, branch ${branch}. Review the working tree against ${mergeBase.slice(0, 12)} (where it left ${base}): \`git diff ${mergeBase}\` (uncommitted work included).`;
@@ -228,7 +242,8 @@ const tidy = lines => lines.filter((l, i, a) => !(l === '' && a[i - 1] === '')).
 // filtered out; and nothing said which code a log was for. red-proof.mjs writes the tree it proves as
 // the log's first line ("RED-PROOF-LOG: tree <id> at <time>"): when the code under review is another
 // tree, the brief says so beside that proof.
-const PROOF_LINE = /^(?:RED-PROOF: (?:RED|NOT|PROVED|SETUP|ENVIRONMENT|TIMEOUT|REMOTE)|\s*(?:BREAK|GREEN) )/;
+// 2026-11-16: a partial proof (--changed-since) shows its PARTIAL lines, so it is never read as a full proof.
+const PROOF_LINE = /^(?:RED-PROOF: (?:RED|NOT|PROVED|PARTIAL|SETUP|ENVIRONMENT|TIMEOUT|REMOTE)|\s*(?:BREAK|GREEN) )/;
 export function proofLines(logs, currentTree = '') {
   const out = [];
   for (const { name, text } of logs) {
@@ -278,8 +293,9 @@ export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines 
     ...changedBlock(changed),
     '## Ticket (verbatim)', '', ticket.trim(), '',
     ...(ticketLines.length ? ['## Ticket lines — every one has a Check line', '', ...ticketLines.map((t, i) => `- T${i + 1}. ${t}`), ''] : []),
-    '## Check — each line names its source ([Tn] a ticket line, [change], [rule: ...]); its tests carry the tag [Cn]', '',
+    '## Check — each line names its source ([Tn] a ticket line, [change], [rule: ...], [design] the author\'s choice); its tests carry the tag [Cn]', '',
     ...checks.map((c, i) => `- C${i + 1}. ${c}`), '',
+    ...designBlock(checks),
     ...placesBlock(places),
     ...known(outside),
     ...(proof.length ? ['## Proof run (red-proof.mjs)', '', ...proof.map(p => '    ' + p), ''] : []),
@@ -288,12 +304,14 @@ export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines 
   ]);
 }
 
-export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size, changed, places = null }) {
+// `checks`: only its [design] lines reach fresh eyes, under "attack these" (an author claim, never a goal).
+export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size, changed, places = null, checks = [] }) {
   return tidy([
     ROLE.replace('You are a code reviewer.', 'You are a code reviewer with fresh eyes: judge the change only against the ticket and the code.'), '',
     diffLine({ repo, branch, base, mergeBase }), '', facts.stack || 'Stack: unknown', '',
     ...changedBlock(changed),
     '## Ticket (verbatim)', '', ticket.trim(), '',
+    ...designBlock(checks),
     ...placesBlock(places),
     ...known(outside),
     '## Rules', '', ...RULES, '',
@@ -422,7 +440,22 @@ function parse(argv) {
   return o;
 }
 
-if (isMain(import.meta.url)) {
+// `--coverage --lines <file> --check <file>`: only the Check lines' cover of the ticket, for pre-review (2026-11-16:
+// a Check line in the wrong shape passed both pre-review runs and was refused only here, after the proof).
+function coverageMain(argv) {
+  const at = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
+  if (!at('--lines') || !at('--check')) throw new Error('--coverage needs --lines <file> and --check <file>');
+  const checks = checkLines(fs.readFileSync(at('--check'), 'utf8'));
+  const ticketLines = readLines(fs.readFileSync(at('--lines'), 'utf8'));
+  const gaps = !checks.length ? ['the check file has no lines'] : coverageProblems(ticketLines, checks);
+  process.stdout.write(gaps.length ? gaps.join('\n') + '\n' : `CHECK LINES: ${checks.length} line(s), each with its source; T1..T${ticketLines.length} covered\n`);
+  process.exitCode = gaps.length ? 1 : 0;
+}
+
+if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
+  try { coverageMain(process.argv.slice(2)); }
+  catch (error) { process.stderr.write('REVIEW-BRIEF: ' + error.message + '\n'); process.exitCode = 2; }
+} else if (isMain(import.meta.url)) {
   try {
     const o = parse(process.argv.slice(2));
     const repo = git(path.resolve(o.repo || process.cwd()), ['rev-parse', '--show-toplevel']);
@@ -458,7 +491,7 @@ if (isMain(import.meta.url)) {
     const out = path.resolve(o.out), fresh = out.replace(/(\.md)?$/, '-fresh.md'), launch = path.join(path.dirname(out), 'launch.md');
     const chosen = chooseSize(facts, o.size);
     fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof, changed: changedFiles, places }));
-    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size: o.size, changed: changedFiles, places }));
+    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size: o.size, changed: changedFiles, places, checks }));
     fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, size: chosen.size, sizeNote: chosen.note, facts, changed: changedFiles }));
     process.stdout.write((chosen.note ? chosen.note + '\n' : '') + (facts.failed ? `SIZE CHECK FAILED: ${facts.failed}\n` : '') +
       `BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.failed ? 'SIZE CHECK FAILED' : facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'} · ${changedFiles.length} changed file(s), ${changedFiles.length - tracked.length} new untracked · places: ${placesState ? `${placesState.count}, ${placesState.open.length} open` : 'none (text-only change)'}\n` +

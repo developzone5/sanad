@@ -10,6 +10,11 @@
 // 2026-11-15 (role-sync task): the agent named 7 places with other problems, outside the ticket's goal, and the
 // author spent time sorting them out. A sibling now carries the ticket's own rule; any other finding is an
 // `OUTSIDE PR:` line, kept apart for the user's end list, with no outcome needed.
+// 2026-11-16 (PR #784, user: "we should find the best way for any task and if there is simller one we done before"):
+// the places search finds code that uses the same NAMES; nobody asked how the repo already does the same KIND of
+// job, so a hand-made inline call was built where the repo already had an outbox table and a worker for exactly that.
+// The same agent now also names that work (`SAME JOB:` lines, or `SAME JOB: none`); each one needs `reuse` or
+// `not: <reason>` before review, and a report with no same-job answer is refused.
 //
 //   node siblings.mjs --brief --notes <dir> --repo <repo>
 //       Writes <notes>/siblings-brief.md from <notes>/lines.md (ticket lines), <notes>/check.md (check lines)
@@ -22,11 +27,14 @@
 //       Writes <notes>/siblings.md: one line per sibling, `S<n> · <file>:<line> · <what> — <why> → `, open. A
 //       SIBLING line in another shape is kept as written, never dropped. Recorded again: every S line keeps its
 //       number and outcome, a sibling not on it yet gets the next number. A report with neither kind of line
-//       is refused: the check did not run.
+//       is refused: the check did not run. Its `SAME JOB: <file>:<line> · <what> — <how>` lines become
+//       `J<n> · … → ` lines under their own heading (or `SAME JOB: none`); a report with neither is refused too.
 //   node siblings.mjs --check <siblings.md> [--places <places.md>]
 //       Every S line needs `P<n>` (the sibling is a place now: its name added with places.mjs --names; with
-//       --places, P<n> is on that list and not gone) or `none: <reason>` (at least 12 characters). Prints
-//       `OPEN: S<n> · <file>:<line> · <what>` per open line and `SIBLINGS: <k> found, <m> open`.
+//       --places, P<n> is on that list and not gone) or `none: <reason>` (at least 12 characters). Every J line
+//       needs `reuse` (the design follows that pattern) or `not: <reason>` (at least 12 characters), and a list
+//       with no J line and no `SAME JOB: none` is open. Prints `OPEN: S<n>|J<n> · …` per open line and
+//       `SIBLINGS: <k> found, <m> open` plus `SAME JOB: <j> found, <o> open`.
 // Exit 0: written, or no open line. 1: an open line. 2: usage error, a missing file, a report with no answer.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -42,7 +50,7 @@ const MIN_REASON = 12;
 export const BRIEF = 'siblings-brief.md';
 export const LIST = 'siblings.md';
 export const REPORT = 'siblings-report.md';
-export const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>' and 'OUTSIDE PR:' lines, or the single line 'SIBLINGS: none'. About 3 minutes; do not edit.";
+export const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', or write the single line 'SAME JOB: none' after searching. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines and 'SAME JOB:' lines, or 'SIBLINGS: none' and 'SAME JOB: none'. About 4 minutes; do not edit.";
 // A planning seat, never a review (2026-11-14): a prompt that starts "You are the independent reviewer" is
 // counted by the stop and push hooks as a finished review, so this check, run before any code, could have
 // stood in for the real review of the code written after it.
@@ -94,7 +102,7 @@ export function buildBrief({ repo, ticket, checks, list }) {
 
 export function launchLine(brief) {
   return `LAUNCH: Agent braintrust-expert · prompt: ${PROMPT_START} Read and follow only the brief at ${slash(brief)}. ` +
-    'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING and OUTSIDE PR lines, or the single line SIBLINGS: none.';
+    'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING, OUTSIDE PR and SAME JOB lines (or SIBLINGS: none and SAME JOB: none).';
 }
 
 export function writeBrief({ notes, repo }) {
@@ -117,59 +125,63 @@ export function writeBrief({ notes, repo }) {
 const bare = (line) => line.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, '').replace(/^[`*_>"\s]+|[`*_"\s]+$/g, '').replace(/^(SIBLINGS?:)[*_]+\s*/, '$1 ').trim();
 const NONE = /^SIBLINGS:\s*none\.?$/i;
 const OUTSIDE = /^OUTSIDE PR:\s*(.*)$/i;
+const JOB_NONE = /^SAME JOB:\s*none\.?$/i;
+const JOB = /^SAME JOB:\s*(.*)$/i;
 // "<file>:<line> · <function or field> — <why>"; a line range (12-20) counts as a line.
 const SHAPED = /^(.+?):(\d+(?:[-–]\d+)?) · (.+?) — (.+)$/;
+// A report line's body: the agent's own arrows become "->" (the first → on a list line starts its outcome), and
+// the instruction quoted back, with its placeholders, is no line at all.
+const body = (s) => { const b = s.replace(/→/g, '->').trim(); return b && !/<file>/.test(b) ? b : ''; };
+const shape = (b) => { const s = SHAPED.exec(b); return s ? `${s[1].trim()}:${s[2]} · ${s[3].trim()} — ${s[4].trim()}` : b; };
 
-// The agent's answer: { siblings: [text of each S line], none, outside: [text of each OUTSIDE PR line] }, or
-// null when it has no line of any kind.
+// The agent's answer: { siblings, none, outside, jobs, jobNone } (the text of each S, OUTSIDE PR and SAME JOB line),
+// or null when it has no sibling answer of any kind.
 export function parseReport(text) {
-  const siblings = [], outside = [];
-  let none = false;
+  const siblings = [], outside = [], jobs = [];
+  let none = false, jobNone = false;
   for (const row of String(text).split(/\r?\n/)) {
     const l = bare(row);
     if (NONE.test(l)) { none = true; continue; }
+    if (JOB_NONE.test(l)) { jobNone = true; continue; }
     const o = OUTSIDE.exec(l);
-    if (o) {
-      const body = o[1].replace(/→/g, '->').trim();
-      if (body && !/<file>/.test(body) && !outside.includes(body)) outside.push(body);
-      continue;
-    }
+    if (o) { const b = body(o[1]); if (b && !outside.includes(b)) outside.push(b); continue; }
+    const j = JOB.exec(l);
+    if (j) { const b = body(j[1]); if (b && !jobs.includes(shape(b))) jobs.push(shape(b)); continue; }
     const m = /^SIBLING:\s*(.*)$/.exec(l);
     if (!m) continue;
-    // The agent's own arrows become "->": the first → on an S line starts its outcome.
-    const body = m[1].replace(/→/g, '->').trim();
-    // The instruction quoted back, with its placeholders, is no sibling.
-    if (!body || /<file>/.test(body)) continue;
-    const s = SHAPED.exec(body);
-    const shaped = s ? `${s[1].trim()}:${s[2]} · ${s[3].trim()} — ${s[4].trim()}` : body;
-    if (!siblings.includes(shaped)) siblings.push(shaped);
+    const b = body(m[1]);
+    if (b && !siblings.includes(shape(b))) siblings.push(shape(b));
   }
-  return siblings.length || none || outside.length ? { siblings, none: !siblings.length, outside } : null;
+  return siblings.length || none || outside.length ? { siblings, none: !siblings.length, outside, jobs, jobNone: jobNone && !jobs.length } : null;
 }
 
-// "S3 · <text> → <outcome>"; a line whose arrow was deleted reads with no outcome (open), never dropped.
+// "S3 · <text> → <outcome>" and "J2 · <text> → <outcome>"; a line whose arrow was deleted reads with no outcome
+// (open), never dropped.
 export function parseSiblings(text) {
-  const rows = [];
-  let none = false;
+  const rows = [], jobs = [];
+  let none = false, jobNone = false;
   for (const line of String(text).split(/\r?\n/)) {
     if (NONE.test(line.trim())) { none = true; continue; }
-    const m = /^S(\d+) · (.*)$/.exec(line);
+    if (JOB_NONE.test(line.trim())) { jobNone = true; continue; }
+    const m = /^([SJ])(\d+) · (.*)$/.exec(line);
     if (!m) continue;
-    const arrow = m[2].indexOf('→');
-    rows.push({ n: Number(m[1]), body: (arrow < 0 ? m[2] : m[2].slice(0, arrow)).trim(), outcome: arrow < 0 ? '' : m[2].slice(arrow + 1).trim() });
+    const arrow = m[3].indexOf('→');
+    (m[1] === 'S' ? rows : jobs).push({ n: Number(m[2]), body: (arrow < 0 ? m[3] : m[3].slice(0, arrow)).trim(), outcome: arrow < 0 ? '' : m[3].slice(arrow + 1).trim() });
   }
-  return { rows, none };
+  return { rows, none, jobs, jobNone: jobNone && !jobs.length };
 }
 
 export const siblingLine = (r) => `S${r.n} · ${r.body} → ${r.outcome}`;
+export const jobLine = (r) => `J${r.n} · ${r.body} → ${r.outcome}`;
 export const OUTSIDE_HEADING = "## Outside the ticket — for the user's end list (no outcome here)";
+export const JOB_HEADING = '## Same kind of job done before — write `reuse` (the design follows it) or `not: <why>` after each →';
 
 // The OUTSIDE PR lines already in a siblings list, in order.
 export function parseOutside(text) {
   return String(text).split(/\r?\n/).map((l) => /^- OUTSIDE PR:\s*(.*)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
 }
 
-export function renderSiblings({ brief, report, recorded, rows, outside = [] }) {
+export function renderSiblings({ brief, report, recorded, rows, outside = [], jobs = [], jobNone = false }) {
   return [
     '# Siblings — places with the same rule or defect that the places list missed', '',
     `Brief: ${slash(brief)}`,
@@ -178,6 +190,7 @@ export function renderSiblings({ brief, report, recorded, rows, outside = [] }) 
     "Write the outcome after each →: `P<n>` (add the sibling's name with places.mjs --names; n is the place it gets) or `none: <why it is not the same rule>`.",
     'siblings.mjs --record keeps every outcome when it records again; pre-review.mjs --siblings checks this file.', '',
     ...(rows.length ? rows.map(siblingLine) : ['SIBLINGS: none']), '',
+    ...(jobs.length || jobNone ? [JOB_HEADING, '', ...(jobs.length ? jobs.map(jobLine) : ['SAME JOB: none']), ''] : []),
     ...(outside.length ? [OUTSIDE_HEADING, '', ...outside.map((o) => '- OUTSIDE PR: ' + o), ''] : []),
   ].join('\n');
 }
@@ -191,14 +204,32 @@ export function recordSiblings({ report, notes, now = new Date() }) {
   if (!found) throw usage(`${report} has no SIBLING line, no OUTSIDE PR line and no "SIBLINGS: none" line: the check did not run. Save the agent's final message there and record again.`);
   const out = path.join(notes, LIST);
   const oldText = fs.existsSync(out) ? readText(out) : '';
-  const rows = parseSiblings(oldText).rows;
+  const old = parseSiblings(oldText);
+  if (!found.jobs.length && !found.jobNone && !old.jobs.length && !old.jobNone) {
+    throw usage(`${report} has no SAME JOB line and no "SAME JOB: none" line: the same-job search did not run. Launch the brief's line again (it asks how the repo already does this kind of job), save its answer there and record again.`);
+  }
+  const rows = old.rows;
   let next = rows.reduce((n, r) => Math.max(n, r.n), 0) + 1;
-  for (const body of found.siblings) if (!rows.some((r) => r.body === body)) rows.push({ n: next++, body, outcome: '' });
+  for (const b of found.siblings) if (!rows.some((r) => r.body === b)) rows.push({ n: next++, body: b, outcome: '' });
+  const jobs = old.jobs;
+  let nextJob = jobs.reduce((n, r) => Math.max(n, r.n), 0) + 1;
+  for (const b of found.jobs) if (!jobs.some((r) => r.body === b)) jobs.push({ n: nextJob++, body: b, outcome: '' });
+  const jobNone = !jobs.length && (found.jobNone || old.jobNone);
   const outside = parseOutside(oldText);
-  for (const body of found.outside) if (!outside.includes(body)) outside.push(body);
-  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside });
+  for (const b of found.outside) if (!outside.includes(b)) outside.push(b);
+  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside, jobs, jobNone });
   fs.writeFileSync(out, oldText.includes('\r\n') ? text.replace(/\n/g, '\r\n') : text);
-  return { out, rows, outside };
+  return { out, rows, outside, jobs, jobNone };
+}
+
+// Why a J line is still open ('' = closed): `reuse` (the design follows that pattern) or `not: <reason>`.
+export function jobOpenReason(row) {
+  const o = row.outcome.trim();
+  if (!o) return 'no outcome';
+  if (/^reuse\b/i.test(o)) return '';
+  const not = /^not:\s*(.*)$/i.exec(o);
+  if (not) return not[1].trim().length >= MIN_REASON ? '' : `the reason after not: needs at least ${MIN_REASON} characters`;
+  return 'write reuse or not: <why this pattern does not fit>';
 }
 
 // Why an S line is still open ('' = closed). `places`: the parsed places list, when --places is given.
@@ -221,11 +252,20 @@ export function openReason(row, places) {
   return '';
 }
 
-export function checkSiblings({ rows }, { places } = {}) {
+// `jobs` undefined: a caller that only checks S lines (siblings --record); a list read from a file always has it.
+export function checkSiblings({ rows, jobs, jobNone }, { places } = {}) {
   const open = rows.map((r) => ({ r, why: openReason(r, places) })).filter((x) => x.why);
   const lines = open.map(({ r, why }) => `OPEN: S${r.n} · ${r.body.split(' — ')[0]}${why === 'no outcome' ? '' : ' — ' + why}`);
   lines.push(`SIBLINGS: ${rows.length} found, ${open.length} open`);
-  return { ok: !open.length, open, count: rows.length, text: lines.join('\n') };
+  let jobsOpen = [], searchMissing = false;
+  if (jobs) {
+    jobsOpen = jobs.map((r) => ({ r, why: jobOpenReason(r) })).filter((x) => x.why);
+    searchMissing = !jobs.length && !jobNone;
+    for (const { r, why } of jobsOpen) lines.push(`OPEN: J${r.n} · ${r.body.split(' — ')[0]}${why === 'no outcome' ? '' : ' — ' + why}`);
+    if (searchMissing) lines.push('OPEN: SAME JOB — the same-job search is missing: record a report from the current brief (SAME JOB lines or SAME JOB: none)');
+    lines.push(`SAME JOB: ${jobs.length} found, ${jobsOpen.length + (searchMissing ? 1 : 0)} open`);
+  }
+  return { ok: !open.length && !jobsOpen.length && !searchMissing, open, jobsOpen, count: rows.length, text: lines.join('\n') };
 }
 
 export function readSiblings(file) {
@@ -265,10 +305,12 @@ function main() {
         launchLine(b.brief) + '\n' +
         `THEN: save the agent's final message as ${slash(path.join(notes, REPORT))}, then run: node ${slash(path.join(here, 'siblings.mjs'))} --record ${slash(path.join(notes, REPORT))} --notes ${slash(notes)}\n`);
     } else if (o.record) {
-      const { out, rows, outside } = recordSiblings({ report: path.resolve(o.record), notes: path.resolve(o.notes) });
+      const { out, rows, outside, jobs, jobNone } = recordSiblings({ report: path.resolve(o.record), notes: path.resolve(o.notes) });
       const r = checkSiblings({ rows });
       process.stdout.write(rows.map((row) => '  ' + siblingLine(row).trimEnd() + '\n').join('') +
         `SIBLINGS: ${r.count} found, ${r.open.length} open — written to ${out}${r.count ? '; write P<n> or none: <reason> after each →' : ''}\n` +
+        jobs.map((row) => '  ' + jobLine(row).trimEnd() + '\n').join('') +
+        (jobs.length ? `SAME JOB: ${jobs.length} found — the design reuses each one, or says why not: write reuse or not: <why> after each →\n` : jobNone ? 'SAME JOB: none — the agent found no earlier work of the same kind\n' : '') +
         (outside.length ? `OUTSIDE PR: ${outside.length} line(s) outside the ticket, kept apart — not this task's work; they go to the user's end list (loop.md Step 3.5, item 5)\n` : ''));
     } else {
       let places;

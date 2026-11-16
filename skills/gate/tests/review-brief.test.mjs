@@ -64,7 +64,7 @@ test('the framed brief: numbered Check lines, pinned diff, callers, both known l
   assert.match(brief, /## Problems outside the ticket — known, do not report again\n\n- Old twin message \(Other\.tsx:10\)/);
   // 2026-11-12: the touched items' heading now tells the reviewer to CHECK them (it said "report only if").
   assert.match(brief, /## Problems outside the ticket in the files this change touches — CHECK each one against the change: report it if this change alters or worsens it\n\n- Old-language error/);
-  assert.equal((brief.split('## Rules')[1].match(/^- /gm) || []).length, 3, 'three standing rules, no more');
+  assert.equal((brief.split('## Rules')[1].match(/^- /gm) || []).length, 5, 'five standing rules, no more (2026-11-16: the design rule and the old-code rule)');
   assert.match(brief, /A `Question` is only for what the ticket lines above leave open/);
   assert.match(brief, /A test weakness on a Check line is reported as a concrete break/);
   assert.match(brief, /## Focused brief/);
@@ -459,4 +459,50 @@ test('a failed size check is named in the brief', () => {
   assert.equal(sizeFacts(dir, 'main', { script: crash }).failed, 'fatal: Not a valid object name main');
   assert.equal(sizeFacts(dir, 'main', { script: crash }).signals, null, 'no answer, no signals: launch.md then asks every question');
   assert.match(sizeFacts(dir, 'main', { script: slow, timeout: 700 }).failed, /^timed out after \d+ s$/);
+});
+
+// 2026-11-16 (PR #784: a teammate found 6 real issues after 5 reviewers passed it). The author's design choice was a
+// plain Check line that reviewers only confirmed, and weak spots passed because "the old code does it too".
+test('[design] Check lines are accepted, and both briefs list them as claims to attack', () => {
+  const ticketLines = ['send the role change to core-api'];
+  const checks = ['[T1] the new role reaches core-api', '[design] the send removes only the role this edit removed', '[T1, design] the send runs after the save'];
+  assert.deepEqual(coverageProblems(ticketLines, checks), []);
+  assert.deepEqual(checkSources('[T1, design] x'), ['T1', 'design']);
+  const args = { repo: 'C:/r', branch: 'b', base: 'origin/staging', mergeBase: 'a'.repeat(40), ticket: 't', ticketLines, checks, outside: { other: [], touched: [] }, facts: { stack: '', size: '', callers: '' } };
+  for (const brief of [buildBrief(args), buildFreshBrief(args)]) {
+    const block = brief.split("## Author's design choices — attack these: is there a better way, or one the repo already uses?")[1];
+    assert.ok(block, brief);
+    const listed = block.trim().split(/\n\n/)[0].split('\n');
+    assert.deepEqual(listed, ['- C2. [design] the send removes only the role this edit removed', '- C3. [T1, design] the send runs after the save']);
+  }
+  // Fresh eyes still get no plain Check line: only the design claims.
+  assert.doesNotMatch(buildFreshBrief(args), /the new role reaches core-api/);
+  assert.doesNotMatch(buildBrief({ ...args, checks: ['[T1] the new role reaches core-api'] }), /Author's design choices/);
+});
+
+test('the rules make reviewers attack the design and refuse "the old code does it too"', () => {
+  const args = { repo: 'C:/r', branch: 'b', base: 'origin/staging', mergeBase: 'a'.repeat(40), ticket: 't', ticketLines: ['x y z'], checks: ['[T1] x'], outside: { other: [], touched: [] }, facts: { stack: '', size: '', callers: '' } };
+  for (const brief of [buildBrief(args), buildFreshBrief(args)]) {
+    const rules = brief.split('## Rules')[1];
+    assert.match(rules, /Attack the design, not only the code: is this the best way to do the job, and does the repo already do the same kind of job another way/);
+    assert.match(rules, /"The old code does it too" or "the other calls do the same" is never a pass/);
+  }
+});
+
+test('--coverage: a Check line in the wrong shape fails with its reason; a right one passes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brief-coverage-'));
+  const lines = path.join(dir, 'lines.md'), check = path.join(dir, 'check.md');
+  fs.writeFileSync(lines, '# Lines\n\nT1. the notice can name the wrong section\n');
+  const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'review-brief.mjs');
+  const run = () => spawnSync(process.execPath, [script, '--coverage', '--lines', lines, '--check', check], { encoding: 'utf8', windowsHide: true });
+  fs.writeFileSync(check, '- C1 [T1] the wrong shape: the number before the source\n');
+  let r = run();
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^C1 names no source \(\[T1\], \[change\], \[rule: \.\.\.\] or \[design\]\)/m);
+  assert.match(r.stdout, /^T1 has no Check line/m);
+  fs.writeFileSync(check, '- [T1] the right shape\n- [design] the author\'s choice\n');
+  r = run();
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^CHECK LINES: 2 line\(s\), each with its source; T1\.\.T1 covered$/m);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

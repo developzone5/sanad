@@ -35,6 +35,15 @@ test('a log with no result line says the proof did not finish; an older log with
   assert.deepEqual(proofLines([], A), []);
 });
 
+// 2026-11-16: a fix-round proof (red-proof --changed-since) runs only some breaks; its PARTIAL lines reach the
+// brief, so a reviewer never reads it as a full proof.
+test('a partial proof log keeps its PARTIAL lines', () => {
+  const partial = { name: 'proof.log', text: `RED-PROOF-LOG: tree ${A} at 2026-11-16T05:00:00.000Z\nRED-PROOF: PARTIAL — 1 of 3 break(s) changed since abc: two; the others are not run.\n  BREAK ✓ two: all 1 named test(s) fail\n  GREEN ✓ the tests pass on the fixed tree\nRED-PROOF: PARTIAL ✓ — 1 of 3 break(s) caught, green on the fix; files restored; run the full proof (without --changed-since) once before the final review.\n` };
+  const lines = proofLines([partial], A);
+  assert.ok(lines.some(l => /^RED-PROOF: PARTIAL — 1 of 3 break\(s\) changed since abc/.test(l)), lines.join('\n'));
+  assert.ok(lines.some(l => /^RED-PROOF: PARTIAL ✓ — 1 of 3 break\(s\) caught/.test(l)), lines.join('\n'));
+});
+
 test('the command takes --proof-log more than once and puts both proofs in the brief', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-brief-proof-'));
   try {

@@ -215,6 +215,9 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
     checks.push({ name: `format ${name} (${what})`, cmd: 'dotnet', args: ['csharpier', 'check', ...list], cwd: dir });
   }
   if (lines) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
+  // 2026-11-16: the Check lines' sources were read only by review-brief, after the proof; a line in the wrong shape
+  // passed both pre-review runs. Checked here, in the first run.
+  if (lines && check) checks.push({ name: 'check lines', cmd: process.execPath, args: [path.join(here, 'review-brief.mjs'), '--coverage', '--lines', lines, '--check', check], cwd: repo, show: true });
   checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : []), ...(beforeProof ? ['--before-proof'] : [])], cwd: repo });
   checks.push({ name: 'commits', cmd: process.execPath, args: [path.join(here, 'check-commits.mjs'), '--repo', repo, '--base', base], cwd: repo });
   checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : [])], cwd: repo, show: true });
