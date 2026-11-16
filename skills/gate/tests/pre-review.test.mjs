@@ -43,9 +43,11 @@ function placesFor(repo, names = 'a', { open = false } = {}) {
 }
 const siblingsScript = path.join(path.dirname(script), 'siblings.mjs');
 // The sibling check's record next to a places list (2026-11-14): one sibling with `outcome` ('' leaves it open).
-function siblingsFor(places, outcome = 'P1') {
+// `job`: the same-job line's outcome (2026-11-16); null writes a list with no same-job search.
+function siblingsFor(places, outcome = 'P1', job = 'reuse') {
   const out = path.join(path.dirname(places), 'siblings.md');
-  fs.writeFileSync(out, `# Siblings\n\nS1 · web/src/b.ts:1 · b — the same rule on another screen → ${outcome}\n`);
+  fs.writeFileSync(out, `# Siblings\n\nS1 · web/src/b.ts:1 · b — the same rule on another screen → ${outcome}\n` +
+    (job === null ? '' : `\nJ1 · web/src/c.ts:1 · c — the same kind of job done before → ${job}\n`));
   return out;
 }
 // --places and --siblings for a change that is not text only, every place and sibling closed.
@@ -89,6 +91,13 @@ test('siblings: an open sibling fails the run and is named; closed, it passes; t
   assert.match(missing.stdout, /OPEN: S1 · web\/src\/b\.ts:1 · b — P7 is not on the places list/, 'P<n> is checked against --places');
   const ok = run(repo, ['--places', places, '--siblings', siblingsFor(places, 'none: another screen with its own focus rule')]);
   assert.equal(ok.status, 0, ok.stdout);
+  // 2026-11-16 (PR #784): the same kind of job done before needs reuse or a reason, and the search itself is required.
+  const jobOpen = run(repo, ['--places', places, '--siblings', siblingsFor(places, 'P1', '')]);
+  assert.equal(jobOpen.status, 1, jobOpen.stdout);
+  assert.match(jobOpen.stdout, /✗ siblings[\s\S]*OPEN: J1 · web\/src\/c\.ts:1 · c/);
+  const noSearch = run(repo, ['--places', places, '--siblings', siblingsFor(places, 'P1', null)]);
+  assert.equal(noSearch.status, 1, noSearch.stdout);
+  assert.match(noSearch.stdout, /OPEN: SAME JOB — the same-job search is missing/);
   const plan = planChecks({ repo, base: 'base', node: process.execPath, remote: null, places: 'p.md', siblings: 's.md' });
   const check = plan.checks.find((c) => c.name === 'siblings');
   assert.deepEqual(check.args, [siblingsScript, '--check', 's.md', '--places', 'p.md']);
@@ -423,4 +432,19 @@ test('another task whose check runs on the test machine now is seen; this task, 
   } finally {
     if (before === undefined) delete process.env.SANAD_CHECK_LOCK_DIR; else process.env.SANAD_CHECK_LOCK_DIR = before;
   }
+});
+
+// 2026-11-16: a Check line in the wrong shape ("- C1 [T1] …") passed both pre-review runs and was refused only by
+// review-brief, after the proof. The first run now checks the Check lines' sources and their cover of the ticket.
+test('check lines: with --lines and --check the first run checks every Check line names its source', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo } = fixture();
+  for (const beforeProof of [true, false]) {
+    const plan = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md', beforeProof });
+    const check = plan.checks.find((c) => c.name === 'check lines');
+    assert.ok(check, 'planned ' + (beforeProof ? 'before the proof' : 'after it'));
+    assert.deepEqual(check.args.slice(1), ['--coverage', '--lines', 'l.md', '--check', 'c.md']);
+    assert.match(check.args[0], /review-brief\.mjs$/);
+  }
+  assert.equal(planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md' }).checks.some((c) => c.name === 'check lines'), false, 'no --check: nothing to read');
 });

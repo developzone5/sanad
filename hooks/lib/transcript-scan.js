@@ -824,6 +824,9 @@ const REVIEW_RE = /^REVIEW:\s*(PASS|FAIL)\b/gm;
 // The Sanad Step 3.5 reviewer prompt starts with this marker; only such an agent
 // run, launched after the last change and completed, backs a REVIEW verdict.
 const REVIEWER_PROMPT = /^\s*You are the independent reviewer\b/i;
+// The expert seats (2026-11-16): launched without that marker, a run of one is an expert run. Its report gives
+// only its questions for the user as notes, and it never counts as a reviewer run.
+const EXPERT_AGENTS = new Set(['braintrust-expert', 'braintrust-expert-sonnet', 'routing-boss']);
 const RETIRE_RE = /^CHECK RETIRED:\s*(\{.*\})\s*$/gm;
 // A review probe: a test written to FAIL because it proves someone else's bug
 // (e.g. a PR under review). Declared after its red run, it quiets the STOP hook
@@ -1032,28 +1035,58 @@ const NOTE_LINE = new RegExp('^(\\s*)((?:[-*•]|\\d{1,3}[.)])\\s+)?(?:(?:\\*\\*
   '(?:(Blocker|Bug|Gap|Question)' + QUALIFIER + '(?:\\s+[—–](?:\\s|$)|\\s+-(?:\\s|$)|\\s*:)|(EXTRA TEST)' + QUALIFIER + ':)');
 const FENCE_LINE = /^\s*(```|~~~)/;
 const NOTE_CHARS = 300;
-// Each note of a report, in order: { kind, text }. Text: the line without its list marker, plus its
+// A line that asks the user to decide is a question for the user, in any format (2026-11-16, PR #784: an
+// expert wrote "you decide" in a plain line; it never became a note and the user was never asked).
+// "your call" (and "user's call") counts only as a choice marker: "(your call)", "— your call" ending a clause,
+// "your call:", or "your call." ending a sentence; never "your call to fetch()". "ask the user" counts only before
+// whether / which / if / to decide / to choose / before; never "the page should ask the user to confirm".
+const CALL = "(?:your|user['’]s) call";
+const ASKS_USER = new RegExp('\\b(?:you decide|user decides|for the user to decide)\\b' +
+  '|\\(\\s*(?:the\\s+)?' + CALL + '\\s*\\)' +
+  '|[—–-]\\s*' + CALL + '\\s*(?=[.,;:!?)]|$)' +
+  '|\\b' + CALL + '\\s*:' +
+  '|\\b' + CALL + '\\.(?=\\s|$)' +
+  '|\\bask the user(?:\\*\\*|__)?[:,]?\\s+(?:whether|which|if|to decide|to choose|before)\\b', 'i');
+// An OUTSIDE PR line (and its list) is an end-of-task item the user answers at the end: never a note (2026-11-16).
+const OUTSIDE_LINE = /^\s*(?:(?:[-*•]|\d{1,3}[.)])\s+)?(?:(?:\*\*|__)\s*)?OUTSIDE PR(?:\*\*|__)?\s*:/i;
+const LIST_START = /^(\s*)((?:[-*•]|\d{1,3}[.)])\s+)?/;
+const asksUser = (l) => ASKS_USER.test(l) && !OUTSIDE_LINE.test(l);
+// The end (exclusive) of row i's lines: its more-indented continuation lines, or, when nothing follows its
+// separator (said is empty), the lines below it up to a blank line. A finding line or a code fence ends it.
+function rowsOf(rows, i, said) {
+  const indent = (l) => /^\s*/.exec(l)[0].length;
+  let j = i + 1;
+  for (; j < rows.length; j++) {
+    const next = rows[j];
+    if (!next.trim() || NOTE_LINE.test(next) || FENCE_LINE.test(next) || (said && indent(next) <= indent(rows[i]))) break;
+  }
+  return j;
+}
+// Each note of a report, in order: { kind, text, asks? }. Text: the line without its list marker, plus its
 // more-indented continuation lines, cut to 300 characters. A note with nothing after its separator
 // (`EXTRA TEST:` over a list) takes the lines below it up to a blank line. Lines in a code block are examples.
+// A line that asks the user to decide (ASKS_USER) and is no finding line is a Question note; a continuation
+// line belongs to its note, which then asks the user too (asks: true), so no line counts twice (2026-11-16).
 function reportNotes(report) {
   const rows = String(report || '').replace(/\r/g, '').split('\n');
-  const indent = (l) => /^\s*/.exec(l)[0].length;
   const notes = [];
-  let fence = '';
+  let fence = '', taken = -1;   // taken: the last row already part of a note or an OUTSIDE PR item
   for (let i = 0; i < rows.length; i++) {
     const f = FENCE_LINE.exec(rows[i]);
     if (f) { if (!fence) fence = f[1]; else if (f[1] === fence) fence = ''; continue; }
     if (fence) continue;
     const m = NOTE_LINE.exec(rows[i]);
-    if (!m) continue;
-    const parts = [rows[i].slice(m[1].length + (m[2] || '').length)];
-    const said = rows[i].slice(m[0].length).trim();
-    for (let j = i + 1; j < rows.length; j++) {
-      const next = rows[j];
-      if (!next.trim() || NOTE_LINE.test(next) || FENCE_LINE.test(next) || (said && indent(next) <= indent(rows[i]))) break;
-      parts.push(next);
-    }
-    notes.push({ kind: m[3] || m[4], text: parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, NOTE_CHARS) });
+    if (!m && i <= taken) continue;
+    if (!m && OUTSIDE_LINE.test(rows[i])) { taken = rowsOf(rows, i, rows[i].replace(OUTSIDE_LINE, '').replace(/^\s*(?:\*\*|__)/, '').trim()) - 1; continue; }
+    if (!m && !asksUser(rows[i])) continue;
+    const start = m || LIST_START.exec(rows[i]);
+    const parts = [rows[i].slice(start[1].length + (start[2] || '').length)];
+    const end = rowsOf(rows, i, m ? rows[i].slice(m[0].length).trim() : parts[0].trim());
+    for (let j = i + 1; j < end; j++) parts.push(rows[j]);
+    taken = end - 1;
+    const note = { kind: m ? m[3] || m[4] : 'Question', text: parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, NOTE_CHARS) };
+    if (rows.slice(i, end).some(asksUser)) note.asks = true;
+    notes.push(note);
   }
   return notes;
 }
@@ -1115,10 +1148,14 @@ function recommendReport(text) {
 // so the same file shown twice gives each note once.
 // at: the entry's time. A report from before the lock's start time (st.since) gives no notes at all, so a
 // running session is not blocked by its history; a report with no time counts (follow-up A).
-function addReport(st, report, key, seq, at) {
+// questionsOnly: an expert seat's report (2026-11-16). Only what it asks the user to decide is a note, as a
+// Question; its Bug/Gap/… lines are design input for the author, not review notes.
+function addReport(st, report, key, seq, at, questionsOnly = false) {
   if (typeof st.since === 'number') { const t = Date.parse(at || ''); if (Number.isFinite(t) && t < st.since) return; }
   const notes = st.res.reviewNotes;
-  for (const note of reportNotes(report)) {
+  for (const found of reportNotes(report)) {
+    if (questionsOnly && found.kind !== 'Question' && !found.asks) continue;
+    const note = questionsOnly ? { kind: 'Question', text: found.text } : found;
     const seen = key ? st.reportKeys.some((k) => k.startsWith(key + '#') && (notes[Number(k.slice(key.length + 1)) - 1] || {}).text === note.text)
       : notes.some((n) => n.text === note.text);
     if (seen) continue;
@@ -1173,12 +1210,54 @@ function pruneUserWords(st) {
     if (total > USER_WORDS_CHARS) { st.userWords = st.userWords.slice(i + 1); break; }
   }
 }
-function humanTurn(st, words) {
-  const seq = ++st.seq;
-  st.res.turnClaim = false;
+function keepUserWords(st, seq, words) {
   if (oldestOpenReport(st) === Infinity) return;
   st.userWords.push({ seq, text: userText(words).slice(0, USER_WORDS_CHARS) });
   pruneUserWords(st);
+}
+function humanTurn(st, words) {
+  const seq = ++st.seq;
+  st.res.turnClaim = false;
+  keepUserWords(st, seq, words);
+}
+
+// The user's answers in an AskUserQuestion result (2026-11-16: `NOTE 38: user — "Leave it for now
+// (Recommended)"` stayed open, as the dialog's answer was not the user's words). The host writes
+//   Your questions have been answered: "<question>"="<answer>", "<question>"="<answer>". You can now continue…
+// (an older host: `User has answered your questions: …`), and this host also keeps toolUseResult.answers. An
+// "Other" answer the user typed comes the same way. Only the answers count: the question is the assistant's text.
+// questions: the call's own question texts; an answer is read only after its own question's `"<question>"="`.
+const ASK_ANSWERED = /^\s*(?:Your questions have been answered|User has answered your questions?)\s*:\s*/i;
+const ASK_PAIR = /"([^"\n]*)"="([\s\S]*?)"(?=\s*,\s*"|\s*\.\s+\S|\s*\.?\s*$)/g;
+function askAnswers(blk, entry, questions) {
+  const text = resultText(blk, null);
+  const head = ASK_ANSWERED.exec(text);
+  if (!head) return [];
+  const t = entry.toolUseResult;
+  if (t && typeof t === 'object' && t.answers && typeof t.answers === 'object' && !Array.isArray(t.answers)) {
+    return Object.values(t.answers).filter((a) => typeof a === 'string' && a.trim());
+  }
+  const s = text.slice(head[0].length);
+  // No question texts kept (a call without them): the pairs as written; a question holds no quote here.
+  if (!questions.length) return [...s.matchAll(ASK_PAIR)].map((m) => m[2]).filter((a) => a.trim());
+  const starts = [];
+  let from = 0;
+  for (const q of questions) {
+    const at = s.indexOf('"' + q + '"="', from);
+    if (at === -1) { starts.push(null); continue; }
+    starts.push({ at, body: at + q.length + 4 });
+    from = at + q.length + 4;
+  }
+  const out = [];
+  starts.forEach((p, i) => {
+    // An answer whose next question was not found has no known end: it could hold that question's text.
+    if (!p || (i + 1 < starts.length && !starts[i + 1])) return;
+    const next = starts[i + 1];
+    let a = s.slice(p.body, next ? next.at : s.length);
+    a = next ? a.replace(/"\s*,\s*$/, '') : a.slice(0, Math.max(0, a.lastIndexOf('"')));
+    if (a.trim()) out.push(a);
+  });
+  return out;
 }
 
 // An outcome line in an assistant text (code blocks already removed): optional list marker, bold or
@@ -1238,9 +1317,12 @@ function openNotesMessage(open) {
   const rows = list.slice(0, SHOWN_NOTES).map((n) => 'NOTE ' + n.n + ' (' + n.kind + '): ' + String(n.text).slice(0, 140) + (n.problem ? ' — still open: ' + n.problem : ''));
   if (list.length > SHOWN_NOTES) rows.push('… and ' + (list.length - SHOWN_NOTES) + ' more open notes, up to NOTE ' + list[list.length - 1].n + '.');
   const k = list[0].n;
+  // The NOTE lines go in a message with no tool call (2026-11-16): text in a message that also runs a tool
+  // may never reach the transcript, so its outcome lines never counted.
   return 'Reviewer notes without an outcome (rule 5: every reviewer note is fixed, or the user decides it):\n' + rows.join('\n') + '\n' +
     'To ask the user about a note, stop with the question and no verdict line or push command.\n' +
-    'Answer each one in your next message, on its own line: `NOTE ' + k + ': fixed — <what changed and its test>` or `NOTE ' + k + ': user — "<the user\'s exact words>"`. A note is never closed by the author\'s own judgement.';
+    'Answer each one in your next message, on its own line: `NOTE ' + k + ': fixed — <what changed and its test>` or `NOTE ' + k + ': user — "<the user\'s exact words>"`. ' +
+    'The NOTE lines go in a message with no tool call (text in a message that also runs a tool may never reach the record). A note is never closed by the author\'s own judgement.';
 }
 
 // The reducer state of one scan: plain data only (Maps and Sets become arrays in the cache), so a
@@ -1261,6 +1343,10 @@ function newScanState() {
     providerStates: new Map(),
     reviewerCalls: new Map(),  // Agent tool_use id -> launch seq (reviewer prompt)
     reviewerAgents: new Map(), // agent id -> { launch, at } (latest run, incl. SendMessage follow-ups)
+    // Expert seats (2026-11-16): their reports give Question notes only, and never a reviewer run.
+    expertCalls: new Map(),    // Agent tool_use id -> launch seq (braintrust-expert(-sonnet) or routing-boss)
+    expertAgents: new Map(),   // agent id -> { launch } (latest run, incl. SendMessage follow-ups)
+    askCalls: new Map(),       // AskUserQuestion tool_use id -> its question texts (its answers are the user's words)
     // For the task timer: each finished reviewer run, { launchAt, doneAt } (the entries' own times). A review
     // runs beside the other stages, so the timer lists it apart (2026-11-11: the report showed no review time).
     reviewerAt: new Map(),     // Agent tool_use id -> the launch entry's time
@@ -1282,7 +1368,7 @@ function newScanState() {
     userWords: [],             // what the user typed while a note was open: { seq, text } (see pruneUserWords)
   };
 }
-const STATE_MAPS = ['pending', 'background', 'verificationStates', 'providerStates', 'reviewerCalls', 'reviewerAgents', 'reviewerAt', 'helperCalls', 'helpersRunning', 'stopCalls', 'helperPending'];
+const STATE_MAPS = ['pending', 'background', 'verificationStates', 'providerStates', 'reviewerCalls', 'reviewerAgents', 'reviewerAt', 'helperCalls', 'helpersRunning', 'stopCalls', 'helperPending', 'expertCalls', 'expertAgents', 'askCalls'];
 const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'syncMoves', 'helperEdits', 'noteSeqs', 'reportKeys', 'userWords'];
 function saveState(st) {
   const o = { ...st, finishedUncollected: [...st.finishedUncollected] };
@@ -1399,7 +1485,7 @@ function feedLine(st, l) {
   // A result no recorded call waits for changes nothing (most of a long session: Read, Grep and the
   // like), so it is not parsed (2026-11-12: the first read of a 449 MB session). One with a reviewer
   // report's RECOMMEND line still counts: its notes need an outcome.
-  if (l.includes('"type":"tool_result"') && !answersAny(l, [st.pending, st.helperCalls, st.reviewerCalls, st.stopCalls]) && !l.includes('RECOMMEND: ')) return;
+  if (l.includes('"type":"tool_result"') && !answersAny(l, [st.pending, st.helperCalls, st.reviewerCalls, st.stopCalls, st.expertCalls, st.askCalls]) && !l.includes('RECOMMEND: ')) return;
   let entry = null;
   try { entry = JSON.parse(l); } catch (e) { return; }
   if (!entry || /^api-request/.test(String(entry.type || ''))) return;
@@ -1417,10 +1503,14 @@ function feedLine(st, l) {
   const handed = handedText.includes(HAND_BACK) ? handBack(handedText) : null;
   if (handed) {
     const agent = st.reviewerAgents.get(handed.id);
+    const expert = st.expertAgents.get(handed.id);
     if (agent) {
       const seq = ++st.seq;
       addReport(st, handed.report, handed.id + '@' + agent.launch, seq, entry.timestamp);
       creditReviewer(st, agent, seq, entry.timestamp);
+    } else if (expert) {
+      // An expert seat's hand-back: its questions for the user only, and no reviewer credit (2026-11-16).
+      addReport(st, handed.report, handed.id + '@' + expert.launch, ++st.seq, entry.timestamp, true);
     }
     return;
   }
@@ -1447,6 +1537,9 @@ function feedLine(st, l) {
       // Its finish notice can carry its report too (see addReport: each note counts once per run).
       if (finished && note.result) addReport(st, note.result, note.id + '@' + agent.launch, st.seq, entry.timestamp);
       if (finished) creditReviewer(st, agent, st.seq, entry.timestamp);
+      // An expert seat's finish notice can carry its report too: its questions only, never a reviewer run.
+      const expert = st.expertAgents.get(note.id);
+      if (expert && note.status === 'completed' && !interimNotice(note) && note.result) addReport(st, note.result, note.id + '@' + expert.launch, st.seq, entry.timestamp, true);
     }
     // A bundled notice shares the entry with the user's own words; nothing else there is scanned.
     return;
@@ -1493,7 +1586,8 @@ function feedLine(st, l) {
     // A reviewer report in a tool result: the other engine's report read from a file (2026-11-12). Only in
     // a session that launched an independent reviewer: an old report file or a test fixture read during
     // other work is no review (follow-up D).
-    if (blk.type === 'tool_result' && res.reviewerLaunched && !(blk.tool_use_id && st.reviewerCalls.has(blk.tool_use_id)) && l.includes('RECOMMEND: ')) {
+    // An expert seat's own result is never read as such a report (2026-11-16: it gives its questions only).
+    if (blk.type === 'tool_result' && res.reviewerLaunched && !(blk.tool_use_id && (st.reviewerCalls.has(blk.tool_use_id) || st.expertCalls.has(blk.tool_use_id))) && l.includes('RECOMMEND: ')) {
       const report = recommendReport(resultText(blk, null));
       if (report) addReport(st, report, '', seq, entry.timestamp);
     }
@@ -1508,9 +1602,16 @@ function feedLine(st, l) {
         st.reviewerCalls.set(blk.id, seq);                  // agent id arrives with the result
         st.reviewerAt.set(blk.id, String(entry.timestamp || ''));
         res.reviewerLaunched = true;
+      } else if (blk.name === 'Agent' && EXPERT_AGENTS.has(String(blk.input.subagent_type || ''))) {
+        st.expertCalls.set(blk.id, seq);                    // an expert seat (2026-11-16): never a reviewer run
       } else if (blk.name === 'SendMessage' && st.reviewerAgents.has(String(blk.input.to || ''))) {
         st.reviewerAgents.get(String(blk.input.to)).launch = seq;   // a follow-up review run
         st.reviewerAgents.get(String(blk.input.to)).at = String(entry.timestamp || '');
+      } else if (blk.name === 'SendMessage' && st.expertAgents.has(String(blk.input.to || ''))) {
+        st.expertAgents.get(String(blk.input.to)).launch = seq;     // a follow-up expert run: a new report
+      } else if (blk.name === 'AskUserQuestion') {
+        const questions = Array.isArray(blk.input.questions) ? blk.input.questions : [];
+        st.askCalls.set(blk.id, questions.map((q) => String((q && q.question) || '')).filter(Boolean));
       } else if (blk.name === 'TaskOutput' && st.background.has(blk.input.task_id)) {
         Object.assign(rec, st.background.get(blk.input.task_id), { editSeq: -1, taskId: blk.input.task_id });
       }
@@ -1525,6 +1626,27 @@ function feedLine(st, l) {
       const t = entry.toolUseResult || {};
       const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
       if (id && blk.is_error !== true && t.status !== 'completed') st.helpersRunning.set(id, launch);
+    }
+
+    // An expert seat launched (2026-11-16): its agent id, for its hand-back and finish notice. One that answers
+    // at once returns its report here. Only its questions count; it is never a reviewer run.
+    if (blk.type === 'tool_result' && blk.tool_use_id && st.expertCalls.has(blk.tool_use_id)) {
+      const launch = st.expertCalls.get(blk.tool_use_id);
+      st.expertCalls.delete(blk.tool_use_id);
+      const t = entry.toolUseResult || {};
+      const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
+      if (id && blk.is_error !== true) st.expertAgents.set(id, { launch });
+      if (id && t.status === 'completed' && blk.is_error !== true) addReport(st, resultText(blk, null), id + '@' + launch, seq, entry.timestamp, true);
+      continue;
+    }
+
+    // The user's answers in the AskUserQuestion dialog are the user's own words (2026-11-16). The turn goes
+    // on, so this is no new user turn: a pass claimed earlier in the turn still counts.
+    if (blk.type === 'tool_result' && blk.tool_use_id && st.askCalls.has(blk.tool_use_id)) {
+      const questions = st.askCalls.get(blk.tool_use_id);
+      st.askCalls.delete(blk.tool_use_id);
+      if (blk.is_error !== true && !userRejected(blk, entry)) for (const answer of askAnswers(blk, entry, questions)) keepUserWords(st, seq, answer);
+      continue;
     }
 
     if (blk.type === 'tool_result' && blk.tool_use_id && st.reviewerCalls.has(blk.tool_use_id)) {

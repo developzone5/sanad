@@ -330,7 +330,8 @@ test('a stop with REVIEW: PASS and an open note is blocked with the list', () =>
   assert.equal(r.decision, 'block');
   assert.match(r.reason, /^NOTE 1 \(Gap\): Gap — Upload\.cs:9 — the error text is not translated$/m);
   assert.match(r.reason, /^NOTE 2 \(Bug\): /m);
-  assert.match(r.reason, /Answer each one in your next message, on its own line: `NOTE 1: fixed — <what changed and its test>` or `NOTE 1: user — "<the user's exact words>"`\. A note is never closed by the author's own judgement\.$/);
+  // 2026-11-16: the instruction also says the NOTE lines go in a message with no tool call.
+  assert.match(r.reason, /Answer each one in your next message, on its own line: `NOTE 1: fixed — <what changed and its test>` or `NOTE 1: user — "<the user's exact words>"`\. The NOTE lines go in a message with no tool call \(text in a message that also runs a tool may never reach the record\)\. A note is never closed by the author's own judgement\.$/);
   assert.equal(stop([...report(), say('GATE: PASS', 5)], 'GATE: PASS').decision, 'block', 'GATE: PASS too');
   const handed = stop([...report()], 'Run this to push:\n```bash\ngit -C C:/repos/example push -u origin fix/upload\n```');
   assert.equal(handed.decision, 'block', 'a push command handed to the user');

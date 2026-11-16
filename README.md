@@ -103,6 +103,8 @@ Six rules hold on every task, whatever its size:
 
 Rules 1, 2, 4 and 5 are locks: a program refuses the next step until the rule holds. A size check picks the depth, not the author: **Small** (one side, no risk signal: no experts, one quick review), **Medium** (both sides, a query or the shared API: one full review and the full suite), **Big** (access, money, migrations, concurrency: experts plan first, then the full review round). One job per PR: over about 400 logic lines or 30 code files, pre-review asks you "split it, or keep it as one job?" (`one-job.mjs`); the size does not change. A branch behind the integration branch is merged only on a conflict: the PR's own checks test the combined code. The final suite starts together with the last re-check, not after it.
 
+Best design first, on every size: before code, a second AI also names how the repo already does the same kind of job (`SAME JOB:` lines, e.g. an outbox table and its worker); each one is reused or gets a reason, and pre-review refuses a list without that search. Big tasks always seat an Architect who proposes the best design. Check lines that hold the author's own choices are tagged `[design]`, and reviewers must attack them. "The old code does it too" is never a pass. Any reviewer or expert line that leaves a choice to you ("you decide") becomes a note, and your answers in the question dialog count as your words. In fix rounds the proof reruns only the changed parts (`red-proof.mjs --changed-since`), with the full proof once at the end; from the third round, new rare cases come to you in one list: fix now, or a known limit.
+
 A substantive change runs six steps. Each step has exactly one exit rule, and there is no next step without it.
 
 | # | Step | Exit rule |

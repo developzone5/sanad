@@ -20,7 +20,7 @@ const slash = (p) => p.replace(/\\/g, '/');
 const real = (p) => fs.realpathSync.native(p).toLowerCase();
 const sLines = (file) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => /^S\d/.test(l));
 
-const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>' and 'OUTSIDE PR:' lines, or the single line 'SIBLINGS: none'. About 3 minutes; do not edit.";
+const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', or write the single line 'SAME JOB: none' after searching. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines and 'SAME JOB:' lines, or 'SIBLINGS: none' and 'SAME JOB: none'. About 4 minutes; do not edit.";
 
 // A repo where focusFirstError is used by the chip group form, and a notes folder with the three sources:
 // the ticket lines, the check lines and the places list (made by places.mjs).
@@ -43,8 +43,10 @@ function fixture() {
   return { repo, notes, places, git, write };
 }
 
-// A notes folder whose brief was written, with the agent's report saved as `text`.
-function briefed(text) {
+// A notes folder whose brief was written, with the agent's report saved as `text`. A report with no same-job
+// answer gets "SAME JOB: none" (2026-11-16: the brief asks for it, and a report without one is refused).
+function briefed(text, { sameJob = true } = {}) {
+  if (sameJob && !/SAME JOB/.test(text)) text = text.replace(/\s*$/, '') + '\nSAME JOB: none\n';
   const f = fixture();
   const b = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
   assert.equal(b.status, 0, b.stdout + b.stderr);
@@ -146,7 +148,7 @@ test('--record needs the brief first, keeps a SIBLING line in another shape as w
   assert.match(early.stderr, /--brief/);
   assert.equal(run(['--brief', '--notes', f.notes, '--repo', f.repo]).status, 0);
   // PowerShell 5.1 writes UTF-16 with a byte order mark; an arrow in the agent's words is not the outcome arrow.
-  fs.writeFileSync(report, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('SIBLING: the rich-text description editor - same focus defect on save → publish\r\n', 'utf16le')]));
+  fs.writeFileSync(report, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('SIBLING: the rich-text description editor - same focus defect on save → publish\r\nSAME JOB: none\r\n', 'utf16le')]));
   const r = run(['--record', report, '--notes', f.notes]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual(sLines(path.join(f.notes, 'siblings.md')), ['S1 · the rich-text description editor - same focus defect on save -> publish → ']);
@@ -264,10 +266,86 @@ test('--check refuses a missing file, a file with no S line and no "SIBLINGS: no
   const r = run(['--check', bare]);
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /--record/);
-  fs.writeFileSync(bare, 'SIBLINGS: none\n');
+  fs.writeFileSync(bare, 'SIBLINGS: none\nSAME JOB: none\n');
   assert.equal(run(['--check', bare, '--places', places]).status, 0);
   fs.writeFileSync(places, '# notes\n');
   assert.equal(run(['--check', bare, '--places', places]).status, 2, '--places must be a places list');
   assert.equal(run(['--places', places]).status, 2, 'no mode given');
   assert.equal(run(['--record', bare]).status, 2, '--record needs --notes');
+});
+
+// 2026-11-16 (PR #784): nobody asked how the repo already does the same KIND of job, so an inline call was built where
+// the repo already had an outbox table and its worker. The second look now names that work; each find needs reuse or
+// a reason, and a report or list without the search is refused.
+const JOBS = [
+  'SIBLINGS: none',
+  '- SAME JOB: src/outbox/EmailOutbox.ts:12 · EmailOutbox — a table row in the same save, sent later by a worker with retries',
+  '- SAME JOB: src/ms/MicrosoftIdentityChanges.ts:40 · MicrosoftIdentityChanges — queued identity changes, one worker drains them',
+  '`SAME JOB: <file>:<line> · <what> — <how it does the job>`',
+].join('\n');
+const jLines = (file) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => /^J\d/.test(l));
+
+test('the brief asks how the repo already does the same kind of job', () => {
+  const { report } = briefed('SIBLINGS: none');
+  const brief = fs.readFileSync(path.join(path.dirname(report), 'siblings-brief.md'), 'utf8');
+  assert.match(brief, /how does this repo already do the same KIND of job/);
+  assert.match(brief, /'SAME JOB: none' after searching/);
+});
+
+test('--record writes each SAME JOB line as an open J line; --check needs reuse or not: <reason> for each', () => {
+  const { report, list } = briefed(JOBS);
+  const r = run(['--record', report, '--notes', path.dirname(report)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(jLines(list), [
+    'J1 · src/outbox/EmailOutbox.ts:12 · EmailOutbox — a table row in the same save, sent later by a worker with retries → ',
+    'J2 · src/ms/MicrosoftIdentityChanges.ts:40 · MicrosoftIdentityChanges — queued identity changes, one worker drains them → ',
+  ], 'the quoted instruction is no line');
+  assert.match(fs.readFileSync(list, 'utf8'), /^## Same kind of job done before — write `reuse`/m);
+  assert.match(r.stdout, /^SAME JOB: 2 found — the design reuses each one, or says why not/m);
+  let c = run(['--check', list]);
+  assert.equal(c.status, 1, c.stdout);
+  assert.deepEqual(c.stdout.split(/\r?\n/).filter((l) => l.startsWith('OPEN:')), [
+    'OPEN: J1 · src/outbox/EmailOutbox.ts:12 · EmailOutbox',
+    'OPEN: J2 · src/ms/MicrosoftIdentityChanges.ts:40 · MicrosoftIdentityChanges',
+  ]);
+  assert.match(c.stdout, /^SAME JOB: 2 found, 2 open$/m);
+  const fill = (map) => {
+    let text = fs.readFileSync(list, 'utf8');
+    for (const [n, outcome] of Object.entries(map)) text = text.replace(new RegExp('^(' + n + ' · .*?→).*$', 'm'), '$1 ' + outcome);
+    fs.writeFileSync(list, text);
+  };
+  fill({ J1: 'reuse — the role change becomes an outbox row', J2: 'not: short' });
+  c = run(['--check', list]);
+  assert.equal(c.status, 1, c.stdout);
+  assert.deepEqual(c.stdout.split(/\r?\n/).filter((l) => l.startsWith('OPEN:')), [
+    'OPEN: J2 · src/ms/MicrosoftIdentityChanges.ts:40 · MicrosoftIdentityChanges — the reason after not: needs at least 12 characters',
+  ]);
+  fill({ J2: 'not: it sends to Microsoft Graph, a different system with its own ordering' });
+  c = run(['--check', list]);
+  assert.equal(c.status, 0, c.stdout + c.stderr);
+  assert.match(c.stdout, /^SAME JOB: 2 found, 0 open$/m);
+  // Recorded again: each J line keeps its number and outcome.
+  assert.equal(run(['--record', report, '--notes', path.dirname(report)]).status, 0);
+  assert.equal(jLines(list)[0], 'J1 · src/outbox/EmailOutbox.ts:12 · EmailOutbox — a table row in the same save, sent later by a worker with retries → reuse — the role change becomes an outbox row');
+});
+
+test('a report with no same-job answer is refused: the search did not run; "SAME JOB: none" alone is an answer', () => {
+  const { report, list } = briefed('SIBLINGS: none\n', { sameJob: false });
+  const r = run(['--record', report, '--notes', path.dirname(report)]);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /no SAME JOB line and no "SAME JOB: none" line: the same-job search did not run/);
+  assert.equal(fs.existsSync(list), false, 'nothing written');
+  fs.writeFileSync(report, 'SIBLINGS: none\n**SAME JOB: none**\n');
+  assert.equal(run(['--record', report, '--notes', path.dirname(report)]).status, 0);
+  assert.match(fs.readFileSync(list, 'utf8'), /^SAME JOB: none$/m);
+  assert.equal(run(['--check', list]).status, 0);
+});
+
+test('--check: a list with no same-job search (an older list) is open', () => {
+  const { notes } = fixture();
+  const file = path.join(notes, 'siblings.md');
+  fs.writeFileSync(file, 'SIBLINGS: none\n');
+  const r = run(['--check', file]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^OPEN: SAME JOB — the same-job search is missing/m);
 });

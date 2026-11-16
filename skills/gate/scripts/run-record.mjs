@@ -28,15 +28,16 @@ export function greenOf(lines, code) {
 
 // Called once, at the start of a run; the record is written when the process exits. said: the run's own
 // lines, filled as it goes; tree(): the working tree's id now; startTree: that id at the start when the
-// caller has it already (its --log line).
-export function keepRunRecord({ argv, said, tree, startTree = '', keepDays = 7 }) {
+// caller has it already (its --log line); partial: a --changed-since run, which ran only some breaks (2026-11-16).
+export function keepRunRecord({ argv, said, tree, startTree = '', keepDays = 7, partial = false }) {
   const started = new Date();
   const treeStart = startTree || tree();
   process.on('exit', (code) => {
     try {
       const green = greenOf(said, code);
       const record = { v: 1, argv: argv.map(String), cwd: process.cwd(), startedAt: started.toISOString(), endedAt: new Date().toISOString(),
-        exit: code, green, treeStart, treeEnd: green === 'passed' ? tree() : '', verdict: [...said].reverse().find((l) => /^RED-PROOF: /.test(l)) || '' };
+        exit: code, green, treeStart, treeEnd: green === 'passed' ? tree() : '', verdict: [...said].reverse().find((l) => /^RED-PROOF: /.test(l)) || '',
+        ...(partial ? { partial: true } : {}) };
       const dir = runRecordDir();
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(path.join(dir, `${started.getTime()}-${process.pid}.json`), JSON.stringify(record, null, 2) + '\n');

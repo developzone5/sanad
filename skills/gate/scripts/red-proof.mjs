@@ -10,6 +10,11 @@
 //   green      (--then-green): the same command on the fixed tree passes, before any reviewer reads. It runs
 //              FIRST and alone; when it fails, no red run starts (2026-11-11).
 //   one break  (--break <file> --find <text> --put <text>): a test of code that already works.
+//   fix round  (--breaks <json> --changed-since <git ref>, 2026-11-16: in a fix round of a big task every re-proof
+//              ran all 48 breaks, about 15 minutes, though each fix touched one or two files; four rounds lost
+//              about an hour): only the breaks the change since <ref> can reach run; the old code and green run
+//              as usual. It says RED-PROOF: PARTIAL, never PROVED, and never writes the proof record: run the
+//              full proof (without --changed-since) once before the final review.
 //
 // Why a script: a red run typed as a plain test command is kept as a failed check by the push
 // guard forever, and a hand-written "swap; test; restore" compound can never be re-run green.
@@ -44,8 +49,8 @@
 //
 // Usage:
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> [--old <git-ref> --files <a,b>]
-//        [--breaks <json>] [--then-green] [--base <ref>] [--cwd <dir>] [--log <file>] [--parallel <n>]
-//        [--timeout-min <n>] [--test-env <path>] [--local] [--show-remote] -- <executable> [args...]
+//        [--breaks <json> [--changed-since <git ref>]] [--then-green] [--base <ref>] [--cwd <dir>] [--log <file>]
+//        [--parallel <n>] [--timeout-min <n>] [--test-env <path>] [--local] [--show-remote] -- <executable> [args...]
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --break <file> --find <text> --put <text>
 //        [--cwd <dir>] [--log <file>] [--timeout-min <n>] [--test-env <path>] -- <executable> [args...]
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --warm [--parallel <n>] [--cwd <dir>] -- <test command>
@@ -57,6 +62,14 @@
 //   describe block or a file name; every test in the changed test files whose title holds it must fail.
 //   A tag shared with older tests ("[C1]" of an earlier ticket) is refused: name each test by its own words.
 //   The find text may be written with LF or CRLF line endings; it matches either.
+// --changed-since <git ref> (only with --breaks; a commit, a branch or a tree id such as a proof log's first line
+//   names): a break runs when its file differs between <ref> and the working tree (untracked files count), or when
+//   a mustFail part names a test in a test file that differs (matched as the proof record credits test files). Before
+//   any run: "RED-PROOF: PARTIAL — <k> of <n> break(s) changed since <ref>: <names>; the others are not run." At the
+//   end: "RED-PROOF: PARTIAL ✓ — <k> of <n> break(s) caught …" with exit 0, or the usual failure and exit code. No
+//   break changed is allowed: the old code and green still run (with neither asked, nothing runs, exit 0). The
+//   breaks are checked whole first (each matches once, no ambiguous or unproven part). The run record holds
+//   `partial: true`; the proof record is left as it is. On the test machine only the kept breaks are sent.
 // --old with a fix file that only adds lines, and adds names the tests use (a new message, a new
 // constant): that file stays at the fix for the old-code run, so the old code compiles; the run says so.
 // The tests are read as code: a name only a comment or a string's text holds is not a use (2026-11-15).
@@ -107,7 +120,8 @@
 // slashes), read there; `git config sanad.remoteTestEnv <path>` sets it once per repository.
 // --show-remote prints the command the test machine would run, and stops. --plan <json> is how this
 // mode hands a run to the test machine: { old: [{ file, content64|null }], oldLabel, breaks, green,
-// commit, testFiles }. `commit` is the commit the sync made (2026-11-12: the proof there read HEAD again
+// commit, testFiles, partial }. `partial` ({ ref, of }, 2026-11-16) marks a --changed-since run: the machine there
+// says PARTIAL, not PROVED. `commit` is the commit the sync made (2026-11-12: the proof there read HEAD again
 // after the sync, and a second sync in between moved it); the copies are that commit and nothing else.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -329,6 +343,16 @@ export function caughtTestFiles(files, parts, textOf) {
     for (const d of (hits.length ? hits : docs.filter(d => d.text.includes(p)))) credited.add(d.f);
   }
   return [...credited].sort();
+}
+
+// The breaks a --changed-since run keeps (2026-11-16): a break whose file is among `changed` (repository paths, as
+// git prints them), or whose mustFail names a test in a changed test file (caughtTestFiles: a declared title holds
+// the part, or, when no title does, the file's text). On Windows a path matches in any case.
+export function keptSince(breaks, changed, textOf, platform = process.platform) {
+  const fold = (f) => { const p = String(f).replace(/\\/g, '/').replace(/^(?:\.\/)+/, ''); return platform === 'win32' ? p.toLowerCase() : p; };
+  const files = new Set(changed.map(fold));
+  const tests = changed.filter(f => TEST_FILE.test(String(f).replace(/\\/g, '/')));
+  return breaks.filter(b => files.has(fold(b.file)) || (tests.length > 0 && caughtTestFiles(tests, (b.mustFail || []).map(String), textOf).length > 0));
 }
 
 // The id of the tree a proof runs on: the working tree as git would commit it (the same temporary-index
@@ -569,9 +593,10 @@ async function main() {
   });
   // The run record the stop hook reads (run-record.mjs, 2026-11-15): a green run's result, kept when its output
   // went to a file. Written on exit, after the handler above put any swapped file back. The test machine's plan
-  // run leaves it to the machine that asked.
+  // run leaves it to the machine that asked. A --changed-since run's record says partial (2026-11-16).
   if (repo && !plan && opts.includes('--then-green')) {
-    keepRunRecord({ argv: process.argv.slice(2), said: state.said, tree: () => treeId(repo), startTree: (/^RED-PROOF-LOG: tree ([0-9a-f]{40,64}) /.exec(state.head) || [])[1] });
+    keepRunRecord({ argv: process.argv.slice(2), said: state.said, tree: () => treeId(repo), startTree: (/^RED-PROOF-LOG: tree ([0-9a-f]{40,64}) /.exec(state.head) || [])[1],
+      partial: opts.includes('--changed-since') });
   }
   // Puts the swapped file back; false (with the reason said) when that fails.
   function putBack() {
@@ -583,7 +608,7 @@ async function main() {
   const oldRef = opt('--old');
   const oldFiles = (opt('--files') || '').split(',').map((f) => f.trim().replace(/\\/g, '/')).filter(Boolean);
   const usage = () => {
-    say('usage: red-proof.mjs --repo <path> [--old <git-ref> --files <a,b>] [--breaks <json>] [--then-green] [--base <ref>] [--cwd <dir>] [--log <file>] -- <executable> [args...]');
+    say('usage: red-proof.mjs --repo <path> [--old <git-ref> --files <a,b>] [--breaks <json> [--changed-since <git ref>]] [--then-green] [--base <ref>] [--cwd <dir>] [--log <file>] -- <executable> [args...]');
     say('   or: red-proof.mjs --repo <path> --break <file> --find <text> --put <text> [--cwd <dir>] [--log <file>] -- <executable> [args...]');
     say('   options: [--parallel <n>] [--timeout-min <n>] [--test-env <path>] [--local] [--show-remote]; or --repo <path> --drop-copies');
     say('   or: red-proof.mjs --repo <path> --warm [--parallel <n>] [--cwd <dir>] -- <executable> [args...]');
@@ -645,6 +670,11 @@ async function main() {
       say('RED-PROOF: each break needs file, find, put and a non-empty mustFail list.'); process.exit(2);
     }
   }
+  // --changed-since <ref> (2026-11-16, see the header) picks which of the --breaks run again, so it needs them; its
+  // ref is checked below, once git is at hand. The test machine gets the kept breaks in its plan, not the option.
+  const since = !plan && opts.includes('--changed-since') ? String(opt('--changed-since') ?? '') : null;
+  if (since !== null && !opt('--breaks')) { say('RED-PROOF: --changed-since needs --breaks: it picks which of those breaks run again. Nothing ran.'); process.exit(2); }
+  if (since !== null && (!since || since.startsWith('-'))) { say('RED-PROOF: --changed-since needs a git ref (a commit, a branch or a tree id). Nothing ran.'); process.exit(2); }
   // A break that puts back its own text changes nothing, so it proves nothing (2026-11-12, S6).
   const same = breaks.filter(b => b.put === b.find);
   if (same.length) {
@@ -660,7 +690,8 @@ async function main() {
   const oldLabel = oldPlan ? String(plan.oldLabel || 'the old code') : oldRef;
   const oldNames = oldPlan ? oldPlan.map(o => o.file) : oldFiles;
   const hasOld = Boolean(oldPlan || oldRef);
-  if (!repo || !command.length || (oldRef ? !oldFiles.length : false) || (!hasOld && !breaks.length && !warm)) usage();
+  // A --changed-since plan with no kept break and no old code still runs green on the test machine (2026-11-16).
+  if (!repo || !command.length || (oldRef ? !oldFiles.length : false) || (!hasOld && !breaks.length && !warm && !(plan?.partial && green))) usage();
   if (warm && (hasOld || breaks.length)) { say('RED-PROOF: --warm only prepares the kept copies; run it alone, before the proof.'); process.exit(2); }
   // The time each run (and the compile check) may take (2026-11-09: a run hung 25 minutes, unseen).
   const timeoutMin = opt('--timeout-min') === undefined ? 15 : Number(opt('--timeout-min'));
@@ -679,6 +710,12 @@ async function main() {
     process.exit(2);
   }
   const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'buffer', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  // The --changed-since ref: a commit or a tree git knows (2026-11-16).
+  if (since !== null) {
+    let known = false;
+    try { known = Boolean(git('rev-parse', '--verify', '-q', since + '^{tree}').toString('utf8').trim()); } catch { /* not known */ }
+    if (!known) { say(`RED-PROOF: unknown --changed-since ref ${since}; nothing ran.`); process.exit(2); }
+  }
   // On the test machine, the commit its sync made (2026-11-12, S3): it must be there.
   if (plan?.commit) {
     let there = false;
@@ -782,6 +819,32 @@ async function main() {
       .filter(f => f && !TEST_FILE.test(f) && !/\.md$/i.test(f) && !oldFiles.includes(f)).sort();
     if (differ.length) say(`RED-PROOF: WARNING — product file(s) differ from ${oldRef} but are not in --files, so the old-code run keeps them at the fix: ${differ.slice(0, 8).join(', ')}${differ.length > 8 ? ` (+${differ.length - 8} more)` : ''}. If the fix is in one of them, add it to --files.`);
   }
+  // --changed-since (2026-11-16): only the breaks the change since <ref> can reach run (keptSince), here or on the
+  // test machine: the list is cut before its plan is built. Every break was checked above (it matches once, no part
+  // is ambiguous or leaves a check unproven), so the full proof later refuses nothing new. `partial` ({ ref, of })
+  // makes the verdict PARTIAL and keeps the proof record as it is; on the test machine it comes in the plan.
+  const partial = since !== null ? { ref: since, of: breaks.length }
+    : plan?.partial ? { ref: String(plan.partial.ref || ''), of: Number(plan.partial.of) || 0 } : null;
+  if (since !== null) {
+    let changed;
+    try {
+      const list = (...a) => git(...a).toString('utf8').split('\0').filter(Boolean);
+      changed = [...new Set([...list('diff', '--name-only', '--no-renames', '--relative', '-z', since, '--'), ...list('ls-files', '--others', '--exclude-standard', '-z')])];
+    } catch (e) {
+      say(`RED-PROOF: could not list the files changed since ${since} — ${(String(e.stderr || '').trim().split(/\r?\n/).pop() || e.message)}; nothing ran.`);
+      process.exit(2);
+    }
+    const kept = keptSince(breaks, changed, textAt);
+    const also = [hasOld && 'the old code', green && 'green'].filter(Boolean).join(' and ');
+    say(kept.length
+      ? `RED-PROOF: PARTIAL — ${kept.length} of ${breaks.length} break(s) changed since ${since}: ${kept.map(b => b.name).join(', ')}; ${kept.length === breaks.length ? 'that is every break' : 'the others are not run'}.`
+      : `RED-PROOF: PARTIAL — 0 of ${breaks.length} break(s) changed since ${since}; no break is run${also ? `, only ${also}` : ''}.`);
+    breaks = kept;
+    if (!kept.length && !hasOld && !green) {
+      say(`RED-PROOF: PARTIAL ✓ — 0 of ${partial.of} break(s) run (none changed since ${since}), and no --old or --then-green run was asked, so nothing ran; run the full proof (without --changed-since) once before the final review.`);
+      process.exit(0);
+    }
+  }
 
   // On the test machine when there is one, by itself (2026-11-07: the rule "tests run on the test
   // machine" was written, but this script only ran here, so the proof ran on the busy desktop).
@@ -862,7 +925,7 @@ async function main() {
     // then (2026-11-12, S3). The changed test files go too: there, nothing differs from that commit.
     fs.writeFileSync(path.join(local, planName), JSON.stringify({
       oldLabel: oldRef, green, breaks, commit: synced[1], testFiles: testFiles || [],
-      warm, kept: keptAtFix.map(k => k.file),
+      warm, kept: keptAtFix.map(k => k.file), ...(partial ? { partial } : {}),
       old: hasOld ? oldRun.map(f => { try { return { file: f, content64: git('show', `${oldRef}:${f}`).toString('base64') }; } catch { return { file: f, content64: null }; } }) : [],
     }));
     const here = path.dirname(fileURLToPath(import.meta.url));
@@ -913,6 +976,9 @@ async function main() {
   // The proof record entry of a passing --breaks run (2026-11-12, S4/C5/S12/S8): under this command and
   // folder, the changed test files that hold a test a caught break named, and the files the breaks changed.
   function record(targets, extra = {}) {
+    // A --changed-since run proved only the breaks it kept: it never writes the record, so pre-review never takes it
+    // for the full proof (2026-11-16). Here and after a test machine's run.
+    if (partial) return;
     const parts = breaks.filter(b => !b.single).flatMap(b => b.mustFail.map(String));
     if (!parts.length || !testFiles) return;
     const files = caughtTestFiles(testFiles, parts, (f) => fs.readFileSync(path.join(repo, f), 'utf8')).filter(f => fileHashes[f]);
@@ -1417,7 +1483,11 @@ async function main() {
       : `RED-PROOF: NOT PROVED ✗ — ${late.length} run(s) did not finish within ${timeoutMin} min, so nothing is proved. Fix the hang or raise --timeout-min, then run again; files restored.`);
     finish(5);
   }
-  if (breaks.length && !breaks[0].single) say(ok ? `RED-PROOF: PROVED ✓ — ${hasOld ? 'red on the old code, ' : ''}${breaks.length} break(s) caught${green ? ', green on the fix' : ''}; files restored.` : 'RED-PROOF: NOT PROVED ✗ — see the lines above; files restored.');
+  // A --changed-since run says PARTIAL, never PROVED (2026-11-16): it ran only the breaks the change reached.
+  if (partial) {
+    const ran = breaks.length ? `${breaks.length} of ${partial.of} break(s) caught` : `0 of ${partial.of} break(s) run (none changed since ${partial.ref})`;
+    say(ok ? `RED-PROOF: PARTIAL ✓ — ${ran}${hasOld ? ', red on the old code' : ''}${green ? ', green on the fix' : ''}; files restored; run the full proof (without --changed-since) once before the final review.` : 'RED-PROOF: NOT PROVED ✗ — see the lines above; files restored.');
+  } else if (breaks.length && !breaks[0].single) say(ok ? `RED-PROOF: PROVED ✓ — ${hasOld ? 'red on the old code, ' : ''}${breaks.length} break(s) caught${green ? ', green on the fix' : ''}; files restored.` : 'RED-PROOF: NOT PROVED ✗ — see the lines above; files restored.');
   // The record pre-review reads: only a run that proved at least one break of the rule under test, written
   // here (the test machine's plan run leaves it to the machine that asked, see runRemote).
   if (ok && fileHashes && !plan) record(targetHashes);

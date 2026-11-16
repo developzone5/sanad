@@ -25,6 +25,8 @@ Every line of items 2 and 3 is a note. The author must fix it or bring the user'
 - `HYGIENE:` literals that copy an existing constant or default, one rule hand-copied in two places, comments naming numbers or lists the change made stale, test resources not released on a failure path.
 - `SPEC WORDS:` each ticket line → the test that proves it; a line tying two things together ("same as", "matches") → an equality test of both sides. No test = Gap.
 - `EXISTING PATTERN:` the same problem already solved in the repo (a helper, a guard, a component); a second, different solution or a sibling left on the old one is a Gap.
+- `BEST DESIGN:` is this the best way to do the job? Search how the repo already does the same KIND of work (a queue table and its worker, a shared client, an existing screen), not only the same names. A better way is a `Question` note that names it with file:line. A `[design]` check line is the author's choice: attack it, never just confirm it (2026-11-16, PR #784).
+- `OLD CODE TOO:` "the old code does it too" or "the other calls do the same" is never a pass. When the change relies on, copies or widens a weak spot (a token never cleared, an error kept as text, a missing retry), it is a `Gap` or `Bug` note that names the weak spot; the user decides it.
 - `TESTS CAN FAIL:` each new or changed test was shown red on the old code (quoted in the proof), or you name the line of the change that makes it fail without the fix. A test that passes on the old code is a Gap.
 - `TYPES:` a new literal (status, code, kind, file extension list) used in more than one place has one shared constant, union or enum; two hand-copied lists are a Gap.
 
