@@ -1,6 +1,6 @@
 # Full PR review
 
-Read when the user asks for a review of any kind, on any project: the user's own PR, a teammate's PR, a branch, or a whole series; and before any push that carries code. It is the strongest review Sanad has. Delta re-checks and join checks do not replace it.
+Read when the user asks for a review of any kind, on any project: the user's own PR, a teammate's PR, a branch, or a whole series. It is the strongest review Sanad has. A task's own push uses the review its size requires (loop.md Step 3.5): Small and Medium one fresh-eyes review, Big the full round (2026-11-17: this file asked every push for the full review on both engines, which undid the Small and Medium route). Delta re-checks and join checks do not replace it.
 
 ## How to run it
 

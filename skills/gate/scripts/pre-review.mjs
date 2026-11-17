@@ -36,12 +36,15 @@
 // A part left out because its option is missing (--lines, --check, --was) is printed as skipped.
 // A .NET change is built and tested by the test step, not here.
 //
-// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--before-proof]
+// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--before-proof] [--no-cache]
 //   --before-proof (2026-11-13): run right before red-proof.mjs. Everything runs except the proof part of
 //   the test asserts check. A label, quote or commit fixed now does not void a proof; run it again after the
 //   proof (Step 3.5), where every part runs.
 //   --base defaults to origin/<sanad.integration | staging>; --node (or `git config sanad.node`)
 //   is the Node that runs the package tools.
+//   A check that passed on the exact same code, base and notes files is not run again (pre-review-cache.mjs,
+//   2026-11-16: pre-review runs twice per fix round, and repeating lint and types on the test machine took half
+//   of a small task's working time); it shows as `(same code: passed at <time>)`. --no-cache runs every check.
 // Exit 0: every check passed. 1: a check failed. 2: usage error.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,6 +55,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { isMain } from './is-main.mjs';
 import { bashEnv, gitBash } from './git-bash.mjs';
+import { checkKey, lookup, remember, runIdentity } from './pre-review-cache.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = /\.(?:[cm]?[jt]sx?)$/i;
@@ -329,19 +333,27 @@ export function runChecks(checks, run = runOne) {
   }));
 }
 
-// opts.sync: tests only (in place of the real sync to the test machine).
+// opts.sync: tests only (in place of the real sync to the test machine). opts.noCache: run every check.
 export async function preReview(opts) {
   const { files, checks, remote, skipped, placesOwed, siblingsOwed } = planChecks(opts);
+  // Checks that passed on this exact code before are read, not run (pre-review-cache.mjs).
+  const ident = opts.noCache ? null : runIdentity(opts.repo, opts.base);
+  for (const c of checks) {
+    c.key = checkKey(c, ident);
+    const hit = lookup(c.key);
+    if (hit) c.cached = hit;
+  }
   let synced = '';
-  if (checks.some(c => c.remote)) {
+  if (checks.some(c => c.remote && !c.cached)) {
     const sync = (opts.sync || syncRemote)(opts.repo, remote);
-    for (const c of checks.filter(c => c.remote)) {
+    for (const c of checks.filter(c => c.remote && !c.cached)) {
       if (!sync.ok) c.notRun = `not run on ${remote.host}: ${sync.text}`;
       else if (sync.via) c.args = ['-o', 'HostName=' + sync.via, ...c.args];
     }
     if (sync.ok) synced = `  (no node_modules here: lint and types run on ${remote.host}, on this folder's code${sync.tree ? ', tree ' + String(sync.tree).slice(0, 12) : ''})`;
   }
-  const results = await runChecks(checks);
+  const results = await runChecks(checks, c => (c.cached ? Promise.resolve({ ...c, code: 0, out: c.cached.out, ms: 0 }) : (opts.run || runOne)(c)));
+  remember(results);
   const size = results.find(r => r.name === 'size');
   for (const [owes, without] of [[placesOwed, placesWithout], [siblingsOwed, siblingsWithout]]) {
     if (!owes) continue;
@@ -353,7 +365,8 @@ export async function preReview(opts) {
   const lines = [`${label}: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed${skippedText} · ${files.length} changed file(s) · ${opts.repo}`];
   if (synced) lines.push(synced);
   for (const r of results) {
-    lines.push(`  ${r.code === 0 ? '✓' : '✗'} ${r.name}${r.notRun ? ' — NOT RUN' : ` (${(r.ms / 1000).toFixed(1)} s)`}`);
+    const when = r.cached ? new Date(r.cached.at).toTimeString().slice(0, 5) : '';
+    lines.push(`  ${r.code === 0 ? '✓' : '✗'} ${r.name}${r.notRun ? ' — NOT RUN' : r.cached ? ` (same code: passed at ${when})` : ` (${(r.ms / 1000).toFixed(1)} s)`}`);
     const text = r.out.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).filter(l => l.trim());
     if (r.code !== 0) lines.push(...failureLines(text).map(l => '      ' + l));
     // The project check's GAP and NOTE lines are leads for the review: shown also when it passes (2026-11-12).
@@ -368,6 +381,7 @@ function parse(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--before-proof') { o.beforeProof = true; continue; }
+    if (k === '--no-cache') { o.noCache = true; continue; }
     if (!['--repo', '--base', '--was', '--lines', '--check', '--places', '--siblings', '--node'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
@@ -381,11 +395,11 @@ if (isMain(import.meta.url)) {
     if (!repo) throw new Error('not inside a git repository: ' + (o.repo || process.cwd()));
     const integration = git(repo, ['config', '--get', 'sanad.integration']) || 'staging';
     const node = o.node || git(repo, ['config', '--get', 'sanad.node']) || process.execPath;
-    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof });
+    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof, noCache: !!o.noCache });
     process.stdout.write(text + '\n');
     process.exitCode = ok ? 0 : 1;
   } catch (error) {
-    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--before-proof]\n');
+    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--before-proof] [--no-cache]\n');
     process.exitCode = 2;
   }
 }

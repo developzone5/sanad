@@ -25,7 +25,7 @@ export function addedLines(diff) {
   const found = [];
   let file = null, line = 0;
   for (const raw of String(diff).split(/\r?\n/)) {
-    if (raw.startsWith('+++ ')) { file = raw === '+++ /dev/null' ? null : raw.slice(4).replace(/^b\//, ''); continue; }
+    if (raw.startsWith('+++ ')) { file = raw === '+++ /dev/null' ? null : raw.slice(4).replace(/\t$/, '').replace(/^b\//, ''); continue; }
     const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
     if (hunk) { line = Number(hunk[1]); continue; }
     if (file && raw.startsWith('+')) { found.push({ file, line, text: raw.slice(1) }); line++; }

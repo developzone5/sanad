@@ -153,12 +153,17 @@ export function remoteTarget(executable, args, toplevel) {
 }
 function probeRemote(remote, executable) {
   if (/["&|<>^%\r\n]/.test(remote.repo)) throw new Error('Unsafe sanad.remoteRepo.');
-  const out = execFileSync(executable, [...remote.sshArgs, `cd /d "${remote.repo}" && git rev-parse HEAD^^{tree} && git status --porcelain --untracked-files=no`],
+  const out = execFileSync(executable, [...remote.sshArgs, `cd /d "${remote.repo}" && git rev-parse HEAD^^{tree} && git diff HEAD --name-status --no-renames && git ls-files --others --exclude-standard -t`],
     { encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
   const lines = out.split(/\r?\n/).map(line => line.trimEnd()).filter(Boolean);
   const at = lines.findIndex(line => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(line.trim()));
   if (at < 0) throw new Error('The test machine did not name its tree.');
   return { tree: lines[at].trim(), dirty: lines.slice(at + 1).join('\n') };
+}
+// The first few paths of that changed-files text (git diff --name-status, then untracked as "? path"), for a reason line: "a.cs, b.cs, c.cs and 2 more".
+function changedPaths(dirty, most = 3) {
+  const paths = String(dirty).split(/\r?\n/).map(line => line.replace(/^\s*\S{1,2}\s+/, '').trim()).filter(Boolean);
+  return paths.slice(0, most).join(', ') + (paths.length > most ? ` and ${paths.length - most} more` : '');
 }
 
 // `remoteProbe` (a function, so never from a JSON spec) stands in for the test machine in tests.
@@ -230,11 +235,19 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
       } catch { sourceFailure = 'Cannot capture the Git source tree after verification.'; }
     }
     // Another task's sync during this run changed the code under it: the result is not for this code.
+    // 2026-11-17 (audit: remote proof accepts tracked source changes during verification): this last look also
+    // returned the clone's changed files, and nothing read them. A tracked file changed there during the run
+    // leaves the committed tree as it was, so the run still "passed" for code nobody committed. Changed files
+    // there now fail the receipt. The older reasons keep their place: this one is only for a run that had none.
     if (remote) {
       try {
         const there = await askRemote();
         receipt.remote.treeAfter = there.tree;
         if (there.tree !== source.treeBefore) sourceFailure ||= 'The code on the test machine changed while the command was running (another task put its code there). Run remote-sync.sh and the check again.';
+        else if (there.dirty) {
+          const paths = redact(changedPaths(there.dirty), secrets);
+          sourceFailure ||= `The code on the test machine (${remote.host}) has uncommitted changes after the check${paths ? ': ' + paths : ''}. They were not there before the run, so the result is not for this code. Clean the folder there, then run remote-sync.sh and the check again.`;
+        }
       } catch { sourceFailure ||= `Cannot read the code on the test machine (${remote.host}) after the check.`; }
     }
     failure ||= sourceFailure;

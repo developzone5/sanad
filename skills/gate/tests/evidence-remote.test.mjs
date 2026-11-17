@@ -11,6 +11,8 @@ import { runCommand, remoteTarget } from '../scripts/evidence.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-evidence-remote-'));
 process.env.SANAD_CHECK_LOCK_DIR = path.join(root, 'locks');
+// Best effort: Windows may hold the copied program for a moment after its last run.
+test.after(() => { try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* left to the temp cleaner */ } });
 const emptyIgnore = path.join(root, 'empty-ignore');
 fs.writeFileSync(emptyIgnore, '');
 // A program named "ssh" that we can run: Node itself under that name. It gets `-e <script>` first, then the

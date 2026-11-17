@@ -144,9 +144,11 @@ if (r.lastEdit === -1) allow();
 // names the content, so the same tree in another worktree or clone is the same
 // code (2026-11-05: a checkout of the tested commit in the main folder kept
 // asking for a rerun). Any git error → no memo.
-function gitRead(args, cwd, timeout = 8000) {
+// raw: the output as git wrote it (a `-z` list, whose first line may start with a space).
+function gitRead(args, cwd, timeout = 8000, raw = false) {
   try {
-    return require('child_process').execFileSync('git', args, { cwd: cwd || input.cwd || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(8000, timeout), windowsHide: true }).trim();
+    const text = require('child_process').execFileSync('git', args, { cwd: cwd || input.cwd || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(8000, timeout), windowsHide: true });
+    return raw ? text : text.trim();
   } catch (e) { return null; }
 }
 let verifiedTree = '';
@@ -177,7 +179,29 @@ function remoteRefsOnly() {
 // `git switch -q main && git pull -q` asked for a build). A fetched-ref move there needs a clean folder,
 // as above. A merge with local commits, a local-only branch or a dirty folder matches no tip. Any git
 // error, an unknown folder or the time budget spent → no memo (the stop hook has 20 s in all).
+// Clean means clean of code (2026-11-17): the folder is judged at the stop, and a prose file edited after
+// the sync (README.md, which obliges no check) made it dirty, so the earlier switch read as a change. A
+// changed, staged, deleted, renamed or new file counts only when it is a code file: the rule for edits,
+// applied to its name inside the repository, wherever the repository is. A submodule, or a folder git
+// reports whole (a repository inside it), is never prose. A line of a kind not known here → not clean.
 const SYNC_BUDGET_MS = 5000;
+const STATUS_FIELDS = new Map([['1', 8], ['2', 9], ['u', 10], ['?', 1]]);   // git status --porcelain=v2: the fields before the name
+function cleanOfCode(dir, read) {
+  const text = read(['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--untracked-files=all'], dir, true);
+  if (text === null) return false;
+  const lines = text.split('\0');
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i] || lines[i].startsWith('# ')) continue;                  // a header line (`# stash <n>` with status.showStash)
+    const fields = lines[i].split(' ');
+    const before = STATUS_FIELDS.get(fields[0]);
+    if (!before || fields.length <= before) return false;
+    if (before > 1 && fields[2] !== 'N...') return false;                  // a submodule
+    const names = [fields.slice(before).join(' ')];
+    if (fields[0] === '2') names.push(lines[++i] || '');                   // a rename or copy: the old name follows
+    if (names.some((name) => !name || /[\\/]$/.test(name) || scan.isCodePath('repo/' + name))) return false;
+  }
+  return true;
+}
 function syncedToRemoteTips() {
   // An unexpected error keeps the old rule (the sync counts as a change), never a silent allow (2026-11-14).
   try { return syncsAtRemoteTips(); } catch (e) { return false; }
@@ -186,14 +210,14 @@ function syncsAtRemoteTips() {
   const moves = Array.isArray(r.syncMoves) ? r.syncMoves : [];
   if (!/^<git(?:-remote)?>$/.test(r.lastEditPath) || !moves.length) return false;
   const deadline = Date.now() + SYNC_BUDGET_MS;
-  const read = (args, dir) => { const left = deadline - Date.now(); return left > 0 ? gitRead(args, dir, left) : null; };
+  const read = (args, dir, raw) => { const left = deadline - Date.now(); return left > 0 ? gitRead(args, dir, left, raw) : null; };
   const folders = new Map();   // folder -> a move there was not to a fetched ref, so it must be at a remote tip
   for (const m of moves) {
     if (!m || typeof m.repo !== 'string' || !m.repo) return false;
     folders.set(m.repo, folders.get(m.repo) === true || m.remote !== true);
   }
   for (const [dir, needsTip] of folders) {
-    if (read(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=normal'], dir) !== '') return false;
+    if (!cleanOfCode(dir, read)) return false;
     if (!needsTip) continue;
     const tree = read(['rev-parse', '--verify', '-q', 'HEAD^{tree}'], dir);
     if (!tree || !/^[0-9a-f]{40,64}$/i.test(tree)) return false;
@@ -245,7 +269,10 @@ if (!failedAfterEdit && !pendingAfterEdit && (r.lastRunningHelper ?? -1) > r.las
 
 // The check that blocks, named, so it is found at once (2026-11-06: hunting an unnamed one cost ~20 min).
 function shown(command) { const c = String(command || '').replace(/\s+/g, ' ').trim(); return c ? (c.length > 160 ? c.slice(0, 157) + '…' : c) : 'unknown'; }
-const file = /^<git(?:-remote)?>$/.test(r.lastEditPath) ? ' (last change: a git merge/reset/switch/stash)' : r.lastEditPath && r.lastEditPath !== '<generated>' ? ' (last edit: ' + path.basename(r.lastEditPath) + ')' : '';
+// The edit that is owed, named too. Once the syncs after it are credited (the remote-tip memo), the owed edit
+// is an earlier one: blaming the git change there sent the author after the wrong cause (2026-11-17).
+const owed = synced ? String(r.lastNonSyncEditPath || '') : lastEdit === r.lastNonSyncEdit ? String(r.lastNonSyncEditPath || r.lastEditPath || '') : r.lastEditPath;
+const file = /^<git(?:-remote)?>$/.test(owed) ? ' (last change: a git merge/reset/switch/stash)' : owed && owed !== '<generated>' ? ' (last edit: ' + path.basename(owed) + ')' : '';
 
 // A live background check of the current work, and nothing failed: its finish notice brings the next
 // stop back to this gate, so the stop waits instead of blocking. Blocking here only made every status

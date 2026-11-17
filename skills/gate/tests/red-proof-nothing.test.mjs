@@ -79,15 +79,18 @@ function fixture() {
   return { repo, git, ran, env, proof };
 }
 
-test('a "nothing happens" check whose file no break names: refused before any run (exit 2), the file and its line named', () => {
+// 2026-11-17 (audit: one caught test certified another rule's vacuous check in the same file): the refusal goes by
+// the test that holds the check, not by its file, so its lines no longer say "names a test in this file" (the
+// words this test held before); they name the test and the mustFail name that would prove it.
+test('a "nothing happens" check whose test no break names: refused before any run (exit 2), the file, its line and its test named', () => {
   const { repo, git, ran, proof } = fixture();
   const status = git('status', '--porcelain');
   const rule = fs.readFileSync(path.join(repo, 'rule.cjs'));
   const result = proof(process.execPath, [['cleans', ['cleans the list']]], ['--old', 'HEAD', '--files', 'app.cjs', '--then-green', '--parallel', '2']);
   assert.equal(result.status, 2, result.stdout);
-  assert.match(result.stdout, /UNPROVEN ✗ src\/save\.test\.cjs: 1 new "nothing happens" check\(s\), and no break here names a test in this file/);
-  assert.match(result.stdout, /src\/save\.test\.cjs:3 — expect\(api\.save\)\.toHaveBeenCalledTimes\(0\);/);
-  assert.match(result.stdout, /RED-PROOF: NOT PROVED ✗ — .*Add a break whose mustFail names a test in each file above \(a run on the old code does not count for these lines\)\. Nothing ran; files untouched\./);
+  assert.match(result.stdout, /UNPROVEN ✗ src\/save\.test\.cjs: 1 new "nothing happens" check\(s\) whose own test no break here names/);
+  assert.match(result.stdout, /src\/save\.test\.cjs:3 — expect\(api\.save\)\.toHaveBeenCalledTimes\(0\); → its test "saves nothing on a closed form" is named by no caught break: a break of that test's rule whose mustFail names it \("saves nothing on a closed form"\) would prove it/);
+  assert.match(result.stdout, /RED-PROOF: NOT PROVED ✗ — .*Add a break of each such test's rule whose mustFail names that test \(a run on the old code does not count for these lines\)\. Nothing ran; files untouched\./);
   assert.doesNotMatch(result.stdout, /SaveTests\.cs/, 'the C# file is the dotnet proof\'s: this node command does not run it');
   assert.doesNotMatch(result.stdout, /clean\.test\.cjs:/, 'a file with no "nothing happens" check is not named');
   assert.equal(ran(), 0, 'no test run started (not green, not the old code, not a break)');

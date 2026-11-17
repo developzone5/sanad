@@ -20,14 +20,12 @@ Loaded by the `sanad-implementation` stage. "Sanad Step N" anywhere means the st
 
 ## Size — the size check picks it
 
-Before code: `node <gate>/size-check.mjs --repo <repo> --files <planned files, comma-separated> --names <the places list names>`. With the names of the places list (Step 1, item 4) it reads each named function whole; without them, file names only. It runs again on the real change inside `pre-review`. Size up freely; size down only on the user's verbatim words. `SIZE GREW` means: add what the larger size needs, now.
+Before code: `node <gate>/size-check.mjs --repo <repo> --files <planned files, comma-separated> --names <the places list names>`. With the names of the places list (Step 1, item 4) it reads each named function whole and counts its callers; without them, file names only. It runs again on the real change inside `pre-review`. Size up freely; size down only on the user's verbatim words. `SIZE GREW` means: add what the larger size needs, now.
 
 - **Small** — one side (page or server) and no risk signal. No experts, no waiting. One quick review, started right after the proof. A slow suite is left to CI and the PR text says so. Target: 5–10 minutes.
 - **Medium** — both sides, a database query, the shared API contract, or another medium signal. A changed query is read by one Database seat before code. The proof, one full review, the full suite. Target: 20–30 minutes.
 - **Big** — access, money, a migration, concurrency, files or URLs, a dependency, or a function with more than 10 callers. The boss routes ([boss-routing.md](boss-routing.md)); experts plan first (`/braintrust`); then the full review round.
 - **Text only** (the check says tiny) — Small without rules 1 to 3: no list and no test. Lint, a look at the screen, one review.
-
-The size changes the depth only. The six rules are the same in every size.
 
 **One job per PR.** Over about 400 logic lines or 30 code files (not counting tests, texts, generated files), `pre-review` asks the user: split it, or keep it as one job? A keep: `one-job.mjs --keep "<their words>"` and a `One job: <why>` PR text line.
 
@@ -57,7 +55,7 @@ Every size starts from the `J<n>` lines.
 
 - **Small:** no seat. The places list, the `J<n>` outcomes and the check lines are the plan.
 - **Medium:** when a query's shape changes, one Database optimizer seat reads the planned query before code; each finding is fixed in the plan or becomes a proof at the gate.
-- **Big:** `/braintrust` before code; the Architect always sits and proposes the best design; the boss's verdict is the plan.
+- **Big:** `/braintrust` before code; two Architects each propose a design, blind to each other, and the boss picks; its verdict is the plan.
 
 Open user decisions are asked together, once, each with a recommended answer.
 
@@ -72,7 +70,7 @@ Load [engineering-bar.md](engineering-bar.md). DB writes, migrations, transactio
 5. **Proof (rule 3).**
    `node <gate>/red-proof.mjs --repo <repo> --old <base> --files <fix files> --breaks <notes>/breaks.json --then-green --log <notes>/proof.log -- <test command for the changed test files>`
    It runs on the test machine by itself. The server proof and the page proof may start together. Never show a red run by hand.
-6. **Suite (rule 4).** While fixing, run only the touched test files. A suite of under two minutes runs in full right after the first complete build. A slower suite runs once, on the final tree, with no edit while it runs (Small: CI runs it). It starts with the last re-check (Step 3.5, item 6), or after a review with no note. Checks run through the evidence helper (`/gate`), plainly, never in a pipe or straight over ssh; the project's spec script writes the specs (EduQuest: `check-specs.mjs <notes>/specs`).
+6. **Suite (rule 4).** While fixing, run only the touched test files. A suite of well under a minute also runs in full right after the first complete build. A slower suite runs once, on the final tree, with no edit while it runs (Small: CI runs it). It starts with the last re-check (Step 3.5, item 6), or after a review with no note. Checks run through the evidence helper (`/gate`), plainly, never in a pipe or straight over ssh; the project's spec script writes the specs (EduQuest: `check-specs.mjs <notes>/specs`).
 7. **Browser check (rule 6).** `bash ~/.claude/scripts/remote/remote-web.sh start`, quote its `READY` line. Create the test data yourself; give a direct link, the account and at most three actions, each with its exact value and expected result. `remote-web.sh stop` when the user reports; the result is the user's, pending until they say it.
 
 Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
@@ -83,11 +81,12 @@ Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
    `node <gate>/pre-review.mjs --was <size> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --siblings <notes>/siblings.md`
 2. **The brief**, always from the tool, never typed or copied:
    `node <gate>/review-brief.mjs --out <notes>/brief.md --ticket <ticket text file> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --proof-log <notes>/proof.log`
-3. **Launch** every line of `<notes>/launch.md` in one message. Small and Medium: one fresh-eyes review (only the user's words, the ticket, the diff and the places list). Big: the risk files with their trace list, the whole diff, fresh eyes and the other engine, together. `launch.md` carries every one of these lines: never type a reviewer prompt by hand. No source edit while they read.
+3. **Launch** every line of `<notes>/launch.md` in one message. Small and Medium: one fresh-eyes review (only the user's words, the ticket, the diff and the places list). Big: the risk files with their trace list, the whole diff, fresh eyes and the other engine, together. Never type a reviewer prompt by hand. No source edit while they read.
 4. **Notes (rule 5).** A report line that starts with `Blocker`, `Bug`, `Gap`, `Question` or `EXTRA TEST`, or that leaves a choice to the user ("you decide"), is a note; the guards number it. Each gets one answer, on its own line, in a message with no tool call:
    `NOTE <n>: fixed — <what changed and the test that proves it>`
    `NOTE <n>: user — "<the user's exact words>"`
-   There is no third answer: not "rare", not "it was like that before", not "outside the ticket". A note that looks wrong goes to the user with the evidence, in one line; their words close it. A bug related to the ticket is fixed with a test, on every sibling path, without asking (from round 3: the stop rule, item 6). Ask the open notes together, in one message.
+   `NOTE <n>: refuted — <the note check's evidence>` (never a Blocker)
+   There is no other answer. Before fixing, the note check ([loop-rare-cases.md](loop-rare-cases.md)) tries to disprove each note; only a note it refuted may take the third line, and the ship brief lists those. A bug related to the ticket is fixed with a test, on every sibling path, without asking. Ask the open notes together, in one message.
 5. **Outside lines.** Each `OUTSIDE PR` line goes to the user at the end of the task, in one list: fix here, separate PR, or leave. The answer goes in the project's outside list.
 6. **Fix round.** All fixes in one batch, test first. A changed test repeats the proof (`--changed-since`; the full proof in the last round). The proof and a fresh reviewer (a new agent) start in the same message; it re-checks the changed lines and their callers, plus the risk reviewer for a fix on a sensitive boundary. The full suite starts with the last re-check (Step 3, item 6). **Stop rule:** from round 3, a new rare case (no ticket line, no blocker, no security hole) goes to the user in one list: fix now, or a known limit in the PR text. The step ends when the latest report has no open note.
 7. **Verdict.** One plain sentence for the user, then on its own line, plain, in a message with no tool call:
@@ -100,4 +99,4 @@ Run `/gate`: the Definition of Done and the security checklist, each claim with 
 
 ## Step 5 — Ask to ship
 
-Run `node <gate>/check-pr-body.mjs <PR body file>`, then give the ship brief per `/ship`, with the timer report under it, and the one push command for the user. Wait for the explicit yes; a yes to the task was never a yes to the push. After the push, add the task's line to `memory/task-metrics.md`: minutes, and bugs found after the push (starts at 0).
+Run `node <gate>/check-pr-body.mjs <PR body file>`, then give the ship brief per `/ship`, with the timer report under it, and the one push command for the user. Wait for the explicit yes; a yes to the task was never a yes to the push. After the push: `pr-watch.mjs` in the background (a red check is fixed through the loop), `review-score.mjs --log`, and the task's line in `memory/task-metrics.md`: minutes, and bugs found after the push (starts at 0).

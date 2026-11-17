@@ -350,7 +350,11 @@ test('compiler input inspection remains available on an empty root', () => asser
 const rangeDiff = () => command('range-diff', 'git range-diff ' + 'b'.repeat(40) + '..' + 'c'.repeat(40) + ' ' + 'd'.repeat(40) + '..HEAD', '1:  1111111 = 1:  2222222 feat: example');
 test('a reused review never waives current verification or production protection', () => {
   const reused = [...checkedCode(), ...rangeDiff(), verdict('REVIEW: PASS — original review reused; target context checked'), verdict('GATE: PASS')];
-  assert.equal(invoke('policy-guard.js', reused).decision, 'allow');
+  // 2026-11-17 (audit F1): this fixture folder is no git repository, so the new side of the range-diff cannot be matched to the pushed commits: fail closed.
+  // The allowed path, with real commits, is proven in review-reuse-equivalence.test.mjs.
+  const failClosed = invoke('policy-guard.js', reused);
+  assert.equal(failClosed.decision, 'deny');
+  assert.match(reviewReason(failClosed), /commits being pushed/);
   assert.equal(invoke('policy-guard.js', [...reused, ...command('bad', 'dotnet test', '1 failed')]).decision, 'deny');
   assert.equal(invoke('policy-guard.js', reused, { input: { tool_input: { command: 'git push origin HEAD:main' } } }).decision, 'deny');
   assert.equal(invoke('policy-guard.js', [...checkedCode(), verdict('REVIEW: PASS — original review reused'), verdict('GATE: PASS')]).decision, 'deny', 'reuse needs a range-diff after the last change');

@@ -9,9 +9,12 @@
 //
 // Two more checks on the same new test lines (2026-11-07):
 //   proof  a new "nothing happens" check (not called, null, empty, zero, never) needs a passing
-//          `red-proof.mjs --breaks` run that named a test in the check's own test file, with that
-//          file and the broken product files as they are now: three rounds in a row such a check
-//          passed review that no run had ever seen fail.
+//          `red-proof.mjs --breaks` run that made the check's own test fail, with the code as it is
+//          now: three rounds in a row such a check passed review that no run had ever seen fail.
+//          2026-11-17 (audit): by test, not by test file (one caught test certified another rule's
+//          vacuous check in the same file), and with all the code unchanged since, not only the test
+//          file and the broken product files (an edit to code a test depends on left the proof valid).
+//          A check line in no test (a helper, a hook) can be proven by no break: it is UNPROVEN.
 //   tags   with --check <file>, every check line Cn (numbered in order, as review-brief.mjs prints
 //          them) has a test that carries `[Cn]` in its name or a comment; not a skipped one.
 //
@@ -25,7 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { TEST_FILE } from './check-ticket-lines.mjs';
-import { provenTestFiles, skippedLines } from './proof-record.mjs';
+import { enclosingTest, helperCallers, proofHint, provenHas, provenTests, recordNotes, skippedLines, testSpans } from './proof-record.mjs';
 import { checkLines } from './review-brief.mjs';
 import { addedLines, newLines, nothingChecks } from './new-lines.mjs';
 import { isMain } from './is-main.mjs';
@@ -78,17 +81,32 @@ if (isMain(import.meta.url)) {
   for (const f of found) console.log(`RANGE ASSERT: ${f.file}:${f.line} — ${f.text.trim()} → assert the exact value, or say why on the line: // range: <why>`);
   // Proof: a new "nothing happens" check needs a passing break run that named a test in its own file,
   // with that file as it is now (2026-11-12: one proof of the page cleared every server check too).
+  // 2026-11-17 (audit "one caught test certifies another rule's vacuous negative check"): the test that holds
+  // the check's line must itself be one a break made fail (provenTests names them); a line in no test, or in a
+  // test no break caught, is unproven, and its line says which test and which mustFail name would prove it.
   const nothing = nothingChecks(lines);
-  let unproven = [];
+  const unproven = [];
   // --before-proof (2026-11-13): the cheap checks run before the proof, so a label or quote fixed in a test
   // file does not void a proof already run. The proof part is judged by the run after the proof.
   const beforeProof = argv.includes('--before-proof');
   if (nothing.length && !beforeProof) {
-    const proven = provenTestFiles(top);
-    unproven = nothing.filter(l => !proven.has(l.file));
+    const proven = provenTests(top);
+    const spans = new Map();
+    for (const l of nothing) {
+      if (!spans.has(l.file)) { let text = ''; try { text = fs.readFileSync(path.join(top, l.file), 'utf8'); } catch { /* a deleted file */ } spans.set(l.file, { text, list: testSpans(text, l.file) }); }
+      const { text, list } = spans.get(l.file);
+      const own = enclosingTest(list, l.line);
+      if (provenHas(proven.get(l.file), own)) continue;
+      // A line in a helper counts when a proven test of the file calls that helper (2026-11-17, audit).
+      if (!own && helperCallers(text, list, l.line).some(c => provenHas(proven.get(l.file), c))) continue;
+      unproven.push({ ...l, own });
+    }
   }
-  for (const f of unproven.slice(0, 8)) console.log(`UNPROVEN: ${f.file}:${f.line} — ${f.text.trim()}`);
-  if (unproven.length) console.log(`  → ${unproven.length} new "nothing happens" check(s) never seen failing on these test files: run red-proof.mjs --breaks (a break of the rule under test) after the last test edit`);
+  for (const f of unproven.slice(0, 8)) console.log(`UNPROVEN: ${f.file}:${f.line} — ${f.text.trim()} → ${proofHint(f.own)}`);
+  if (unproven.length) {
+    console.log(`  → ${unproven.length} new "nothing happens" check(s) whose own test no break run made fail on the code as it is now: run red-proof.mjs --breaks (a break of each such test's rule, naming that test) after the last edit`);
+    for (const note of recordNotes(top)) console.log(`  → ${note}`);
+  }
   // Tags: every check line has a tagged test.
   let missing = [];
   if (opt('--check')) {

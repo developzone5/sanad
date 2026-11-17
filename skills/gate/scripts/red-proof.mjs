@@ -41,8 +41,9 @@
 //   - A mustFail part whose words are in the title of a test this change added AND of an older test is
 //     BREAK AMBIGUOUS (2026-11-14): refused before any run, exit 2. A part may name older tests alone.
 //   - A new "nothing happens" check (check-test-asserts.mjs) in a test file this command runs, where no break
-//     names a test, is UNPROVEN: refused before any run, exit 2 (2026-11-15). Pre-review counts such a check
-//     only from a break run that caught a break naming a test in its own file; the old code never counts.
+//     names the test that holds it, is UNPROVEN: refused before any run, exit 2 (2026-11-15; by test and not by
+//     file since 2026-11-17: one caught test certified another rule's check in the same file). Pre-review counts
+//     such a check only from a break run that caught a break naming its own test; the old code never counts.
 //     --old with no --breaks is refused the same way; one --break is not checked (see the refusal in main).
 //   - --files may not name a test file; product files left out of it are named in a WARNING.
 //   - --log is emptied when the run starts and written however it ends; its first line names the tree.
@@ -64,7 +65,7 @@
 //   The find text may be written with LF or CRLF line endings; it matches either.
 // --changed-since <git ref> (only with --breaks; a commit, a branch or a tree id such as a proof log's first line
 //   names): a break runs when its file differs between <ref> and the working tree (untracked files count), or when
-//   a mustFail part names a test in a test file that differs (matched as the proof record credits test files). Before
+//   a mustFail part names a test in a test file that differs (a declared title holds the part, or the file's text). Before
 //   any run: "RED-PROOF: PARTIAL — <k> of <n> break(s) changed since <ref>: <names>; the others are not run." At the
 //   end: "RED-PROOF: PARTIAL ✓ — <k> of <n> break(s) caught …" with exit 0, or the usual failure and exit code. No
 //   break changed is allowed: the old code and green still run (with neither asked, nothing runs, exit 0). The
@@ -74,9 +75,12 @@
 // constant): that file stays at the fix for the old-code run, so the old code compiles; the run says so.
 // The tests are read as code: a name only a comment or a string's text holds is not a use (2026-11-15).
 // --warm: at the task's start, the kept copies (below) are brought to the tree and built once.
-// A passing --breaks run records, under its command and folder, the changed test files that hold a test
-// a caught break named, and the files its breaks changed (see proof-record.mjs); pre-review's test check
-// reads that record. A run with no --breaks (old code only, one --break) leaves the record alone. The test command runs without a shell and without typed input; pass the real
+// A passing --breaks run records, under its command and folder, the tests its breaks made fail (each by its
+// test file, its title and the full name the runner printed), the files its breaks changed, and one id of the
+// code under test (see proof-record.mjs); pre-review's test check reads that record. A --breaks run that starts
+// and does not end PROVED leaves that entry as not ok, with the reason (2026-11-17: an older success outlived a
+// failed re-proof); a --changed-since run does so only when one of its own runs failed. A run with no --breaks
+// (old code only, one --break) leaves the record alone. The test command runs without a shell and without typed input; pass the real
 // executable (node <entrypoint>, dotnet, ...), not a .cmd shim. cmd.exe without /c is refused
 // (2026-11-09: Git Bash turns /c into C:/, and cmd.exe then waited for typed input for 25 minutes):
 // write //c in Git Bash, or better, put test settings in --test-env instead of a .cmd wrapper.
@@ -123,13 +127,17 @@
 // commit, testFiles, partial }. `partial` ({ ref, of }, 2026-11-16) marks a --changed-since run: the machine there
 // says PARTIAL, not PROVED. `commit` is the commit the sync made (2026-11-12: the proof there read HEAD again
 // after the sync, and a second sync in between moved it); the copies are that commit and nothing else.
+// The proof record is written by the machine that asked (2026-11-17): for each caught break the test machine
+// prints one `RED-PROOF-CAUGHT: <base64 JSON>` line, the failing tests as its runner named them; the machine that
+// asked reads it (it is not shown) and matches the names to its own test files. Its code id is taken before the
+// sync, and after the sync the working tree must still be the tree the sync sent.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { canonicalTop, changedTestFiles, declaredTests, defaultBase, provenTestFiles, readRecord, recordKey, testFileHashes, writeEntry } from './proof-record.mjs';
+import { canonicalTop, changedTestFiles, codeFingerprint, declaredTests, defaultBase, enclosingTest, helperCallers, namedBy, proofHint, provenHas, provenTests, readRecord, recordKey, testFileHashes, testSpans, writeEntry } from './proof-record.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { newLines, nothingChecks } from './new-lines.mjs';
 import { codeLines, codeOnly } from './size-check.mjs';
@@ -328,8 +336,10 @@ function breakInvalid(r) {
   return line ? line.trim().slice(0, 200) : null;
 }
 
-// The changed test files that hold a test a caught break named (2026-11-12, S4/C5): only these go in the
-// proof record. A part found in no declared title credits the files whose text holds it.
+// The changed test files that hold a test a mustFail part names (2026-11-12, S4/C5). A part found in no declared
+// title names the files whose text holds it. 2026-11-17: the proof record no longer credits these whole files (one
+// caught test certified every check of its file); it names the caught tests themselves (caughtTests below). This
+// reading stays for --changed-since, which only picks the breaks to run again (keptSince).
 export function caughtTestFiles(files, parts, textOf) {
   const docs = files.map(f => {
     let text = '';
@@ -343,6 +353,65 @@ export function caughtTestFiles(files, parts, textOf) {
     for (const d of (hits.length ? hits : docs.filter(d => d.text.includes(p)))) credited.add(d.f);
   }
   return [...credited].sort();
+}
+
+// The tests a caught break made fail, each by its own identity (2026-11-17, audit "one caught test certifies
+// another rule's vacuous negative check": the record held whole test files, so a caught test proved every
+// "nothing happens" check of its file, another rule's vacuous one too). A test counts when a mustFail part names
+// it (namedBy: its declared title holds the part, as survivors() matches) and a failing test the runner printed is
+// that test (titleMatches on the failing test's own names; a .each row fills its title's placeholders). `spans`
+// are the tests the changed test files declare (testSpans of proof-record.mjs). Each result is { file, line,
+// title, ran }: the test file, the test's line and title there, and the full name as the runner printed it. One
+// failing test stands for one declared test; a failing test printed with the same file is taken first, and a
+// title written out before a title with placeholders, so a row is not taken for a test it only resembles.
+export function caughtTests(mustFail, reasons, pairs = [], spans = []) {
+  // A dotnet name printed as Namespace.Class.Method (nested: Outer+Inner): its class must be the class of the span.
+  const classFits = (name, d) => {
+    const bare = String(name).replace(/\s*\([^()]*\)\s*$/, '');
+    if (!d.klass || !/^[\w.`+]+$/.test(bare) || !bare.includes('.')) return true;
+    const parts = bare.split('.');
+    return parts[parts.length - 2].split('+').pop().toLowerCase() === d.klass.toLowerCase();
+  };
+  const printedIn = (r) => {
+    const head = String(r.name).split(' > ')[0].trim().split(/\s+/).pop().replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').toLowerCase();
+    return String(r.name).includes(' > ') && /\.\w+$/.test(head) ? head : '';
+  };
+  const failing = reasons.filter(r => r.kind !== 'env').map(r => ({ name: String(r.name), own: ownNames(r, pairs), file: printedIn(r) }));
+  const open = (d) => d.titles.some(t => /\$\{|%[sdifjoc#]|\$\w/.test(String(t)));
+  const found = new Map();
+  for (const part of mustFail) {
+    const used = new Set();
+    const wanted = spans.filter(d => namedBy([part], d)).sort((a, b) => Number(open(a)) - Number(open(b)));
+    for (const d of wanted) {
+      const is = (f, i) => !used.has(i) && d.titles.some(t => titleMatches(t, f.own));
+      let k = failing.findIndex((f, i) => is(f, i) && f.file && ('/' + String(d.file).toLowerCase()).endsWith('/' + f.file));
+      // A failure printed with another test file is that file's test, never this one's (2026-11-17, audit: an older
+      // test with the same title in an unchanged file certified a new vacuous test). Only a failure printed with no
+      // file may stand for it, and a dotnet name that holds its class must name this test's class.
+      if (k < 0) k = failing.findIndex((f, i) => is(f, i) && !f.file && classFits(f.name, d));
+      if (k < 0) continue;
+      used.add(k);
+      found.set(d.file + '\n' + d.line, { file: d.file, line: d.line, title: d.titles[d.titles.length - 1], ran: failing[k].name });
+    }
+  }
+  return [...found.values()];
+}
+
+// One caught break as the test machine says it to the machine that asked (2026-11-17): the break's place in the
+// plan and the failing tests as the runner named them, as base64 JSON, so a title with quotes or in any script
+// crosses ssh as it is. readCaughtLine gives { i, failed: [{ name, runner, kind }] } back, or null for any other line.
+export function caughtLine(index, failed) {
+  return 'RED-PROOF-CAUGHT: ' + Buffer.from(JSON.stringify({ i: index, failed: failed.map(f => ({ name: String(f.name), runner: f.runner })) }), 'utf8').toString('base64url');
+}
+export function readCaughtLine(line) {
+  const m = /^RED-PROOF-CAUGHT: ([A-Za-z0-9_-]+)$/.exec(String(line).trim());
+  if (!m) return null;
+  try {
+    const sent = JSON.parse(Buffer.from(m[1], 'base64url').toString('utf8'));
+    if (!sent || !Number.isInteger(sent.i) || !Array.isArray(sent.failed)) return null;
+    return { i: sent.i, failed: sent.failed.filter(f => f && typeof f.name === 'string')
+      .map(f => ({ name: f.name, runner: f.runner === 'vitest' || f.runner === 'dotnet' ? f.runner : undefined, kind: 'other' })) };
+  } catch { return null; }
 }
 
 // The breaks a --changed-since run keeps (2026-11-16): a break whose file is among `changed` (repository paths, as
@@ -762,34 +831,48 @@ async function main() {
   // A new "nothing happens" check this proof would leave unproven stops here too, before the test machine, the
   // compile check or any copy (2026-11-15: one test file's checks were proven only by the old-code run; after a
   // full PROVED proof pre-review said UNPROVEN ×6, and the whole proof ran again with one more break). Pre-review
-  // (check-test-asserts.mjs) counts such a check only when a current record entry holds its test file, and an entry
-  // holds the files with a test a caught break named (caughtTestFiles). So the lines it would refuse are the new
-  // "nothing happens" lines (newLines and nothingChecks of new-lines.mjs, which it reads too) in the test files this command runs (proofScope),
-  // less the files this run's breaks will credit and those another entry proves as they are now. A run with
+  // (check-test-asserts.mjs) counts such a check only when a current record entry names the test that holds its
+  // line among the tests its breaks made fail (2026-11-17, audit "one caught test certifies another rule's vacuous
+  // negative check": it went by whole test file, so an unrelated caught test in the file passed the check, and
+  // this refusal let the proof run). So the lines it would refuse are the new "nothing happens" lines (newLines and
+  // nothingChecks of new-lines.mjs, which it reads too) in the test files this command runs (proofScope), less the
+  // lines whose own test a mustFail part of this run names (namedBy: a caught break makes every test it names fail)
+  // and those whose own test another entry proves as the code is now. A line in no test (a helper, a hook) can be
+  // proven by no break, so it is refused too. A run with
   // --breaks replaces its own entry (same command and folder), so that entry does not count; --old alone leaves
-  // the record as it is, so with such checks unproven it is refused the same way, and a file an earlier break run
+  // the record as it is, so with such checks unproven it is refused the same way, and a test an earlier break run
   // of this command proved still counts. One --break is not checked: it is for a test of code that already works
   // and never writes the record. Any git or read error skips the check, so it never refuses by mistake.
   if (!plan && testFiles?.length && (hasOld || breaks.some(b => !b.single))) {
     let unproven = [];
     try {
       const parts = breaks.filter(b => !b.single).flatMap(b => b.mustFail.map(String));
-      const credited = new Set(parts.length ? caughtTestFiles(testFiles, parts, textAt) : []);
       const entries = readRecord(repo);
       const cwdRel = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
       if (entries && parts.length) delete entries.entries[recordKey(command, cwdRel)];
-      const proven = provenTestFiles(repo, entries);
       const scope = new Set(proofScope(command, testFiles, cwdRel));
-      unproven = nothingChecks(newLines(repo, base) || []).filter(l => scope.has(l.file) && !credited.has(l.file) && !proven.has(l.file));
+      const spans = new Map();
+      const ownOf = (l) => { if (!spans.has(l.file)) spans.set(l.file, testSpans(textAt(l.file), l.file)); return enclosingTest(spans.get(l.file), l.line); };
+      let proven = null;
+      for (const l of nothingChecks(newLines(repo, base) || [])) {
+        if (!scope.has(l.file)) continue;
+        const own = ownOf(l);
+        if (namedBy(parts, own)) continue;
+        if (own && provenHas((proven ??= provenTests(repo, entries)).get(l.file), own)) continue;
+        // A line in a helper: a test of the file that calls the helper and is named here (or proven) counts (2026-11-17).
+        if (!own && helperCallers(textAt(l.file), spans.get(l.file) || [], l.line).some(c => namedBy(parts, c)
+          || provenHas((proven ??= provenTests(repo, entries)).get(l.file), c))) continue;
+        unproven.push({ ...l, own });
+      }
     } catch { unproven = []; }
     if (unproven.length) {
       const byFile = new Map();
       for (const l of unproven) byFile.set(l.file, [...(byFile.get(l.file) || []), l]);
       for (const [file, lines] of byFile) {
-        say(`  UNPROVEN ✗ ${file}: ${lines.length} new "nothing happens" check(s), and no break here names a test in this file`);
-        for (const l of lines.slice(0, 3)) say(`    ${file}:${l.line} — ${l.text.trim().slice(0, 160)}`);
+        say(`  UNPROVEN ✗ ${file}: ${lines.length} new "nothing happens" check(s) whose own test no break here names`);
+        for (const l of lines.slice(0, 3)) say(`    ${file}:${l.line} — ${l.text.trim().slice(0, 160)} → ${proofHint(l.own)}`);
       }
-      say('RED-PROOF: NOT PROVED ✗ — pre-review counts a new "nothing happens" check only when a --breaks run caught a break whose mustFail names a test in that check\'s own file. Add a break whose mustFail names a test in each file above (a run on the old code does not count for these lines). Nothing ran; files untouched.');
+      say('RED-PROOF: NOT PROVED ✗ — pre-review counts a new "nothing happens" check only when a --breaks run caught a break whose mustFail names the test that holds that check; another caught test in the same file does not count. Add a break of each such test\'s rule whose mustFail names that test (a run on the old code does not count for these lines). Nothing ran; files untouched.');
       process.exit(2);
     }
   }
@@ -844,6 +927,33 @@ async function main() {
       say(`RED-PROOF: PARTIAL ✓ — 0 of ${partial.of} break(s) run (none changed since ${since}), and no --old or --then-green run was asked, so nothing ran; run the full proof (without --changed-since) once before the final review.`);
       process.exit(0);
     }
+  }
+
+  // The proof record's entry of this proof, and whether an older success in it may stand (2026-11-17, audit "stale
+  // mutation proof survives dependency edits and even a failed re-proof": a later run of the same proof that failed
+  // left the older success in the record, and pre-review went on counting it). Only a --breaks run on the machine
+  // that asked keeps an entry (the old code alone, one --break and the test machine's plan run never did). Once its
+  // runs start (proofStarts), a full proof marks its entry not ok at once, so a run that is stopped or killed leaves
+  // no older success behind. When the process ends without PROVED written, the entry says why. A --changed-since
+  // run writes no success and no mark at its start: it takes the entry back only when it ends in a failure after
+  // its runs started. `code` is the id of the code under test a full proof will record (codeFingerprint), taken
+  // before any file is swapped here, or before the sync when the runs go to the test machine.
+  const recordCwd = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
+  const keepsRecord = !plan && (partial ? partial.of > 0 : breaks.some(b => !b.single));
+  const proof = { key: recordKey(command, recordCwd), proved: false, code: '', why: '' };
+  function takeBack(reason) {
+    try { writeEntry(repo, proof.key, { ok: false, reason: String(reason).slice(0, 300), base, command, cwd: recordCwd, ...(partial ? { partial: true } : {}) }); }
+    catch { /* not written: an entry's code id still voids it after any edit */ }
+  }
+  function proofStarts() {
+    if (!keepsRecord) return;
+    if (!partial) takeBack('the proof started and did not end: it was stopped or killed before its result');
+    process.on('exit', (code) => {
+      // A --changed-since run takes a full proof back only on a real test verdict (exit 1: a break not caught, or red
+      // on the fix); a machine, timeout or connection stop (3/4/5/6/255) says nothing about the tests (2026-11-17, audit).
+      if (proof.proved || (partial && code !== 1)) return;
+      takeBack(proof.why || [...said].reverse().find(l => /^RED-PROOF: /.test(l)) || `the proof ended with exit ${code}`);
+    });
   }
 
   // On the test machine when there is one, by itself (2026-11-07: the rule "tests run on the test
@@ -909,6 +1019,10 @@ async function main() {
       }
       say(`RED-PROOF: database ${dbContainer} ready on ${remoteHost}`);
     }
+    // The code id this machine will record (2026-11-17): the code as it is when the proof is sent. It is taken
+    // before the sync, and after the sync the working tree must still be the tree the sync sent (below), so the id
+    // is of the code the test machine runs; an edit in between leaves an id no later check will match.
+    if (keepsRecord && !partial) proof.code = codeFingerprint(repo);
     const sync = spawnSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000 });
     const syncOut = (sync.stdout || '') + (sync.stderr || '');
     if (/REMOTE-DOWN/.test(syncOut)) { say('RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).'); process.exit(4); }
@@ -920,6 +1034,12 @@ async function main() {
     say(`RED-PROOF: on ${remoteHost}${via ? ' at ' + via[1] : ''} (${synced[1].slice(0, 12)})`);
     // The log names the tree the sync sent: the one the runs there test.
     if (state.logPath) state.head = stamp(synced[2]);
+    // The record is about this machine's code: its tree now (built the way the sync builds the tree it sends) must
+    // be the tree the sync sent (2026-11-17). When it is not, the proof still runs, and no success is recorded.
+    if (keepsRecord && !partial) {
+      const here = treeId(repo);
+      if (here !== synced[2]) proof.why = `the working tree here (${here.slice(0, 12)}) is not the tree the sync sent (${synced[2].slice(0, 12)}): a file changed while the proof was sent`;
+    }
     const local = fs.mkdtempSync(path.join(os.tmpdir(), 'sanad-proof-'));
     // The commit this sync made goes with the plan: the test machine tests it, not whatever HEAD it has by
     // then (2026-11-12, S3). The changed test files go too: there, nothing differs from that commit.
@@ -941,9 +1061,17 @@ async function main() {
     // this wait is the backstop for a lost connection.
     const runs = (hasOld ? 1 : 0) + breaks.length + (green ? 1 : 0) + (warm ? 1 : 0);
     const waitMin = Math.ceil(timeoutMin * (runs + 2) + 10);
+    // The proof is sent: its runs start there now (2026-11-17, see proofStarts).
+    proofStarts();
+    // The failing tests of each caught break, as the test machine's runner named them (its RED-PROOF-CAUGHT lines).
+    const sentCaught = [];
     const r = await new Promise((resolve) => {
       const child = spawn('ssh', ['-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6', ...sshOpts, remoteHost, remoteCmd], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-      const show = (l) => { if (l.trim() && !/post-quantum|store now|openssh\.com\/pq/.test(l)) say(l); };
+      const show = (l) => {
+        const sent = readCaughtLine(l);
+        if (sent) { sentCaught.push(sent); return; } // read for the record, not shown: the BREAK ✓ line says it
+        if (l.trim() && !/post-quantum|store now|openssh\.com\/pq/.test(l)) say(l);
+      };
       const rest = { stdout: '', stderr: '' };
       for (const key of ['stdout', 'stderr']) {
         child[key].setEncoding('utf8');
@@ -967,25 +1095,50 @@ async function main() {
     spawnSync('ssh', [...sshOpts, remoteHost, windows ? `del /q ${mine} 2>nul` : `rm -f ${mine}`], { stdio: 'ignore', windowsHide: true, timeout: 60000 });
     fs.rmSync(local, { recursive: true, force: true });
     // The record is this machine's: the test files and break targets proved are the ones here, unchanged since the sync.
+    // 2026-11-17: a passing run that cannot be recorded says why, and its entry stays not ok (proofStarts), so the
+    // success of an earlier run does not stand in for it.
     const same = (hashes) => { try { return JSON.stringify(testFileHashes(repo, Object.keys(hashes))) === JSON.stringify(hashes); } catch { return false; } };
     const targets = (() => { try { return testFileHashes(repo, [...new Set(breaks.map(b => b.file))]); } catch { return null; } })();
-    if (r.status === 0 && fileHashes && same(fileHashes) && targets && breaks.length) record(targets, { remote: remoteHost });
+    if (r.status === 0 && keepsRecord && !partial) {
+      if (!proof.why && !fileHashes) proof.why = `there is no merge base with ${base}, so the changed test files are not known`;
+      if (!proof.why && !same(fileHashes)) proof.why = 'a test file here changed after the proof was sent';
+      if (!proof.why && !(targets && breaks.length)) proof.why = 'a file a break changes is not here any more';
+      if (proof.why) say(`RED-PROOF: could not write the proof record — ${proof.why}. Run the proof again.`);
+      else {
+        // The names the test machine's runner printed, matched to the tests this machine's test files declare.
+        const pairsHere = namePairs();
+        const spansHere = (testFiles || []).flatMap(f => { try { return testSpans(textAt(f), f); } catch { return []; } });
+        record(targets, sentCaught.flatMap(c => (breaks[c.i] && !breaks[c.i].single
+          ? caughtTests(breaks[c.i].mustFail, c.failed, pairsHere, spansHere).map(t => ({ ...t, by: String(breaks[c.i].name) })) : [])), { remote: remoteHost });
+      }
+    }
     process.exit(r.timedOut ? 5 : r.status ?? 2);
   }
 
   // The proof record entry of a passing --breaks run (2026-11-12, S4/C5/S12/S8): under this command and
-  // folder, the changed test files that hold a test a caught break named, and the files the breaks changed.
-  function record(targets, extra = {}) {
+  // folder, the tests its breaks made fail and the files the breaks changed. 2026-11-17 (audit): `caught` names
+  // those tests one by one ({ line, title, ran, by } per test file; `files` holds the hash of each such file) in
+  // place of every changed test file that held one, and `code` is the id of the code under test (proofStarts).
+  // `caught` comes from caughtTests: here from each caught break's own run, after a test machine's run from the
+  // names it sent.
+  function record(targets, caught, extra = {}) {
     // A --changed-since run proved only the breaks it kept: it never writes the record, so pre-review never takes it
     // for the full proof (2026-11-16). Here and after a test machine's run.
     if (partial) return;
     const parts = breaks.filter(b => !b.single).flatMap(b => b.mustFail.map(String));
     if (!parts.length || !testFiles) return;
-    const files = caughtTestFiles(testFiles, parts, (f) => fs.readFileSync(path.join(repo, f), 'utf8')).filter(f => fileHashes[f]);
-    const cwd = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
+    if (!proof.code) {
+      proof.why = 'git could not give one id of the code under test (its add or write-tree failed)';
+      say(`RED-PROOF: could not write the proof record — ${proof.why}`);
+      return;
+    }
+    const byFile = {};
+    for (const t of caught) if (fileHashes[t.file]) (byFile[t.file] ||= []).push({ line: t.line, title: t.title, ran: t.ran, by: t.by });
+    const files = Object.keys(byFile).sort();
     try {
-      writeEntry(repo, recordKey(command, cwd), { ok: true, base, command, cwd, breaks: breaks.length, old: hasOld, green,
-        files: Object.fromEntries(files.map(f => [f, fileHashes[f]])), targets, ...extra });
+      writeEntry(repo, proof.key, { ok: true, base, command, cwd: recordCwd, breaks: breaks.length, old: hasOld, green,
+        files: Object.fromEntries(files.map(f => [f, fileHashes[f]])), targets, caught: Object.fromEntries(files.map(f => [f, byFile[f]])), code: proof.code, ...extra });
+      proof.proved = true;
     } catch (e) { say('RED-PROOF: could not write the proof record — ' + e.message); }
   }
 
@@ -1130,6 +1283,10 @@ async function main() {
     finish(0);
   }
 
+  // The proof's runs start here (2026-11-17, see proofStarts): from now on an older success of this proof stands
+  // only when this run ends PROVED. The code id is taken now, before a run swaps a file in the working folder.
+  if (keepsRecord && !partial) proof.code = codeFingerprint(repo);
+  proofStarts();
   // The runs: the old code, each break, then green on the fixed tree (the order the report reads them in).
   // Green RUNS first (2026-11-11, TUW-242: an older test still expected the old behavior, and the proof
   // said so only after its four red runs, 7 minutes in). It takes about a minute in the copy the compile
@@ -1435,6 +1592,11 @@ async function main() {
   const pairs = namePairs();
   const titleFiles = (Array.isArray(plan?.testFiles) ? plan.testFiles : testFiles) || [];
   const declared = titleFiles.flatMap(f => { try { return declaredTests(textAt(f), f); } catch { return []; } });
+  // The tests each caught break made fail (2026-11-17, see caughtTests): here they go into the proof record. On the
+  // test machine each caught break says the failing tests as its runner named them (caughtLine; an env value in a
+  // name is hidden first), and the machine that asked matches them to its own test files.
+  const spans = plan ? [] : titleFiles.flatMap(f => { try { return testSpans(textAt(f), f); } catch { return []; } });
+  const caught = [];
   for (let i = 0; i < breaks.length; i++) {
     const b = breaks[i];
     const res = results[(hasOld ? 1 : 0) + i];
@@ -1467,7 +1629,14 @@ async function main() {
       continue;
     }
     const left = survivors(b.mustFail, r.why, pairs, declared);
-    if (r.code !== 0 && !left.length) say(`  BREAK ✓ ${b.name}: all ${b.mustFail.length} named test(s) fail`);
+    if (r.code !== 0 && !left.length) {
+      say(`  BREAK ✓ ${b.name}: all ${b.mustFail.length} named test(s) fail`);
+      if (!plan) caught.push(...caughtTests(b.mustFail, r.why, pairs, spans).map(t => ({ ...t, by: String(b.name) })));
+      // The names go unhidden (2026-11-17, audit: a test named with an env value came back as *** and matched no
+      // test) and straight to stdout, not through say(): the line is base64, read by the machine that asked and
+      // never shown or logged here.
+      else if (!partial) process.stdout.write(caughtLine(i, r.why.filter(w => w.kind !== 'env').map(w => ({ name: w.name, runner: w.runner }))) + '\n');
+    }
     else { say(`  BREAK ✗ ${b.name}: still pass (or not seen failing): ${(left.length ? left : b.mustFail).join(' | ')}`); ok = false; }
   }
   // 3. Green on the fixed tree.
@@ -1489,7 +1658,11 @@ async function main() {
     say(ok ? `RED-PROOF: PARTIAL ✓ — ${ran}${hasOld ? ', red on the old code' : ''}${green ? ', green on the fix' : ''}; files restored; run the full proof (without --changed-since) once before the final review.` : 'RED-PROOF: NOT PROVED ✗ — see the lines above; files restored.');
   } else if (breaks.length && !breaks[0].single) say(ok ? `RED-PROOF: PROVED ✓ — ${hasOld ? 'red on the old code, ' : ''}${breaks.length} break(s) caught${green ? ', green on the fix' : ''}; files restored.` : 'RED-PROOF: NOT PROVED ✗ — see the lines above; files restored.');
   // The record pre-review reads: only a run that proved at least one break of the rule under test, written
-  // here (the test machine's plan run leaves it to the machine that asked, see runRemote).
-  if (ok && fileHashes && !plan) record(targetHashes);
+  // here (the test machine's plan run leaves it to the machine that asked, see runRemote). 2026-11-17: with the
+  // tests the breaks made fail; a run that does not get here PROVED leaves its entry not ok (proofStarts).
+  if (ok && keepsRecord && !partial) {
+    if (fileHashes) record(targetHashes, caught);
+    else proof.why = `PROVED, but there is no merge base with ${base}, so the changed test files are not known and nothing is recorded`;
+  }
   finish(ok ? 0 : 1);
 }

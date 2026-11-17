@@ -19,6 +19,15 @@
 //       2026-11-12: one place per FILE let one outcome close all four calls of a rule in one service file,
 //       the same shape as the original miss (the schedule path and the publish-now path of one file). A line
 //       in the older shape (no function part) reads as its file's `(file)` place.
+//       2026-11-17 (audit, "distinct methods collapse into a single place"): one place per function NAME let
+//       one outcome close Schedule.Apply() and PublishNow.Apply() of one file, and two overloads. A place is
+//       one DECLARATION now. A name its file declares once reads as before. Declared more than once, each
+//       declaration is `<scope>.<function>` (the scope: the function it sits in or, outside any function, its
+//       type), with its parameter list after it when another declaration has the same scope (overloads):
+//       `Rules.Apply(int id)`; `(line N)` follows only when two have the same parameter list too. A line
+//       label is never followed to another line: a place with one is kept only while nothing moved. A place of an older list keeps its number and outcome while it
+//       is still exactly one declaration; when it was two, it is `(gone)` with its outcome left on its line,
+//       both declarations are new and open, and each OPEN line says so.
 //   node places.mjs --refresh <places.md> [--repo <path>]
 //       The stored search again, in the stored repo (or in --repo: a task's worktree of it), as above.
 //   node places.mjs --check <places.md> [--check-lines <check.md>]
@@ -39,7 +48,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { TEST_FILE } from './check-ticket-lines.mjs';
-import { enclosingFunction } from './size-check.mjs';
+import { enclosingFunction, codeOnly } from './size-check.mjs';
 import { isMain } from './is-main.mjs';
 
 // More product files than this and nobody can judge each one (2026-11-12): name the rule, not the word.
@@ -84,16 +93,168 @@ export function searchName(repo, name, { skip = '' } = {}) {
   return { product, tests: [...tests].sort() };
 }
 
-// One file's hit lines (1-based) grouped by the function each sits in: Map(function part → lines), in the
-// order of each group's first line. `lines` is the file's text as lines, or null when it is not readable.
-export function byFunction(file, hitLines, lines) {
-  const groups = new Map();
-  for (const line of hitLines) {
-    const fn = lines && NAMED_FUNCTIONS.test(file) ? enclosingFunction(lines, line - 1) || FILE_PART : FILE_PART;
-    if (!groups.has(fn)) groups.set(fn, []);
-    groups.get(fn).push(line);
+// 2026-11-17 (audit, "distinct methods collapse into a single place"): hits were grouped by the bare name
+// size-check.mjs gives, so Schedule.Apply() and PublishNow.Apply() of one file, and two overloads, were ONE
+// place and one outcome closed two entry paths. A place is one declaration: the line it starts on and the type
+// or function it sits in. size-check.mjs returns the name only, so the line and the scope are found here.
+
+// What each line of a file defines ('' = nothing), as size-check.mjs reads it: a line alone has no function
+// to sit in, so the name that comes back for it is the one it defines. Read once per file text.
+const definedBy = new WeakMap();
+function definedNames(lines) {
+  if (!definedBy.has(lines)) definedBy.set(lines, lines.map(l => enclosingFunction([l], 0)));
+  return definedBy.get(lines);
+}
+
+// The declaration a hit line (0-based) belongs to: `{ bare, at }`, at = the line it starts on; null outside any
+// function. It is the nearest line, the hit's own or one above, that defines the name size-check.mjs gives the
+// hit and, read as the top of the file, still holds the hit: a same-named function that ended before the hit
+// is passed over. A name with no such line is no declaration found: the hit is the file's own.
+function declarationOf(lines, hit) {
+  const bare = enclosingFunction(lines, hit);
+  if (!bare) return null;
+  const defs = definedNames(lines);
+  for (let i = hit; i >= 0; i--) {
+    if (defs[i] === bare && (i === hit || enclosingFunction(lines.slice(i), hit - i) === bare)) return { bare, at: i };
   }
-  return groups;
+  return null;
+}
+
+// `class X`, `record X`, `struct X` or `interface X`, with the C# or TS words that may stand before it.
+const TYPE_LINE = /^\s*(?:(?:export|default|declare|public|private|protected|internal|static|sealed|abstract|partial|readonly|ref|unsafe|file|new)\s+)*(?:class|record(?:\s+(?:class|struct))?|struct|interface)\s+(?!extends\b)([A-Za-z_$][\w$]*)/;
+const braces = (line) => { let n = 0; for (const c of codeOnly(line)) { if (c === '{') n++; else if (c === '}') n--; } return n; };
+
+// The type whose body holds line `at` (0-based): the nearest type line above whose `{` (on that line, or below
+// it after a base list) is still open there; '' when there is none.
+function containingType(lines, at) {
+  // open[i]: braces opened from line i down to the declaration, less those closed; a brace opened on line j
+  // still holds the declaration when open[j] is above every open[k] below it.
+  const open = [], maxBelow = [];
+  let sum = 0, best = 0;
+  for (let i = at - 1; i >= 0; i--) {
+    maxBelow[i] = best; sum += braces(lines[i]); open[i] = sum; best = Math.max(best, sum);
+    const type = TYPE_LINE.exec(lines[i]);
+    if (!type) continue;
+    let j = i;
+    while (j < at - 1 && j < i + 12 && !/[{;]/.test(codeOnly(lines[j]))) j++;
+    if (codeOnly(lines[j]).includes('{') && open[j] > maxBelow[j]) return type[1];
+  }
+  return '';
+}
+
+// The scope of the declaration on line `at`: the function it sits in (a local function, a handler inside a
+// component) or, outside any function, its type; '' at the top level. The function is read with a plain
+// statement put where the declaration is, since the line itself names only what it defines. Read once per
+// declaration.
+const scopes = new WeakMap();
+function scopeOf(lines, at) {
+  if (!scopes.has(lines)) scopes.set(lines, new Map());
+  const known = scopes.get(lines);
+  if (!known.has(at)) known.set(at, enclosingFunction([...lines.slice(0, at), /^\s*/.exec(lines[at])[0] + ';', ...lines.slice(at)], at) || containingType(lines, at));
+  return known.get(at);
+}
+
+// 2026-11-17 (audit): overloads were told apart by the line they start on, and a line moves with every edit
+// above it, so an outcome followed a line onto another overload (a new overload took over the outcome written
+// for its neighbour). An overload is told apart by its parameter list now, which does not move.
+// The parameter list of the declaration that starts on line `at` (0-based), on one line, as the code reads it:
+// the text between the first `(` after the name and its `)`. null when it cannot be read.
+function signatureOf(lines, at, bare) {
+  let text = '';
+  for (let i = at; i < lines.length && i < at + 12; i++) text += ' ' + codeOnly(lines[i]);
+  const name = new RegExp(`(?<![\\w$])${bare.replace(/[$]/g, '\\$&')}(?![\\w$])`).exec(text);
+  if (!name) return null;
+  const from = name.index + bare.length;
+  const open = text.indexOf('(', from);
+  if (open < 0 || /[{;]/.test(text.slice(from, open))) return null;
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '(') depth++;
+    else if (text[i] === ')' && --depth === 0) return text.slice(open + 1, i).replace(/[·→]/g, '-').replace(/\s+/g, ' ').trim();
+  }
+  return null;
+}
+
+// A declaration's row: `fn` is its name on the list. The function's own name when the file declares it once;
+// else `<scope>.<name>`. When another declaration of the name has the same scope (overloads, or two of one
+// name with no type around them), its parameter list follows the name: `Rules.Apply(int id)`; and `(line N)`
+// follows that when two of them have the same parameter list too. `sig`: the parameter list (null: unknown).
+// `scope` is null while nobody has asked.
+function labelled(lines, { bare, at }) {
+  const all = [];
+  definedNames(lines).forEach((n, i) => { if (n === bare) all.push(i); });
+  const sig = signatureOf(lines, at, bare);
+  if (all.length < 2) return { fn: bare, bare, scope: null, at, sig };
+  const scope = scopeOf(lines, at);
+  const same = all.filter(i => scopeOf(lines, i) === scope);
+  const head = `${scope ? scope + '.' : ''}${bare}`;
+  if (same.length === 1) return { fn: head, bare, scope, at, sig };
+  const withSig = (s) => (s === null ? head : `${head}(${s})`);
+  const twins = same.filter(i => withSig(signatureOf(lines, i, bare)) === withSig(sig));
+  return { fn: withSig(sig) + (twins.length > 1 ? ` (line ${at + 1})` : ''), bare, scope, at, sig };
+}
+
+// One file's hit lines (1-based) grouped by the declaration each sits in, in the order of each row's first
+// line: `{ fn, bare, scope, at, peers, lines }`. A hit outside any function, and every hit of a file whose
+// functions cannot be named, is the file's own row, `(file)`. `lines` is the file's text as lines, or null
+// when it is not readable.
+export function declarations(file, hitLines, lines) {
+  const named = lines && NAMED_FUNCTIONS.test(file);
+  const rows = new Map();
+  for (const line of hitLines) {
+    const d = named ? declarationOf(lines, line - 1) : null;
+    const key = d ? d.at : FILE_PART;
+    if (!rows.has(key)) rows.set(key, d ? { ...labelled(lines, d), lines: [] } : { fn: FILE_PART, bare: '', scope: '', at: -1, sig: null, lines: [] });
+    rows.get(key).lines.push(line);
+  }
+  return [...rows.values()];
+}
+
+// The same rows as Map(function part → lines).
+export function byFunction(file, hitLines, lines) {
+  return new Map(declarations(file, hitLines, lines).map(r => [r.fn, r.lines]));
+}
+
+// "Type.name(int a) (line 12)" → { scope: 'Type', bare: 'name', sig: 'int a', line: 12 }; sig is undefined when
+// the label has none, and line 0 when it has none; null for `(file)` and any other text.
+const LABEL = /^(?:([A-Za-z_$][\w$]*)\.)?([A-Za-z_$][\w$]*)(?:\((.*?)\))?(?: \(line (\d+)\))?$/;
+const readLabel = (fn) => { const m = LABEL.exec(fn || ''); return m ? { scope: m[1] || '', bare: m[2], sig: m[3], line: Number(m[4] || 0) } : null; };
+
+// Which row found now each place of an older list continues: Map(place → row). `mine`: the list's places of one
+// searched name in one file; `rows`: that name's rows in that file; `scope(row)`: the row's scope.
+//   1. A label with no line: the same label is the same place.
+//   2. A label with a line (two declarations with the same parameter list: a line moves with every edit above
+//      it, so it tells nothing alone): the places of one name, scope and parameter list continue under their
+//      labels only while every one of them has its row under the same label, none more and none less, as when
+//      nothing above them moved. Otherwise they are gone and the declarations are new: no line is followed.
+//   3. A label with no line that is not found again (a twin came or went, or the list is from before
+//      2026-11-17): a place and a row with the same function name, the same scope when the label names one and
+//      the same parameter list when it has one, continue each other when each is the only candidate of the other.
+//   4. Any other place is gone and any other row is new and open: an outcome is never moved to a declaration it
+//      may not have been written for. A gone place comes back only under its own label, and never by a line.
+function continued(mine, rows, scope) {
+  const to = new Map(), used = new Set();
+  const pair = (p, r) => { to.set(p, r); used.add(r); };
+  const label = (p) => p.fn || FILE_PART;
+  const live = mine.filter(p => p.mark !== 'gone').map(p => ({ p, l: readLabel(label(p)) }));
+  const fits = (l, r) => !used.has(r) && l.bare === r.bare && (!l.scope || l.scope === scope(r)) && (l.sig === undefined || l.sig === r.sig);
+  for (const { p, l } of live) { const r = !(l && l.line) && rows.find(row => row.fn === label(p)); if (r) pair(p, r); }
+  const key = (l) => `${l.scope}.${l.bare}(${l.sig ?? '\0'})`;
+  const byLine = new Map();
+  for (const x of live) if (x.l && x.l.line) byLine.set(key(x.l), [...(byLine.get(key(x.l)) || []), x]);
+  for (const xs of byLine.values()) {
+    const rs = rows.filter(r => { const l = readLabel(r.fn); return l && l.line && key(l) === key(xs[0].l); });
+    if (rs.length !== xs.length || !xs.every(x => rs.some(r => r.fn === label(x.p)))) continue;
+    for (const x of xs) pair(x.p, rs.find(r => r.fn === label(x.p)));
+  }
+  const rest = live.filter(x => x.l && !x.l.line && !to.has(x.p)).map(x => ({ ...x, rows: rows.filter(r => fits(x.l, r)) }));
+  for (const x of rest) if (x.rows.length === 1 && rest.filter(y => y.rows.includes(x.rows[0])).length === 1) pair(x.p, x.rows[0]);
+  for (const p of mine) {
+    const l = readLabel(label(p));
+    const r = p.mark === 'gone' && !(l && l.line) && rows.find(row => !used.has(row) && row.fn === label(p));
+    if (r) pair(p, r);
+  }
+  return to;
 }
 
 // "P3 (new) · name · file · function · lines 12, 40 → outcome"; the older shape has no function part and
@@ -163,31 +324,36 @@ export function writePlaces({ repo, names = [], out, now = new Date() }) {
     if (!texts.has(file)) { let t = null; try { t = fs.readFileSync(path.join(top, file), 'utf8').split(/\r?\n/); } catch { /* removed meanwhile */ } texts.set(file, t); }
     return texts.get(file);
   };
-  // name → [{ file, fn, lines }], files in path order, each file's functions in the order they first appear.
+  // name → [{ file, fn, bare, scope, at, peers, lines }], files in path order, each file's declarations in the
+  // order they first appear.
   const hits = new Map();
   for (const name of all) {
     const rows = [];
     for (const file of [...found.get(name).keys()].sort()) {
-      for (const [fn, lines] of byFunction(file, found.get(name).get(file), linesOf(file))) rows.push({ file, fn, lines });
+      for (const row of declarations(file, found.get(name).get(file), linesOf(file))) rows.push({ file, ...row });
     }
     hits.set(name, rows);
   }
-  const key = (name, file, fn) => [name, file, fn || FILE_PART].join('\0');
-  const current = new Map();
-  for (const [name, rows] of hits) for (const r of rows) current.set(key(name, r.file, r.fn), r.lines);
+  // 2026-11-17: a place of the list is matched to a declaration, not to a name (continued, above).
+  const scope = (r) => (r.scope ??= scopeOf(linesOf(r.file), r.at));
+  const spots = new Map();
+  for (const p of old ? old.places : []) { const k = p.name + '\0' + p.file; spots.set(k, [...(spots.get(k) || []), p]); }
+  const rowOf = new Map();
+  for (const [k, mine] of spots) {
+    const [name, file] = k.split('\0');
+    for (const [p, r] of continued(mine, (hits.get(name) || []).filter(row => row.file === file), scope)) rowOf.set(p, r);
+  }
   const places = [];
-  const listed = new Set();
   for (const p of old ? old.places : []) {
-    const k = key(p.name, p.file, p.fn);
-    listed.add(k);
-    const lines = current.get(k);
-    if (lines) places.push({ ...p, fn: p.fn || FILE_PART, lines: linesText(lines), mark: p.mark === 'gone' ? '' : p.mark });
+    const r = rowOf.get(p);
+    if (r) places.push({ ...p, fn: r.fn, lines: linesText(r.lines), mark: p.mark === 'gone' ? '' : p.mark });
     else places.push({ ...p, fn: p.fn || FILE_PART, lines: 'none', mark: 'gone' });
   }
+  const kept = new Set(rowOf.values());
   let next = places.reduce((n, p) => Math.max(n, p.n), 0) + 1;
   for (const name of all) {
     for (const r of hits.get(name)) {
-      if (listed.has(key(name, r.file, r.fn))) continue;
+      if (kept.has(r)) continue;
       places.push({ n: next++, mark: old ? 'new' : '', name, file: r.file, fn: r.fn, lines: linesText(r.lines), outcome: '' });
     }
   }
@@ -276,9 +442,31 @@ export function closePlaces(file, sets, { checkCount } = {}) {
   return counts;
 }
 
+// 2026-11-17 (audit, "distinct methods collapse into a single place"): why an open place has no outcome of its
+// own, when a gone place used to cover it together with another function of the same name (a list from before
+// a place was one declaration, or a second function of that name that now uses the searched name). '' when
+// that is not so. The old outcome stays on the gone line; it is never taken for either function.
+const SHOWN_OUTCOME = 60;
+function splitNote(p, places) {
+  const mine = readLabel(p.fn);
+  if (!mine) return '';
+  const covers = (was, l) => l && l.bare === was.bare && (!was.scope || was.scope === l.scope);
+  for (const g of places) {
+    const was = g.mark === 'gone' && g.name === p.name && g.file === p.file && String(g.outcome || '').trim() ? readLabel(g.fn) : null;
+    if (!was || was.line || was.sig !== undefined || !covers(was, mine)) continue;
+    const parts = places.filter(q => q.mark !== 'gone' && q.name === p.name && q.file === p.file && covers(was, readLabel(q.fn)));
+    const had = g.outcome.trim().length > SHOWN_OUTCOME ? g.outcome.trim().slice(0, SHOWN_OUTCOME - 1) + '…' : g.outcome.trim();
+    if (parts.length > 1) return `split from P${g.n} (${g.fn} → ${had}): ${parts.length} functions named ${was.bare} use ${p.name} in this file, and each is its own place with its own outcome`;
+  }
+  return '';
+}
+
 export function checkPlaces(list, { checkCount } = {}) {
   const live = list.places.filter(p => p.mark !== 'gone');
-  const open = live.map(p => ({ p, why: openReason(p, checkCount) })).filter(x => x.why);
+  const open = live.map(p => ({ p, why: openReason(p, checkCount) })).filter(x => x.why).map(x => {
+    const split = x.why === 'no outcome' ? splitNote(x.p, list.places) : '';
+    return split ? { ...x, why: split, split: true } : x;
+  });
   const lines = open.map(({ p, why }) => `OPEN: P${p.n} · ${where(p)}${why === 'no outcome' ? '' : ' — ' + why}`);
   lines.push(`PLACES: ${live.length} place(s), ${open.length} open`);
   return { ok: !open.length, open, count: live.length, text: lines.join('\n') };
@@ -332,15 +520,17 @@ async function main() {
       process.stdout.write(`PLACES: ${count} place(s), ${open.length} open — ${file}\n`);
       return;
     }
+    // 2026-11-17: a run that only writes the list still says which open places an older place was split into.
+    const splits = (open) => open.filter(x => x.split).map(({ p, why }) => `OPEN: P${p.n} · ${where(p)} — ${why}\n`).join('');
     if (o.out) {
       const list = writePlaces({ repo: path.resolve(o.repo), names: o.names.split(','), out: path.resolve(o.out) });
       const { count, open } = checkPlaces(list);
-      process.stdout.write(`PLACES: ${count} place(s), ${open.length} open — written to ${path.resolve(o.out)}; write C<n> or none: <reason> after each →\n`);
+      process.stdout.write(`${splits(open)}PLACES: ${count} place(s), ${open.length} open — written to ${path.resolve(o.out)}; write C<n> or none: <reason> after each →\n`);
     } else {
       if (o.refresh) refreshPlaces(path.resolve(o.refresh), { repo: o.repo && path.resolve(o.repo) });
       if (!o.check) {
         const { count, open } = checkPlaces(readPlaces(path.resolve(o.refresh)));
-        process.stdout.write(`PLACES: ${count} place(s), ${open.length} open — refreshed ${path.resolve(o.refresh)}\n`);
+        process.stdout.write(`${splits(open)}PLACES: ${count} place(s), ${open.length} open — refreshed ${path.resolve(o.refresh)}\n`);
       } else {
         let checkCount;
         if (o['check-lines']) {

@@ -297,6 +297,15 @@ test('risk files: a base name two changed files share names both; a function wit
   assert.deepEqual(riskFiles(signals, changed).map(f => [f.name, f.labels.join('; ')]), [['src/Rules.cs', 'a changed function with more than 10 callers']]);
 });
 
+// 2026-11-17: the size check writes "name ×?" for an unknown count and "base:name ×n" in plan mode; the row is found by the function name.
+test('risk files: an unknown caller count, a plan-mode prefix and two same-named definitions still name their files', () => {
+  const callers = [{ name: 'Apply', file: 'src/Rules.cs', count: null }, { name: 'Apply', file: 'src/Other.cs', count: 12 }, { name: 'Else', file: 'src/E.cs', count: 3 }];
+  assert.deepEqual(signalFiles({ signals: { callersMany: ['Apply ×?'] }, callers }).callersMany, ['src/Rules.cs', 'src/Other.cs']);
+  assert.deepEqual(signalFiles({ signals: { callersMany: ['Rules.cs:Apply ×?'] }, callers }).callersMany, ['src/Rules.cs', 'src/Other.cs']);
+  assert.deepEqual(signalFiles({ signals: { callersMany: ['Apply ×18'] }, callers: [callers[0]] }).callersMany, ['src/Rules.cs']);
+  assert.deepEqual(signalFiles({ signals: { callersMany: ['Apply ×?'] }, callers: [callers[2]] }).callersMany, [], 'a different name is not listed');
+});
+
 test('the command gives a big change its risk-files line from the size check, as repo paths', () => {
   const repo = fs.mkdtempSync(path.join(root, 'repo-'));
   const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -505,4 +514,100 @@ test('--coverage: a Check line in the wrong shape fails with its reason; a right
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /^CHECK LINES: 2 line\(s\), each with its source; T1\.\.T1 covered$/m);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// 2026-11-17 (audit S4): on a Big task the Test designer runs before code and its cases become the tests. launch.md
+// listed it again after the proof, and "launch every line" repeated the planning.
+test('a big launch holds no Test designer line once the designer ran, and says why in one line; small and medium are unchanged', () => {
+  const args = { ...riskArgs, facts: riskFacts, changed: riskChanged };
+  const headings = text => text.split(/^## /m).slice(1).map(s => s.split(' — ')[0]);
+  const reviewers = ['Fresh eyes (Claude)', 'Risk files (Claude)', 'Whole diff (Claude)', 'Fresh eyes (Codex)'];
+  const fromFreshEyes = text => text.slice(text.indexOf('## Fresh eyes (Claude)'));
+  // Big, and a size not known (the full round too).
+  for (const size of ['big', '']) {
+    const open = buildLaunch({ ...args, size });
+    assert.deepEqual(headings(open), ['Test designer', ...reviewers], 'no report yet: the designer line stays');
+    assert.match(open, /^\(Launch it before code\. After that, launch it only for a requirement that changed after the plan: /m, 'the kept line says when to launch it again');
+    assert.doesNotMatch(open, /already ran before code/);
+    for (const done of ['test-designer.md', '--designer-done']) {
+      const launch = buildLaunch({ ...args, size, designerDone: done });
+      assert.deepEqual(headings(launch), reviewers, done);
+      assert.doesNotMatch(launch, /Seat: Test designer|braintrust-expert-sonnet|a requirement that changed/, done);
+      assert.equal(launch.split('\n').filter(l => l.startsWith('Test designer')).join('|'), `Test designer: already ran before code (${done})`, 'one line says why it is not launched');
+      assert.equal(fromFreshEyes(launch), fromFreshEyes(open), 'the four reviewers are launched as before');
+    }
+  }
+  // Small and Medium never had the line: a saved report changes nothing for them.
+  for (const size of ['tiny', 'small', 'medium']) {
+    const one = buildLaunch({ ...args, size, designerDone: 'test-designer.md' });
+    assert.equal(one, buildLaunch({ ...args, size }), size);
+    assert.doesNotMatch(one, /Test designer/, size);
+  }
+});
+
+test('the command leaves the Test designer out of a big launch when its report is in the notes folder, or with --designer-done', () => {
+  const repo = fs.mkdtempSync(path.join(root, 'repo-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid');
+  fs.mkdirSync(path.join(repo, 'Api/Controllers'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'Api/Controllers/FilesController.cs'), 'public class FilesController\n{\n    public int Upload(int file) => 1;\n}\n');
+  git('add', '-A'); git('commit', '-qm', 'base'); git('switch', '-q', '-c', 'fix/d');
+  fs.writeFileSync(path.join(repo, 'Api/Controllers/FilesController.cs'), 'public class FilesController\n{\n    [Authorize(Roles = "Admin")]\n    public int Upload(IFormFile file) => 1;\n}\n');
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
+  fs.writeFileSync(ticket, 'only admins upload\n'); fs.writeFileSync(lines, '- only admins upload\n'); fs.writeFileSync(check, '- [T1] only admins upload\n');
+  const places = placesFor(repo, 'Upload', 'C1');
+  // The extra options come first, so --designer-done is followed by another option: it takes no value.
+  const launchLines = (...extra) => {
+    const r = spawnSync(process.execPath, [script, ...extra, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'), '--places', places], { encoding: 'utf8', env, windowsHide: true });
+    assert.equal(r.status, 0, r.stderr);
+    return fs.readFileSync(path.join(notes, 'launch.md'), 'utf8').split(/\r?\n/);
+  };
+  const reviewerCount = rows => rows.filter(l => l.startsWith('You are the independent reviewer')).length;
+  // No report (an empty file is none): the line stays and says when to launch it again.
+  fs.writeFileSync(path.join(notes, 'test-designer.md'), '\n');
+  let rows = launchLines();
+  assert.ok(rows.includes('## Test designer — Agent braintrust-expert-sonnet, run_in_background'), 'the fixture is big and has no report: the designer line stays');
+  assert.equal(rows.filter(l => /only for a requirement that changed after the plan/.test(l)).length, 1);
+  assert.ok(!rows.some(l => /already ran before code/.test(l)));
+  fs.rmSync(path.join(notes, 'test-designer.md'));
+  for (const name of ['test-designer.md', 'test-designer-report.md', 'test-design.md']) {
+    fs.writeFileSync(path.join(notes, name), 'SETUP\n- an admin\nCASES\n1. an admin uploads\nBREAKS\n- drop the role\n');
+    rows = launchLines();
+    assert.ok(!rows.some(l => /^## Test designer|Seat: Test designer/.test(l)), name + ': no designer launch');
+    assert.ok(rows.includes(`Test designer: already ran before code (${name})`), name + ': the reason line names the file');
+    assert.equal(reviewerCount(rows), 3, name + ': the reviewers stay');
+    assert.ok(rows.some(l => l.includes('codex exec -s read-only')), name + ': the other engine stays');
+    fs.rmSync(path.join(notes, name));
+  }
+  rows = launchLines('--designer-done');
+  assert.ok(!rows.some(l => /^## Test designer|Seat: Test designer/.test(l)), '--designer-done: no designer launch');
+  assert.ok(rows.includes('Test designer: already ran before code (--designer-done)'));
+  assert.equal(reviewerCount(rows), 3);
+  // A requirement changed after the report was saved: the designer must run again, so its line stays.
+  const report = path.join(notes, 'test-designer.md');
+  fs.writeFileSync(report, 'SETUP\nCASES\nBREAKS\n');
+  const hourAgo = new Date(Date.now() - 3600e3);
+  fs.utimesSync(report, hourAgo, hourAgo);
+  rows = launchLines();
+  assert.ok(rows.includes('## Test designer — Agent braintrust-expert-sonnet, run_in_background'), 'stale report: the designer line stays');
+  assert.ok(!rows.some(l => /already ran before code/.test(l)));
+  const old = new Date(Date.now() - 7200e3);
+  fs.utimesSync(lines, old, old); fs.utimesSync(check, old, old);
+  rows = launchLines();
+  assert.ok(rows.includes('Test designer: already ran before code (test-designer.md)'), 'report newer than the requirements: left out');
+});
+
+// 2026-11-17 (audit, review brief): fresh eyes never see the Check lines, and a ticket seldom names every access,
+// concurrency or rollback rule. A missing test for a rule the change itself adds was only an EXTRA TEST line.
+test('a missing test for a rule this change adds, widens or newly exposes is a Gap in both briefs; EXTRA TEST stays for the rest', () => {
+  const args = { repo: 'C:/r', branch: 'b', base: 'origin/staging', mergeBase: 'a'.repeat(40), ticket: 't', ticketLines: ['x y z'], checks: ['[T1] x'], outside: { other: [], touched: [] }, facts: { stack: '', size: '', callers: '' } };
+  for (const [name, brief] of [['framed', buildBrief(args)], ['fresh', buildFreshBrief(args)]]) {
+    const rules = brief.split('## Rules')[1].split(/\r?\n/).filter(l => l.startsWith('- '));
+    assert.equal(rules.length, 5, name + ': still five rules, the sentence joins the test rule');
+    const rule = rules.find(l => l.includes('`EXTRA TEST:` line')) || '';
+    assert.match(rule, /^- A test weakness on a Check line is reported as a concrete break/, name);
+    assert.match(rule, /a missing test for a correctness or security rule that this change adds, widens or newly exposes \(access, tenant, a concurrent or repeated request, a rollback, a failure path\) is a `Gap` finding, whatever the ticket says/, name);
+    assert.match(rule, /`EXTRA TEST:` is for every other case\.$/, name);
+  }
 });

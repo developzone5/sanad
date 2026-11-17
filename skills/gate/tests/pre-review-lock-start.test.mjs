@@ -56,6 +56,6 @@ test('without the helper: the id check alone, never a crash', async () => {
   fs.mkdirSync(path.dirname(copy), { recursive: true });
   fs.copyFileSync(script, copy);
   // The gate scripts pre-review imports go with it (the missing helper is hooks/lib, outside this folder).
-  for (const f of ['is-main.mjs', 'git-bash.mjs']) fs.copyFileSync(path.join(path.dirname(script), f), path.join(path.dirname(copy), f));
+  for (const f of ['is-main.mjs', 'git-bash.mjs', 'pre-review-cache.mjs']) fs.copyFileSync(path.join(path.dirname(script), f), path.join(path.dirname(copy), f));
   assert.equal(await ask({ pidStartedAt: iso(ownStart() - 3600000) }, copy), other);
 });
