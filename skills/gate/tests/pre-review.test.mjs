@@ -558,3 +558,82 @@ test('audit 3, must not change: a handler that has a caller outside the function
   // No repo given: every changed function with callers is owed, as before.
   assert.deepEqual(unsearchedCallers('  callers: handleSubmit ×1 [Own.tsx:5]', []).names, ['handleSubmit']);
 });
+
+// 2026-11-18 (audit finding 6): a spelling fix in a locale file is sized tiny and the rule page (loop.md, "Text
+// only") asks for no new test, yet pre-review failed "ticket lines" and "test asserts" (UNTAGGED [C1]). A genuine
+// text-only change (docs and locale text) leaves out the two checks that demand new tests; a test or style file
+// is tiny too but is not text, so it keeps both.
+function textFixture(file, text) {
+  const f = fixture();
+  const lines = path.join(f.repo, '..', 'tt-lines.md'), check = path.join(f.repo, '..', 'tt-check.md');
+  fs.writeFileSync(lines, '- The button says Submit\n');
+  fs.writeFileSync(check, '- [T1] The label is spelled right\n');
+  f.write(file, text);
+  return { ...f, lines, check };
+}
+
+test('text only: a locale spelling fix is not asked for a quoted ticket test or a [C1] test; the other checks stay', () => {
+  const { repo, lines, check } = textFixture('web/src/locales/en.json', '{"send":"Submit"}\n');
+  const r = run(repo, ['--lines', lines, '--check', check]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /UNTAGGED|ticket lines.*\n.*✗|✗ ticket lines/);
+  assert.match(r.stdout, /– ticket lines: skipped \(a text-only change\)/);
+  assert.match(r.stdout, /– test labels: skipped \(a text-only change\)/);
+  for (const name of ['test asserts', 'commits', 'size', 'one job', 'check lines']) assert.match(r.stdout, new RegExp('✓ ' + name), name);
+});
+
+test('text only (must not change): a tiny change to a test file is still asked for the ticket test and the [C1] test', () => {
+  const { repo, lines, check } = textFixture('web/src/a.test.ts', "it('x', () => { expect(1).toBe(1); });\n");
+  const r = run(repo, ['--lines', lines, '--check', check]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /✗ ticket lines/);
+  assert.match(r.stdout, /UNTAGGED: check line C1 has no new test tagged \[C1\]/);
+});
+
+test('text only (must not change): a tiny style change and a small logic change keep the test checks', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  for (const file of ['web/src/a.css', 'web/src/a.ts']) {
+    const { repo, write } = fixture();
+    write(file, file.endsWith('.css') ? 'a { color: red; }\n' : 'export const a = 9;\n');
+    const plan = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md' });
+    assert.ok(plan.checks.some(c => c.name === 'ticket lines'), file);
+    assert.ok(plan.checks.find(c => c.name === 'test asserts').args.includes('--check'), file);
+  }
+  const { repo, write } = fixture();
+  write('web/src/locales/en.json', '{"a":"b"}\n'); write('web/src/a.ts', 'export const a = 9;\n');
+  const mixed = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md' });
+  assert.ok(mixed.checks.some(c => c.name === 'ticket lines'), 'locale plus logic is not text only');
+});
+
+// 2026-11-18 (audit): a deleted file and logic in a locale script are not text. A locale fix plus a deleted test
+// file or a deleted code file, and a changed function body under locales/, are still asked for the ticket test.
+async function planFor(setup) {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const f = fixture();
+  f.write('web/src/locales/en.json', '{"send":"Sumbit"}\n');
+  f.write('web/src/label.test.ts', "it('x', () => {});\n");
+  f.write('web/src/old.ts', 'export const old = 1;\n');
+  f.write('web/src/locales/index.ts', "import en from './en.json';\nexport function t(key) { return en[key] ?? key; }\n");
+  f.git('add', '-A'); f.git('commit', '-qm', 'more'); f.git('branch', '-f', 'base');
+  setup(f);
+  return planChecks({ repo: fs.realpathSync.native(f.repo), base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md' });
+}
+
+test('text only (audit): a locale fix plus a deleted test file, or a deleted code file, is still asked for tests', async () => {
+  for (const gone of ['web/src/label.test.ts', 'web/src/old.ts']) {
+    const plan = await planFor(f => { f.write('web/src/locales/en.json', '{"send":"Submit"}\n'); fs.rmSync(path.join(f.repo, gone)); });
+    assert.ok(plan.checks.some(c => c.name === 'ticket lines'), gone);
+    assert.ok(plan.checks.find(c => c.name === 'test asserts').args.includes('--check'), gone);
+  }
+});
+
+test('text only (audit): logic in a locale script is asked for tests; plain locale text and a deleted doc stay text only', async () => {
+  const logic = await planFor(f => f.write('web/src/locales/index.ts', "import en from './en.json';\nexport function t(key) { if (!key) throw new Error('no key'); return en[key] ?? key.toUpperCase(); }\n"));
+  assert.ok(logic.checks.some(c => c.name === 'ticket lines'), 'changed function body');
+  const bundle = await planFor(f => f.write('web/src/locales/index.ts', "import en from './en.json';\nexport function t(key) { return en[key] ?? key; }\nexport const m = { count: (n) => n > 10 ? 'many' : String(n) };\n"));
+  assert.ok(bundle.checks.some(c => c.name === 'ticket lines'), 'function value in a bundle');
+  const plain = await planFor(f => { f.write('web/src/locales/en.json', '{"send":"Submit"}\n'); f.write('README.md', 'y\n'); });
+  assert.ok(!plain.checks.some(c => c.name === 'ticket lines'), 'plain text stays text only');
+  const bundleText = await planFor(f => f.write('web/src/locales/index.ts', "import en from './en.json';\nexport function t(key) { return en[key] ?? key; }\n// note (see docs)\n"));
+  assert.ok(!bundleText.checks.some(c => c.name === 'ticket lines'), 'a comment is text');
+});

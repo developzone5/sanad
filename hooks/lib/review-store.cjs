@@ -170,18 +170,88 @@ function save(records) {
   fs.renameSync(tmp, file);
 }
 
+// One lock for the whole read-change-save step (2026-11-18, audit finding 7): without it, processes writing at
+// the same moment each saved their own copy and the last one won, so acknowledged records were lost.
+// The lock is a file made with an exclusive create; a short retry loop (about 3 s); a lock older than about
+// 10 s, or whose owner process is gone, is taken over. fn's result is returned; when the lock cannot be had
+// the answer is false ("not written"), never a claim of success.
+const LOCK_WAIT_MS = 3000, LOCK_STALE_MS = 10000;
+function sleepMs(ms) { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch (e) { const end = Date.now() + ms; while (Date.now() < end); } }
+function ownerGone(text) {
+  const pid = parseInt(String(text).split(/\s+/)[0], 10);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; } catch (e) { return !!e && e.code === 'ESRCH'; }
+}
+// 2026-11-18 (repair): each lock holds a unique text (pid, time, random). A waiter judges the lock stale from the
+// text it read, and removes it only under a second exclusive take-over file, after reading again that the lock still
+// holds that exact text. So a lock a new owner made after the old one finished is never removed by mistake. The
+// owner removes the lock only while it still holds its own text.
+// The judged text of a stale lock, or null when the lock is not stale (or cannot be read).
+function staleText(lock) {
+  try {
+    const age = Date.now() - fs.statSync(lock).mtimeMs;
+    const text = fs.readFileSync(lock, 'utf8');
+    return age > LOCK_STALE_MS || ownerGone(text) ? text : null;
+  } catch (e) { return null; }
+}
+function readText(file) { try { return fs.readFileSync(file, 'utf8'); } catch (e) { return null; } }
+function takeOver(lock, judged) {
+  const gate = lock + '.takeover';
+  let fd;
+  try { fd = fs.openSync(gate, 'wx'); } catch (e) {
+    // a take-over file left by a process that died is removed once old
+    try { if (Date.now() - fs.statSync(gate).mtimeMs > LOCK_STALE_MS) fs.rmSync(gate, { force: true }); } catch (e2) { /* gone */ }
+    return;
+  }
+  try {
+    if (readText(lock) === judged) fs.rmSync(lock, { force: true });
+  } catch (e) { /* someone else took it */ } finally {
+    try { fs.closeSync(fd); } catch (e) { /* closed */ }
+    try { fs.rmSync(gate, { force: true }); } catch (e) { /* old-file rule covers it */ }
+  }
+}
+function withLock(fn) {
+  const lock = path.join(folder(), FILE + '.lock');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const mine = process.pid + ' ' + Date.now() + ' ' + Math.random().toString(36).slice(2);
+  const stop = Date.now() + LOCK_WAIT_MS;
+  let fd = null;
+  for (let wait = 5; ; wait = Math.min(wait * 2, 80)) {
+    try { fd = fs.openSync(lock, 'wx'); break; } catch (e) {
+      // EPERM/EACCES/EBUSY: on Windows the lock file is being deleted while another process still has it open: busy, retry
+      if (!e || !['EEXIST', 'EPERM', 'EACCES', 'EBUSY'].includes(e.code)) return false;
+    }
+    const judged = staleText(lock);
+    if (judged !== null) { takeOver(lock, judged); if (Date.now() >= stop) return false; continue; }
+    if (Date.now() >= stop) return false;
+    sleepMs(wait);
+  }
+  try {
+    try { fs.writeSync(fd, mine); } catch (e) { /* the file's time is enough */ }
+    return fn();
+  } finally {
+    try { fs.closeSync(fd); } catch (e) { /* closed */ }
+    try { if (readText(lock) === mine) fs.rmSync(lock, { force: true }); } catch (e) { /* stale rule covers it */ }
+  }
+}
+
+// The read-change-save step of write, to run under the lock.
+function writeLocked(snap, session) {
+  const records = load();
+  if (records.some((x) => x.repo === snap.repo && x.head === snap.head && x.commits.join() === snap.commits.join())) return true;
+  const rec = { repo: snap.repo, commits: snap.commits, head: snap.head, at: new Date().toISOString(), session: String(session || '') };
+  if (snap.tree) rec.tree = snap.tree;
+  if (snap.base) rec.base = snap.base;
+  records.push(rec);
+  save(records);
+  return true;
+}
+
 // Writes the record of snap; the same repository and commits again changes nothing. Returns true when kept.
 function write(transcriptPath, snap, session) {
   try {
     if (!snap || !allowed(transcriptPath)) return false;
-    const records = load();
-    if (records.some((x) => x.repo === snap.repo && x.head === snap.head && x.commits.join() === snap.commits.join())) return true;
-    const rec = { repo: snap.repo, commits: snap.commits, head: snap.head, at: new Date().toISOString(), session: String(session || '') };
-    if (snap.tree) rec.tree = snap.tree;
-    if (snap.base) rec.base = snap.base;
-    records.push(rec);
-    save(records);
-    return true;
+    return withLock(() => writeLocked(snap, session)) === true;
   } catch (e) { return false; }
 }
 
@@ -192,8 +262,10 @@ function extend(transcriptPath, dir, session) {
     if (!dir || !allowed(transcriptPath)) return false;
     const snap = snapshot(dir, defaultBase(dir));
     if (!snap) return false;
-    if (!load().some((x) => x.repo === snap.repo && x.tree === snap.tree && x.base === snap.base)) return false;
-    return write(transcriptPath, snap, session);
+    return withLock(() => {
+      if (!load().some((x) => x.repo === snap.repo && x.tree === snap.tree && x.base === snap.base)) return false;
+      return writeLocked(snap, session);
+    }) === true;
   } catch (e) { return false; }
 }
 
@@ -207,11 +279,13 @@ function withdraw(transcriptPath, dir) {
       return head && repo ? { repo, head: head.toLowerCase(), tree: '', base: '' } : null;
     })();
     if (!info) return false;
-    const records = load();
-    const kept = records.filter((x) => !(x.repo === info.repo && (x.commits.includes(info.head) || (info.tree && x.tree === info.tree && x.base === info.base))));
-    if (kept.length === records.length) return false;
-    save(kept);
-    return true;
+    return withLock(() => {
+      const records = load();
+      const kept = records.filter((x) => !(x.repo === info.repo && (x.commits.includes(info.head) || (info.tree && x.tree === info.tree && x.base === info.base))));
+      if (kept.length === records.length) return false;
+      save(kept);
+      return true;
+    }) === true;
   } catch (e) { return false; }
 }
 

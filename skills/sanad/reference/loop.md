@@ -80,7 +80,7 @@ Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
 1. **Checks before review**, one command, all green:
    `node <gate>/pre-review.mjs --was <size> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --siblings <notes>/siblings.md`
 2. **The brief**, always from the tool, never typed or copied:
-   `node <gate>/review-brief.mjs --out <notes>/brief.md --ticket <ticket text file> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --proof-log <notes>/proof.log --engine <claude|codex>`
+   `node <gate>/review-brief.mjs --out <notes>/brief.md --ticket <ticket text file> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md [--proof-log <notes>/proof.log] --engine <claude|codex> --size <size>`
 3. **Launch** every line of `<notes>/launch.md` in one message. Small and Medium: one fresh-eyes review (only the user's words, the ticket, the diff and the places list). Big: the risk files with their trace list, the whole diff, fresh eyes and the other engine, together. Never type a reviewer prompt by hand. No source edit while they read.
 4. **Notes (rule 5).** A report line that starts with `Blocker`, `Bug`, `Gap`, `Question` or `EXTRA TEST`, or that leaves a choice to the user ("you decide"), is a note; the guards number it. Each gets one answer, on its own line, in a message with no tool call:
    `NOTE <n>: fixed — <what changed and the test that proves it>`

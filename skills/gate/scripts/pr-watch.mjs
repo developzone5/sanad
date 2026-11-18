@@ -183,9 +183,10 @@ function githubRequired(repo, number) {
   const r = gh(repo, ['pr', 'checks', String(number), '--required', '--json', 'name,bucket']);
   try {
     const list = JSON.parse(r.out);
-    if (Array.isArray(list)) return { required: unionOf(list.map((c) => String((c && c.name) || '').trim()).filter(Boolean).map((name) => ({ name, key: keyOf(name) }))) };
+    // 2026-11-18 (audit finding 1): the buckets are kept too (`checks`): they are reconciled with the full list.
+    if (Array.isArray(list)) return { required: unionOf(list.map((c) => String((c && c.name) || '').trim()).filter(Boolean).map((name) => ({ name, key: keyOf(name) }))), checks: list.filter((c) => c && String(c.name || '').trim()) };
   } catch { /* not JSON: an error, or none required */ }
-  if (NO_REQUIRED.test(r.err)) return { required: [] };
+  if (NO_REQUIRED.test(r.err)) return { required: [], checks: [] };
   return { error: firstLine(r.err) || 'gh pr checks --required did not answer with a list' };
 }
 
@@ -427,8 +428,9 @@ export async function watch({ repo, pr, timeoutMin, intervalSec, require = [] },
     } else {
       failedAsks = 0;
       t = tally(r.checks);
-      const settled = !t.pending.length;
-      let askAgain = false, fromGitHub = [];
+      let settled = !t.pending.length;
+      // eff = the list as reconciled with GitHub's required answer (asked after the list, so the newer word).
+      let askAgain = false, fromGitHub = [], eff = r.checks, reqNewSkip = [];
       if (settled && !t.fail.length && r.checks.length) {
         const q = githubRequired(repo, info.number);
         if (q.error) {
@@ -443,16 +445,35 @@ export async function watch({ repo, pr, timeoutMin, intervalSec, require = [] },
           const cfg = configuredRequired(repo, info.number, memo);
           configUnread = cfg.unread;
           fromGitHub = unionOf(q.required, cfg.names);
+          // 2026-11-18 (audit finding 1): a required check that either answer shows failed is red; pending in
+          // either answer keeps the watch waiting; skipped in the newer (required) answer is NOT PROVEN; any
+          // other disagreement (list skipped, required passed) keeps the list's skip: NOT PROVEN, never a PASS.
+          eff = r.checks.map((c) => c);
+          for (const rc of q.checks) {
+            const key = keyOf(rc.name), nb = bucketOf(rc);
+            const idx = eff.map((c, i) => (keyOf(c.name) === key ? i : -1)).filter((i) => i >= 0);
+            if (nb === 'fail' || nb === 'pending') {
+              const forced = { ...rc, name: idx.length ? eff[idx[0]].name : rc.name, link: (idx.length && eff[idx[0]].link) || rc.link || '' };
+              if (nb === 'fail') { forced.bucket = 'fail'; forced.state = String(rc.state || 'FAILURE'); }
+              else { forced.bucket = 'pending'; forced.state = 'PENDING'; }
+              if (idx.length) { for (const i of idx) if (bucketOf(eff[i]) !== 'fail') eff[i] = { ...forced }; }
+              else eff.push(forced);
+            } else if (nb === 'skip') reqNewSkip.push(rc.name);
+          }
+          t = tally(eff);
+          settled = !t.pending.length;
         }
       }
       if (!askAgain) {
-      const listedKeys = new Set(r.checks.map((c) => keyOf(c.name)));
+      const listedKeys = new Set(eff.map((c) => keyOf(c.name)));
       req = unionOf(requiredFrom(typed, listedKeys), fromGitHub);
-      const listed = (x) => r.checks.filter((c) => keyOf(c.name) === x.key);
+      const listed = (x) => eff.filter((c) => keyOf(c.name) === x.key);
       missing = req.filter((x) => !listed(x).length).map((x) => x.name);
-      reqSkipped = req.filter((x) => listed(x).some((c) => bucketOf(c) === 'skip')).map((x) => x.name);
+      reqSkipped = req.filter((x) => listed(x).some((c) => bucketOf(c) === 'skip') || reqNewSkip.some((n) => keyOf(n) === x.key)).map((x) => x.name);
       seenList = [...t.pass, ...t.skip];
-      seenAll = r.checks;
+      // 2026-11-18 (audit finding 1): GitHub's required answer is the newer word: a required check it shows skipped
+      // is counted in the skipped total too.
+      seenAll = eff;
       // Green: nothing red or pending, and every required check listed. With no required name only a
       // passed check makes it green (the end then says NOT PROVEN); with names the skip rules decide at the end.
       const complete = settled && !t.fail.length && !missing.length;
@@ -461,7 +482,7 @@ export async function watch({ repo, pr, timeoutMin, intervalSec, require = [] },
       // (audit finding 7: except on a draft, where nothing passed and a required name is not listed: a draft may skip CI).
       const empty = settled && !t.fail.length && !t.pass.length && (!req.length || (info.isDraft && missing.length > 0));
       // The required names are part of what was seen: a changed list is a new look.
-      const list = r.checks.map((c) => `${c.name}=${bucketOf(c)}`).sort().join('|') + '#' + req.map((x) => x.key).sort().join('|');
+      const list = eff.map((c) => `${c.name}=${bucketOf(c)}`).sort().join('|') + '#' + req.map((x) => x.key).sort().join('|');
       emptyLooks = empty ? emptyLooks + 1 : 0;
       // On a draft, a check with no Actions run (the WIP app) stays pending: it is not waited for.
       unwaited = info.isDraft ? t.pending.filter((c) => !RUN.test(String((c && c.link) || ''))) : [];

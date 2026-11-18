@@ -75,3 +75,12 @@ test('media and fonts are assets like images; archives and binaries stay code; a
   assert.equal(isCodePath('scripts/remote/*.sh'), true);
   assert.equal(isCodePath('src/file?.ts'), true);
 });
+
+// 2026-11-18: a .log file is output, never product code or product input (replay false alarm).
+test('a .log file is no code, and a .log name is not touched in the nearest code kinds', () => {
+  for (const p of ['gate.log', 'logs/gate.log', 'C:/repo/out/run.LOG', 'run.log.1', 'run.log.old', 'run.log.bak']) {
+    assert.equal(isCodePath(p), false, p);
+    assert.equal(isProsePath(p), true, p);
+  }
+  for (const p of ['src/app.ts', 'src/logger.ts', 'logs/config.json', 'run.log.ts', 'run.log.txt', 'run.log.1.ts', 'tests/fixtures/access.log', 'test/data/a.log', 'src/__fixtures__/x.log.1']) assert.equal(isCodePath(p), true, p);
+});
