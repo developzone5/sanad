@@ -304,7 +304,13 @@ test('r3-3. must not change: other output to a code or manifest file is still an
   assert.deepEqual(scan.shellEditPaths('git diff > fix.ts'), ['fix.ts']);
   assert.deepEqual(scan.shellEditPaths('pip freeze > requirements.txt'), ['requirements.txt']);
   assert.deepEqual(scan.shellEditPaths('git log | tee src/log.ts'), ['src/log.ts']);
-  assert.deepEqual(scan.shellEditPaths('echo hi | tee notes.log'), ['notes.log']);
+  // 2026-11-18: a .log file is output, no code kind (was: an edit of notes.log)
+  assert.deepEqual(scan.shellEditPaths('echo hi | tee notes.log'), []);
+  assert.deepEqual(scan.shellEditPaths('mv gate.log logs/gate.log'), []);
+  assert.deepEqual(scan.shellEditPaths('echo x > run.log'), []);
+  assert.deepEqual(scan.shellEditPaths('mv run.log run.log.1'), []);
+  assert.deepEqual(scan.shellEditPaths('mv run.log run.log.old'), []);
+  assert.deepEqual(scan.shellEditPaths('echo x > src/app.ts'), ['src/app.ts']);
 });
 test('r3-4. a push command in more plain-text forms is seen', () => {
   for (const t of [

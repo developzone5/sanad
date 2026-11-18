@@ -42,12 +42,17 @@ function collapseDots(p) {
 // or copying a recording asked for a test run. Archives and binaries (.zip .jar .dll .exe) stay code: a push
 // of one is not a docs-only push.
 const PROSE_EXT = /\.(?:md|rst|adoc|png|jpe?g|gif|webp|bmp|ico|pdf|mp4|mov|webm|mkv|avi|mp3|wav|ogg|m4a|ttf|otf|woff2?|eot)$/i;
+// 2026-11-18: .log is output, never product code or input; a rotated name (run.log.1, .old, .bak) is the same file.
+// A .log under a test-data folder is a test's input and stays code (it asks for a re-test).
+const LOG_END = /\.log(?:\.(?:\d+|old|bak))?$/i;
+const TEST_DATA_DIR = /(?:^|[/\\])(?:tests?|fixtures|testdata|__fixtures__)[/\\]/i;
 const NOTES_KIND = '(?:README|CHANGELOG|CHANGES|LICENSE|NOTICE|AUTHORS|NOTES|TODO)';
 const PROSE_NAME = new RegExp('(?:^|[/\\\\])' + NOTES_KIND + '$', 'i');
 const PROSE_TXT = new RegExp('(?:^|[/\\\\])' + NOTES_KIND + '(?![A-Za-z0-9])[^/\\\\]*\\.txt$', 'i');
 function isProsePath(p) {
   p = stripQuotes(p).replace(/[),;]+$/, '');
   if (!p) return false;
+  if (LOG_END.test(p)) return !TEST_DATA_DIR.test(p);
   return PROSE_EXT.test(p) || PROSE_NAME.test(p) || PROSE_TXT.test(p);
 }
 

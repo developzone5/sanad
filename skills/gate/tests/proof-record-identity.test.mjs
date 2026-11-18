@@ -907,3 +907,43 @@ test('round 4 problems 7, 8 (C#): a failure with no class does not credit an inh
   assert.deepEqual(survivors(['RefusesUnauthorized'], fail, [], decl), []);
   assert.equal(caughtTests(['RefusesUnauthorized'], fail, [], [...testSpans(base, 'Api.Tests/BaseTests.cs'), ...testSpans(sql, 'Api.Tests/SqlTests.cs')]).length, 1);
 });
+
+// ---- Repair after the fourth audit (2026-11-18, its finding 3): Markdown can be product input ----
+
+test('finding 3: a product .md (src/content/welcome.md) changes the code fingerprint; documentation .md by place or name does not', async () => {
+  const { codeFingerprint } = await import('../scripts/proof-record.mjs');
+  const f = repoWith({ 'src/content/welcome.md': '# Hi\n', 'README.md': 'r\n', 'docs/guide.md': 'g\n', 'specs/x.md': 'x\n', 'app.cjs': 'module.exports = 1;\n' });
+  const top = fs.realpathSync.native(f.repo);
+  const first = codeFingerprint(top);
+  assert.match(first, /^[0-9a-f]{40,64}$/);
+  // Must not change: documentation by place or by name, any case, any depth.
+  f.write({ 'README.md': 'more\n', 'docs/guide.md': 'more\n', 'specs/x.md': 'more\n', 'a/b/Doc/deep.md': 'd\n', 'Changelog.MD': 'c\n', 'sub/readme.en.md': 'r\n', 'memory/m.md': 'm\n', 'notes.md': 'n\n', 'PLAN.md': 'p\n' });
+  assert.equal(codeFingerprint(top), first, 'documentation Markdown keeps the id');
+  f.git('add', '--all'); f.git('commit', '-qm', 'docs');
+  f.git('commit', '-q', '--amend', '-m', 'docs: reworded');
+  assert.equal(codeFingerprint(top), first, 'a commit and a reworded commit keep the id');
+  // A page text the code reads counts.
+  f.write({ 'src/content/welcome.md': '# Hello there\n' });
+  const changed = codeFingerprint(top);
+  assert.notEqual(changed, first, 'a product .md edit changes the id');
+  f.write({ 'src/content/new-page.md': 'new\n' });
+  assert.notEqual(codeFingerprint(top), changed, 'a new product .md changes the id');
+});
+
+test('round g problems 1, 2: a .md under a source folder or SKILL/CLAUDE/AGENTS/.claude/.github changes the id, whatever its name; plain docs stay out', async () => {
+  const { codeFingerprint } = await import('../scripts/proof-record.mjs');
+  const paths = ['src/content/docs/welcome.md', 'src/pages/plan.md', 'app/memory/cards.md', 'src/content/notes.md', 'skills/demo/SKILL.md', 'CLAUDE.md', 'AGENTS.md', '.claude/rules.md', '.github/pull.md', '.gitlab/t.md'];
+  const seed = { 'app.cjs': 'module.exports = 1;\n', 'docs/guide.md': 'g\n' };
+  for (const p of paths) seed[p] = 'strict\n';
+  const f = repoWith(seed);
+  const top = fs.realpathSync.native(f.repo);
+  for (const p of paths) {
+    const before = codeFingerprint(top);
+    f.write({ [p]: 'loose ' + p + '\n' });
+    assert.notEqual(codeFingerprint(top), before, p + ' edit changes the id');
+  }
+  // Must not change: plain documentation.
+  const keep = codeFingerprint(top);
+  f.write({ 'docs/guide.md': 'more\n', 'README.md': 'r\n' });
+  assert.equal(codeFingerprint(top), keep, 'docs and README keep the id');
+});

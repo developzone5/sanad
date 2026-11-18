@@ -53,10 +53,27 @@ function hashOrNull(top, file) {
   try { return testFileHashes(top, [file])[file]; } catch { return null; }
 }
 
+// Documentation Markdown (2026-11-18): a .md file under a folder named docs, doc, specs, memory, .claude, .github or .gitlab
+// (any depth, any case), or named README, CHANGELOG, CHANGES, LICENSE, NOTICE, AUTHORS, NOTES, TODO, CLAUDE, AGENTS, SKILL or PLAN
+// (the name before its first dot, any case). Any other .md may be a page text the product reads, so it counts.
+// Repair (2026-11-18, round g): a .md below a source folder (src, app, content, pages, public, wwwroot, resources) is a page the
+// product may read, whatever its name or a docs/memory folder below it. SKILL, CLAUDE, AGENTS and .claude/.github/.gitlab are
+// no longer documentation here: the push guard treats them as code that needs proof, so a stale proof must not survive them.
+const DOC_DIRS = new Set(['docs', 'doc', 'specs', 'memory']);
+const DOC_NAMES = new Set(['readme', 'changelog', 'changes', 'license', 'notice', 'authors', 'notes', 'todo', 'plan']);
+const SOURCE_DIRS = new Set(['src', 'app', 'content', 'pages', 'public', 'wwwroot', 'resources']);
+export function isDocMarkdown(file) {
+  const parts = String(file).replace(/\\/g, '/').split('/').filter(Boolean);
+  const base = parts.pop() || '';
+  if (!/\.md$/i.test(base)) return false;
+  if (parts.some(d => SOURCE_DIRS.has(d.toLowerCase()))) return false;
+  return parts.some(d => DOC_DIRS.has(d.toLowerCase())) || DOC_NAMES.has(base.split('.')[0].toLowerCase());
+}
+
 // The code under test as one id (2026-11-17, audit "stale mutation proof survives dependency edits"): an entry
 // was accepted while its break targets and its test files were unchanged, so an edit to any other code a test
 // depends on left the old proof valid. The id is the tree of the working folder as git sees it: HEAD's files plus
-// every uncommitted and untracked (not ignored) change, with prose (*.md, in any case) left out; a .txt may be data the product reads, so it counts. So a
+// every uncommitted and untracked (not ignored) change, with documentation Markdown (isDocMarkdown) left out; a .txt may be data the product reads, so it counts. So a
 // commit of the same files, a reworded commit and a prose edit keep it; any other edit changes it. Built through
 // a copy of the index, the way pre-review-cache.mjs builds its tree, so the real index is never touched.
 // '' when git cannot say (no repository, a failed add or write-tree): nothing is recorded or proven then.
@@ -70,7 +87,10 @@ export function codeFingerprint(top) {
     const real = git(top, ['rev-parse', '--path-format=absolute', '--git-path', 'index']);
     if (real && fs.existsSync(real)) fs.copyFileSync(real, index); else run(['read-tree', 'HEAD']);
     run(['add', '--all']);
-    run(['rm', '--cached', '-r', '-q', '-f', '--ignore-unmatch', '--', ':(icase)*.md']);
+    // Markdown counts unless it is documentation by its place or name (2026-11-18, audit finding 3).
+    const docs = run(['ls-files', '-z']).split('\0').filter(isDocMarkdown);
+    if (docs.length) execFileSync('git', ['update-index', '--force-remove', '-z', '--stdin'], { cwd: top, input: docs.join('\0') + '\0', windowsHide: true,
+      stdio: ['pipe', 'ignore', 'ignore'], env: { ...process.env, GIT_INDEX_FILE: index } });
     const tree = run(['write-tree']);
     return /^[0-9a-f]{40,64}$/.test(tree) ? tree : '';
   } catch { return ''; }

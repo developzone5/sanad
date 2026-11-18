@@ -473,7 +473,7 @@ test('a draft with skipped CI and one outside check passing is not a PASS: DRAFT
 
 test('guard: a green list first seen at the time limit still gets its second look and ends PASS', () => {
   const sc = scenario({ checks: [[check('unit', 'pending', 1)], [check('unit', 'pass', 1)]] });
-  const r = run(sc, '--interval-sec', '1', '--timeout-min', '0.012', '--require', 'unit');   // 2026-11-18: names its required check
+  const r = run(sc, '--interval-sec', '4', '--timeout-min', '0.05', '--require', 'unit');   // 2026-11-18: names its required check; wider limits (0.72 s was less than one slow look under load)
   assert.equal(r.status, 0, r.all);
 });
 
@@ -1047,4 +1047,42 @@ test('must not change: a draft whose REQUIRED check is skipped, or with no requi
   const noName = run(scenario({ view: [draft], checks: [[check('lint', 'pass', 1), check('Build', 'skipping')]] }), '--pr', '12');
   assert.equal(noName.status, 3, noName.all);
   assert.equal(noName.last, 'PR CHECKS: DRAFT — 1 skipped, 1 passed: mark it ready');
+});
+
+// 2026-11-18 (audit finding 1, high): the required answer keeps its buckets and is reconciled with the list.
+const reqAnswer = (...items) => ({ out: items.map(([name, bucket]) => ({ name, bucket })) });
+const FAILURE_LOG = { 77: logLine('Error: boom', 1, 'unit') };
+
+test('f1: the required answer says fail while the list is green on the same commit: FAIL, exit 1', () => {
+  const sc = scenario({ checks: [[check('unit', 'pass', 77)]], required: [reqAnswer(['unit', 'fail'])], logs: FAILURE_LOG });
+  const r = run(sc, '--pr', '12');
+  assert.equal(r.status, 1, r.all);
+  assert.equal(r.last, `PR CHECKS: FAIL — unit · ${URL}`);
+});
+
+test('f1: the required answer says pending while the list is green: keeps waiting, never a PASS', () => {
+  const sc = scenario({ checks: [[check('unit', 'pass', 77)]], required: [reqAnswer(['unit', 'pending'])] });
+  const r = run(sc, '--pr', '12', '--timeout-min', '0.03');
+  assert.equal(r.status, 4, r.all);
+  assert.match(r.last, /^PR CHECKS: PENDING after 0\.03 min — unit/);
+});
+
+test('f1: the required answer says skipped while the list is green: NOT PROVEN', () => {
+  const sc = scenario({ checks: [[check('unit', 'pass', 77)]], required: [reqAnswer(['unit', 'skipping'])] });
+  const r = run(sc, '--pr', '12');
+  assert.equal(r.status, 3, r.all);
+  assert.match(r.last, /^PR CHECKS: NOT PROVEN — required check "unit" was skipped/);
+});
+
+test('f1: the list says skipped but the required answer says pass: a skip in the list stands: NOT PROVEN, never a PASS', () => {
+  const sc = scenario({ checks: [[check('unit', 'skipping')]], required: [reqAnswer(['unit', 'pass'])] });
+  const r = run(sc, '--pr', '12');
+  assert.equal(r.status, 3, r.all);
+});
+
+test('f1 must not change: both answers green is a PASS', () => {
+  const sc = scenario({ checks: [[check('unit', 'pass', 77)]], required: [reqAnswer(['unit', 'pass'])] });
+  const r = run(sc, '--pr', '12');
+  assert.equal(r.status, 0, r.all);
+  assert.equal(r.last, `PR CHECKS: PASS — required: unit passed on 0123456789 (0 other passed, 0 skipped) · ${URL}`);
 });

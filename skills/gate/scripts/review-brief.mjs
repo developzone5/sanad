@@ -49,7 +49,8 @@
 //   --places     the places list from places.mjs; required unless the measured size is tiny
 //   --missed     accepted and ignored (2026-11-12)
 //   --size       the routed size (tiny, small, medium or big); the larger of it and the size check's
-//                answer is used, and tiny or small adds the focused budget and the one-review launch
+//                answer is used, and tiny or small adds the focused budget and the one-review launch;
+//                2026-11-18: kept in the notes folder as size.txt, read back by a run without --size, never lowered
 //   --proof-log  a red-proof.mjs --log file; give it once per proof (server, page); the result lines of
 //                each go into the framed brief, with a note when the code changed after that proof ran
 //   --designer-done  (no value) the Test designer already ran before code, and its report is not saved in the
@@ -450,6 +451,9 @@ const DESIGNER_AGAIN = `(Launch it before code. After that, launch it only for a
 export const ENGINES = ['claude', 'codex'];
 // Text inside a double-quoted shell argument: a file name from the repo cannot end the quote or run a command.
 const shq = s => String(s).replace(/[\\"$`]/g, '\\$&');
+// 2026-11-18: a joined path (Windows joins with a backslash) escapes a backslash only before a character bash reads inside
+// quotes, so a plain path keeps its text and a folder starting with $ or a backtick still runs as the path it names.
+const shqPath = s => String(s).replace(/\\(?=[\\"$`])|["$`]/g, m => '\\' + m);
 // Fresh eyes is the risk reviewer again (loop-rare-cases.md; the Claude seat is independent-reviewer), not the
 // whole-diff role, whose file tells it to follow the whole-diff scope and the author's Done means (2026-11-18, finding 2).
 const CODEX_ROLE = { designer: 'sanad-practical-expert', fresh: 'sanad-risk-reviewer', risk: 'sanad-risk-reviewer', whole: 'sanad-reviewer' };
@@ -506,7 +510,9 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
       `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${WHOLE_DIFF_FULL} Read-only: no builds, no tests, no edits.`, '',
       // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
       '## Fresh eyes (Codex) — Bash, run_in_background', '',
-      '```bash', `cd "${repo}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${repo}" -o "${path.join(path.dirname(brief), 'codex-review.md')}" "You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives." < /dev/null > "${path.join(path.dirname(brief), 'codex.log')}" 2>&1`, '```', '',
+      // 2026-11-18 (audit finding 5): every value goes through shq, as in the Codex plan. The folder is escaped first and
+      // joined after, so an ordinary path keeps the separators it had.
+      '```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shqPath(path.join(path.dirname(brief), 'codex-review.md'))}" "${shq(`You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shqPath(path.join(path.dirname(brief), 'codex.log'))}" 2>&1`, '```', '',
     ]),
   ].join('\n');
 }
@@ -517,11 +523,27 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
 export function resolveEngine(notesDir, given) {
   const file = path.join(notesDir, 'engine.txt');
   let saved = '';
-  try { saved = fs.readFileSync(file, 'utf8').trim(); } catch { /* no saved engine yet */ }
+  // 2026-11-18: only a missing file means "nothing saved"; an unreadable or empty one is refused.
+  try { saved = fs.readFileSync(file, 'utf8').trim(); if (!saved) throw new Error(`${file} is empty; it must hold one of ${ENGINES.join(', ')}. Fix or delete the file.`); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   if (saved && !ENGINES.includes(saved)) throw new Error(`${file} holds "${saved}"; it must be one of ${ENGINES.join(', ')}. Fix or delete the file.`);
   if (given && saved && given !== saved) throw new Error(`this task's engine is ${saved} (saved in ${file}); --engine ${given} differs. Keep ${saved}, or delete the file to start a new task.`);
   if (given && !saved) fs.writeFileSync(file, given + '\n');
   return given || saved || 'claude';
+}
+
+// 2026-11-18 (audit finding 2): the size given with --size is kept in the notes folder (size.txt), as engine.txt keeps the
+// engine. The tool runs twice per task and the written command has no --size, so a chosen Big review became the measured
+// size's plan. A later run reads it back; the size used is never smaller than the saved one (chooseSize still raises it
+// to the measured size). An unreadable saved value is refused, never ignored.
+export function resolveSize(notesDir, given) {
+  const file = path.join(notesDir, 'size.txt');
+  let saved = '';
+  // 2026-11-18: only a missing file means "nothing saved"; an unreadable or empty one is refused.
+  try { saved = fs.readFileSync(file, 'utf8').trim(); if (!saved) throw new Error(`${file} is empty; it must hold one of ${SIZES.join(', ')}. Fix or delete the file.`); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  if (saved && !SIZES.includes(saved)) throw new Error(`${file} holds "${saved}"; it must be one of ${SIZES.join(', ')}. Fix or delete the file.`);
+  const used = given && saved ? SIZES[Math.max(SIZES.indexOf(given), SIZES.indexOf(saved))] : given || saved || undefined;
+  if (given && used !== saved) fs.writeFileSync(file, used + '\n');
+  return used;
 }
 
 function parse(argv) {
@@ -571,6 +593,8 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     if (!ticketLines.length) throw new Error('the ticket lines file has no lines');
     const gaps = coverageProblems(ticketLines, checks);
     if (gaps.length) throw new Error('the Check lines do not cover the ticket:\n  ' + gaps.join('\n  '));
+    // 2026-11-18: a requested --outside file that is missing is refused; the git-config default stays lenient.
+    if (o.outside && !fs.existsSync(o.outside)) throw new Error('--outside file not found: ' + o.outside);
     const listFile = (flag, key) => { const f = flag || git(repo, ['config', '--get', key]); return f && fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : ''; };
     const tracked = git(repo, ['diff', '--name-only', '-z', mergeBase]).split('\0').filter(Boolean);
     const untracked = git(repo, ['ls-files', '-z', '--others', '--exclude-standard']).split('\0').filter(Boolean);
@@ -578,7 +602,10 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     const changed = changedFiles.map(f => f.name);
     const outsideText = listFile(o.outside, 'sanad.outsideList');
     const outside = { ...splitOutside(outsideItems(outsideText), changed), decided: decidedItems(outsideText) };
-    const logs = (o['proof-log'] || []).filter(f => fs.existsSync(f)).map(f => ({ name: path.basename(f), text: fs.readFileSync(f, 'utf8') }));
+    // 2026-11-18 (audit finding 4): a proof log that was asked for and is not there is a usage error, never skipped.
+    const missingLog = (o['proof-log'] || []).find(f => !fs.existsSync(f));
+    if (missingLog) throw new Error('--proof-log file not found: ' + missingLog);
+    const logs = (o['proof-log'] || []).map(f => ({ name: path.basename(f), text: fs.readFileSync(f, 'utf8') }));
     const proof = proofLines(logs, logs.length ? treeId(repo) : '');
     const facts = sizeFacts(repo, base);
     // The places list is searched again in this folder first, so a place that appeared after it was written
@@ -591,10 +618,11 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     const branch = git(repo, ['branch', '--show-current']) || '(detached)';
     const ticket = fs.readFileSync(o.ticket, 'utf8');
     const out = path.resolve(o.out), fresh = out.replace(/(\.md)?$/, '-fresh.md'), launch = path.join(path.dirname(out), 'launch.md');
-    const chosen = chooseSize(facts, o.size);
+    const routed = resolveSize(path.dirname(out), o.size);
+    const chosen = chooseSize(facts, routed);
     const engine = resolveEngine(path.dirname(out), o.engine);
-    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof, changed: changedFiles, places }));
-    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size: o.size, changed: changedFiles, places, checks }));
+    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: routed, proof, changed: changedFiles, places }));
+    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size: routed, changed: changedFiles, places, checks }));
     // 2026-11-17: the notes folder is the folder of --out; a saved report names itself, the flag only says so.
     const reqTime = Math.max(fs.statSync(o.lines).mtimeMs, fs.statSync(o.check).mtimeMs);
     const designerDone = designerReport(path.dirname(out), reqTime) || (o['designer-done'] ? '--designer-done' : '');

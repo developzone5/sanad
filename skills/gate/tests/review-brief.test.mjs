@@ -50,9 +50,12 @@ test('decided questions go into both briefs; a small change gets one review, the
 });
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'review-brief.mjs');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'review-brief-'));
+// 2026-11-18: the real path of the temp folder (the CI runner reaches it by another spelling).
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'review-brief-')));
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 const env = { ...process.env, SANAD_STATE_DIR: path.join(root, 'state') };
+// 2026-11-18: --outside names a file that must exist; tests that want no known problems pass an empty one.
+function emptyOutside(notes) { const f = path.join(notes, 'none.md'); if (!fs.existsSync(f)) fs.writeFileSync(f, ''); return f; }
 
 const facts = { stack: 'Stack: React 19 + Vite 7 · tests: Vitest', size: 'SIZE: small (diff) — behavior code with no risk signal', callers: 'Form ×2 [src/Page.tsx:4]' };
 const outside = { other: [{ what: 'Old twin message', where: 'Other.tsx:10' }], touched: [{ what: 'Old-language error', where: 'Form.tsx err() :835' }] };
@@ -319,7 +322,7 @@ test('the command gives a big change its risk-files line from the size check, as
   const notes = fs.mkdtempSync(path.join(root, 'notes-'));
   const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
   fs.writeFileSync(ticket, 'only admins upload\n'); fs.writeFileSync(lines, '- only admins upload\n'); fs.writeFileSync(check, '- [T1] only admins upload\n');
-  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'),
+  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', emptyOutside(notes),
     '--places', placesFor(repo, 'Upload', 'C1')], { encoding: 'utf8', env, windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(fs.readFileSync(out, 'utf8'), /^SIZE: big \(diff\) — server access rules \(FilesController\.cs\); server file or URL handling \(FilesController\.cs\)$/m, 'the brief keeps the size check\'s own text line');
@@ -342,7 +345,7 @@ test('the command gives a change measured medium one review, with the full brief
   const notes = fs.mkdtempSync(path.join(root, 'notes-'));
   const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
   fs.writeFileSync(ticket, 'users is 2\n'); fs.writeFileSync(lines, '- users is 2\n'); fs.writeFileSync(check, '- [T1] users is 2\n');
-  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'),
+  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', emptyOutside(notes),
     '--places', placesFor(repo, 'getUsers', 'C1')], { encoding: 'utf8', env, windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(fs.readFileSync(out, 'utf8'), /^SIZE: medium /m, 'the fixture measures medium');
@@ -364,7 +367,7 @@ test('the command uses the larger size for launch.md and says so', () => {
   const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
   fs.writeFileSync(ticket, 'add X\n'); fs.writeFileSync(lines, '- add X\n'); fs.writeFileSync(check, '- [T1] X is added\n');
   // --missed is still accepted, and ignored (2026-11-12).
-  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--size', 'small', '--outside', path.join(notes, 'none.md'), '--missed', path.join(notes, 'none.md'),
+  const r = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--size', 'small', '--outside', emptyOutside(notes), '--missed', path.join(notes, 'none.md'),
     '--places', placesFor(repo, 'AddX', 'none: the new migration is the change itself')], { encoding: 'utf8', env, windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^size: routed small, measured big → using big$/m);
@@ -388,7 +391,7 @@ test('the command refuses a change that is not tiny with no places list, or with
   const notes = fs.mkdtempSync(path.join(root, 'notes-'));
   const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
   fs.writeFileSync(ticket, 'due after publish\n'); fs.writeFileSync(lines, '- due after publish\n'); fs.writeFileSync(check, '- [T1] due after publish on both paths\n');
-  const brief = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'), ...extra], { encoding: 'utf8', env, windowsHide: true });
+  const brief = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', emptyOutside(notes), ...extra], { encoding: 'utf8', env, windowsHide: true });
 
   // A text-only change needs no list.
   fs.writeFileSync(path.join(repo, 'README.md'), 'y\n');
@@ -561,7 +564,7 @@ test('the command leaves the Test designer out of a big launch when its report i
   const places = placesFor(repo, 'Upload', 'C1');
   // The extra options come first, so --designer-done is followed by another option: it takes no value.
   const launchLines = (...extra) => {
-    const r = spawnSync(process.execPath, [script, ...extra, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'), '--places', places], { encoding: 'utf8', env, windowsHide: true });
+    const r = spawnSync(process.execPath, [script, ...extra, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', emptyOutside(notes), '--places', places], { encoding: 'utf8', env, windowsHide: true });
     assert.equal(r.status, 0, r.stderr);
     return fs.readFileSync(path.join(notes, 'launch.md'), 'utf8').split(/\r?\n/);
   };
@@ -697,7 +700,7 @@ test('the command takes --engine, writes it into launch.md, and refuses another 
   const notes = fs.mkdtempSync(path.join(root, 'notes-'));
   const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
   fs.writeFileSync(ticket, 'edit\n'); fs.writeFileSync(lines, '- edit\n'); fs.writeFileSync(check, '- [T1] edited\n');
-  const run = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'), ...extra], { encoding: 'utf8', env, windowsHide: true });
+  const run = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', emptyOutside(notes), ...extra], { encoding: 'utf8', env, windowsHide: true });
   const launch = () => fs.readFileSync(path.join(notes, 'launch.md'), 'utf8');
   let r = run();
   assert.equal(r.status, 0, r.stderr);
@@ -725,7 +728,7 @@ test('the engine is kept in the notes folder: a run without --engine keeps it, a
   const notes = fs.mkdtempSync(path.join(root, 'notes-'));
   const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
   fs.writeFileSync(ticket, 'edit\n'); fs.writeFileSync(lines, '- edit\n'); fs.writeFileSync(check, '- [T1] edited\n');
-  const run = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'), ...extra], { encoding: 'utf8', env, windowsHide: true });
+  const run = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', emptyOutside(notes), ...extra], { encoding: 'utf8', env, windowsHide: true });
   const launch = () => fs.readFileSync(path.join(notes, 'launch.md'), 'utf8');
   let r = run('--engine', 'codex');
   assert.equal(r.status, 0, r.stderr);
@@ -795,4 +798,138 @@ test('orca-launch.sh: --engine codex is refused in one line before ssh; claude i
   const ok = run('--engine', 'claude', 'env', 'C:/w', 'C:/b.md');
   assert.match(ok.stdout + ok.stderr, /CALLED-ssh|REFUSED: brief not found/);
   assert.doesNotMatch(ok.stdout, /remote launches support Claude tasks only/);
+});
+
+// 2026-11-18 (audit finding 5): the Claude Big plan put the repository and notes paths into its Codex shell line raw, so a
+// folder named with $(...) ran as shell text. Every value in a generated shell line goes through the same helper, in both engines.
+test('hostile characters in the repository and notes paths cannot reach the shell in either engine', () => {
+  const repo = 'C:/work/a $(touch pwn) `id` "q" b', dir = 'C:/notes $(touch pwn2) `id2` "q2" n';
+  for (const engine of ['claude', 'codex']) {
+    const launch = buildLaunch({ brief: `${dir}/brief.md`, fresh: `${dir}/brief-fresh.md`, repo, branch: 'b', size: 'big', engine });
+    const shellLines = launch.split('```bash\n').slice(1).map(s => s.split('\n```')[0]);
+    assert.ok(shellLines.length >= 1, engine);
+    for (const line of shellLines) {
+      // Remove each backslash-escaped character; what is left must hold no $ or backtick, and only the quotes that frame arguments.
+      const bare = line.replace(/\\[\s\S]/g, '');
+      assert.doesNotMatch(bare, /[$`]/, `${engine}: an unescaped $ or backtick runs as shell text: ${line}`);
+      assert.equal((bare.match(/"/g) || []).length % 2, 0, `${engine}: a quote in a path ends an argument early: ${line}`);
+    }
+    assert.match(launch, /\\\$\(touch pwn\)/, engine);
+  }
+});
+
+// 2026-11-18 (audit finding 2): --size was not kept, so the documented command without --size wrote the measured size's plan.
+function sizeRepo(notesName) {
+  const repo = fs.mkdtempSync(path.join(root, 'repo-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'x\n'); git('add', '-A'); git('commit', '-qm', 'base'); git('switch', '-q', '-c', 'fix/s');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'y\n');
+  const notes = notesName ? path.join(fs.mkdtempSync(path.join(root, 'notes-')), notesName) : fs.mkdtempSync(path.join(root, 'notes-'));
+  fs.mkdirSync(notes, { recursive: true });
+  const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
+  fs.writeFileSync(ticket, 'edit\n'); fs.writeFileSync(lines, '- edit\n'); fs.writeFileSync(check, '- [T1] edited\n');
+  const run = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', ...(extra.includes('--outside') ? [] : ['--outside', emptyOutside(notes)]), ...extra], { encoding: 'utf8', env, windowsHide: true });
+  return { notes, run, launch: () => fs.readFileSync(path.join(notes, 'launch.md'), 'utf8') };
+}
+test('the chosen size is kept in the notes folder: a run without --size keeps a Big plan, never smaller', () => {
+  const { notes, run, launch } = sizeRepo();
+  let r = run('--size', 'big');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.readFileSync(path.join(notes, 'size.txt'), 'utf8').trim(), 'big');
+  assert.match(launch(), /risk files pass/);
+  const bigPlan = launch();
+  // The command as loop.md writes it (no --size): the plan stays the Big plan.
+  r = run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(launch(), bigPlan);
+  // A smaller size given later never lowers it.
+  r = run('--size', 'small');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(launch(), bigPlan);
+  assert.equal(fs.readFileSync(path.join(notes, 'size.txt'), 'utf8').trim(), 'big');
+  // An unreadable saved value is refused like engine.txt.
+  fs.writeFileSync(path.join(notes, 'size.txt'), 'huge\n');
+  r = run();
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /size\.txt/);
+});
+
+// MUST NOT CHANGE: with no saved size and no --size, the measured size alone decides, and no size.txt appears.
+test('with no --size and nothing saved the measured size decides and no size file is written', () => {
+  const { notes, run, launch } = sizeRepo();
+  const r = run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.existsSync(path.join(notes, 'size.txt')), false);
+  assert.doesNotMatch(launch(), /risk files pass/);
+});
+
+// 2026-11-18 (audit finding 4): a --proof-log path that did not exist was dropped with exit 0 and "proof: yes" for the rest.
+test('a --proof-log path that does not exist is a usage error naming the path; an existing one still works', () => {
+  const { notes, run } = sizeRepo();
+  const good = path.join(notes, 'good.log'), gone = path.join(notes, 'gone.log');
+  fs.writeFileSync(good, 'RED-PROOF: RED ✓ — x\n');
+  let r = run('--proof-log', good, '--proof-log', gone);
+  assert.equal(r.status, 2);
+  assert.ok(r.stderr.includes(gone), r.stderr);
+  r = run('--proof-log', good);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /proof: yes/);
+  r = run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /proof: none yet/);
+});
+
+// 2026-11-18 (audit finding 5, rest): a notes folder whose name STARTS with $ or a backtick lost its separator on Windows,
+// because the escape backslash was joined to the folder separator. The line must RUN the path it names: here the
+// Codex line of the Claude Big plan is run in Git Bash with a stub codex that creates its -o file.
+test('the Claude Big plan Codex line runs with a notes folder that starts with $ or a backtick', () => {
+  const sh = gitBash().exe, shEnv = bashEnv();
+  const pathKey = Object.keys(shEnv).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  const bin = fs.mkdtempSync(path.join(root, 'bin-'));
+  fs.writeFileSync(path.join(bin, 'codex'), '#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do if [ "$1" = -o ]; then echo ok > "$2"; fi; shift; done\n', { mode: 0o755 });
+  for (const name of ['$(touch PWNED5) lead', '`touch PWNED6` tick', '$HOME notes', 'mid $x dle', 'plain notes']) {
+    const { notes, run } = sizeRepo(name);
+    const r = run('--size', 'big', '--engine', 'claude');
+    assert.equal(r.status, 0, r.stderr);
+    const launch = fs.readFileSync(path.join(notes, 'launch.md'), 'utf8');
+    const block = /## Fresh eyes \(Codex\)[^\n]*\n\n```bash\n([^\n]*)\n```/.exec(launch);
+    assert.ok(block, name + ': a Codex line');
+    const x = spawnSync(sh, ['-s'], { input: block[1] + '\n', encoding: 'utf8', windowsHide: true, env: { ...shEnv, [pathKey]: bin + path.delimiter + (shEnv[pathKey] || '') } });
+    assert.equal(x.status, 0, name + ': ' + x.stdout + x.stderr);
+    assert.ok(fs.existsSync(path.join(notes, 'codex-review.md')), name + ': -o file in the notes folder');
+    assert.ok(fs.existsSync(path.join(notes, 'codex.log')), name + ': log in the notes folder');
+    assert.equal(fs.existsSync(path.join(path.dirname(notes), 'PWNED5')) || fs.existsSync(path.join(notes, 'PWNED5')), false, name);
+  }
+});
+
+// 2026-11-18 (audit finding 2, rest): an empty or unreadable saved size/engine is refused, never ignored.
+test('an empty or unreadable size.txt or engine.txt is refused; a missing one is still fine', () => {
+  for (const f of ['size.txt', 'engine.txt']) {
+    let { notes, run } = sizeRepo();
+    fs.writeFileSync(path.join(notes, f), '');
+    let r = run();
+    assert.equal(r.status, 2, f + ' empty: ' + r.stdout);
+    assert.ok(r.stderr.includes(f), r.stderr);
+    ({ notes, run } = sizeRepo());
+    fs.mkdirSync(path.join(notes, f));
+    r = run();
+    assert.equal(r.status, 2, f + ' directory');
+    assert.ok(r.stderr.includes('REVIEW-BRIEF'), r.stderr);
+  }
+  assert.equal(sizeRepo().run().status, 0);
+});
+
+// 2026-11-18 (audit finding 3): a requested --outside file that does not exist was dropped with exit 0.
+test('a --outside file that does not exist is a usage error naming the path; an existing one still works', () => {
+  const { notes, run } = sizeRepo();
+  const typo = path.join(notes, 'outsde-typo.md');
+  let r = run('--outside', typo);
+  assert.equal(r.status, 2);
+  assert.ok(r.stderr.includes(typo), r.stderr);
+  const real = path.join(notes, 'outside.md');
+  fs.writeFileSync(real, '- 2026-11-01 · a known problem · src/a.ts · open\n');
+  r = run('--outside', real);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /1 known item/);
 });

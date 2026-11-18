@@ -58,6 +58,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { isMain } from './is-main.mjs';
+import { fileKind } from './size-check.mjs';
 import { bashEnv, gitBash } from './git-bash.mjs';
 import { checkKey, lookup, remember, runIdentity } from './pre-review-cache.mjs';
 
@@ -75,6 +76,28 @@ export function changedFiles(repo, base) {
   const tracked = git(repo, ['diff', '--name-only', '--diff-filter=d', from]).split(/\r?\n/);
   const untracked = git(repo, ['ls-files', '--others', '--exclude-standard']).split(/\r?\n/);
   return [...new Set([...tracked, ...untracked].filter(Boolean))].filter(f => fs.existsSync(path.join(repo, f)));
+}
+
+// 2026-11-18 (audit): every changed path, deleted ones included, for the text-only rule: a deleted test or code
+// file is a change that is not text.
+export function allChangedPaths(repo, base) {
+  const from = git(repo, ['merge-base', base, 'HEAD']);
+  if (!from) throw new Error(`no merge base with ${base}`);
+  const tracked = git(repo, ['diff', '--name-only', from]).split(/\r?\n/);
+  const untracked = git(repo, ['ls-files', '--others', '--exclude-standard']).split(/\r?\n/);
+  return [...new Set([...tracked, ...untracked].filter(Boolean))];
+}
+
+// 2026-11-18 (audit): a locale script (.ts/.js) is text only while its changed lines (strings and comments
+// taken out) hold no code: no function, arrow, import, call or control word.
+const CODE_WORDS = /\b(?:function|import|return|if|else|for|while|switch|throw|new|class|await|async|const|let|var)\b|=>|\w\s*\(/;
+function localeHoldsCode(repo, base, file) {
+  if (!SCRIPT.test(file)) return false;
+  const from = git(repo, ['merge-base', base, 'HEAD']);
+  let text = git(repo, ['diff', '-U0', from, '--', file]).split(/\r?\n/).filter(l => /^[+-](?![+-]{2} )/.test(l)).map(l => l.slice(1)).join('\n');
+  if (!text) { try { text = fs.readFileSync(path.join(repo, file), 'utf8'); } catch { text = ''; } }
+  const bare = text.replace(/`(?:\\.|[^`\\])*`|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"/g, '""').replace(/\/\/.*$/gm, '');
+  return CODE_WORDS.test(bare);
 }
 
 // The nearest folder above a file that holds a package.json, up to the repo root.
@@ -222,11 +245,15 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
     const what = [cs ? plural(cs, 'C# file') : '', list.length - cs ? plural(list.length - cs, 'project file') : ''].filter(Boolean).join(', ');
     checks.push({ name: `format ${name} (${what})`, cmd: 'dotnet', args: ['csharpier', 'check', ...list], cwd: dir });
   }
-  if (lines) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
+  // 2026-11-18 (audit finding 6): a genuine text-only change (every file is a doc or locale text: no test, no style, no
+  // code) is asked for no new test (loop.md, Text only): the ticket-lines and tag checks are left out, named as skipped.
+  const everyPath = allChangedPaths(repo, base);
+  const textOnly = everyPath.length > 0 && everyPath.every(f => ['doc', 'locale'].includes(fileKind(f)) && !(fileKind(f) === 'locale' && localeHoldsCode(repo, base, f)));
+  if (lines && !textOnly) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
   // 2026-11-16: the Check lines' sources were read only by review-brief, after the proof; a line in the wrong shape
   // passed both pre-review runs. Checked here, in the first run.
   if (lines && check) checks.push({ name: 'check lines', cmd: process.execPath, args: [path.join(here, 'review-brief.mjs'), '--coverage', '--lines', lines, '--check', check], cwd: repo, show: true });
-  checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check ? ['--check', check] : []), ...(beforeProof ? ['--before-proof'] : [])], cwd: repo });
+  checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check && !textOnly ? ['--check', check] : []), ...(beforeProof ? ['--before-proof'] : [])], cwd: repo });
   checks.push({ name: 'commits', cmd: process.execPath, args: [path.join(here, 'check-commits.mjs'), '--repo', repo, '--base', base], cwd: repo });
   checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : [])], cwd: repo, show: true });
   checks.push({ name: 'one job', cmd: process.execPath, args: [path.join(here, 'one-job.mjs'), '--repo', repo, '--base', base], cwd: repo, show: true });
@@ -241,8 +268,8 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
   // 2026-11-12 (audit C14): with no --lines, --check or --was those parts were left out without a word, and
   // the summary still read "N of N checks passed". Each is named as skipped (not a failure).
   const skipped = [
-    lines ? null : { name: 'ticket lines', why: 'no --lines' },
-    check ? null : { name: 'test labels', why: 'no --check' },
+    lines ? (textOnly ? { name: 'ticket lines', why: 'a text-only change' } : null) : { name: 'ticket lines', why: 'no --lines' },
+    check ? (textOnly ? { name: 'test labels', why: 'a text-only change' } : null) : { name: 'test labels', why: 'no --check' },
     was ? null : { name: 'size growth', why: 'no --was' },
   ].filter(Boolean);
   return { files, checks, remote, skipped, placesOwed: !places, siblingsOwed: !siblings };
