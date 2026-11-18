@@ -55,6 +55,16 @@ function fixture() {
   const repo = fs.mkdtempSync(path.join(root, 'repo-'));
   const report = path.join(notes, 'review-fresh.md');
   fs.writeFileSync(report, REPORT_1 + '\n');
+  // 2026-11-18: a REFUTED answer is recorded only for a brief bound to a git repository that holds the files it cites.
+  const git = fs.realpathSync.native(fs.mkdtempSync(path.join(root, 'git-')));
+  for (const rel of ['src/save.ts', 'src/queue.ts', 'tests/roles.test.ts']) {
+    fs.mkdirSync(path.dirname(path.join(git, rel)), { recursive: true });
+    fs.writeFileSync(path.join(git, rel), 'x\n');
+  }
+  for (const args of [['init', '-q'], ['add', '.'], ['commit', '-q', '-m', 'init']]) {
+    const made = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: git, encoding: 'utf8', windowsHide: true });
+    assert.equal(made.status, 0, made.stderr);
+  }
   const transcript = path.join(root, path.basename(notes) + '.jsonl');
   fs.writeFileSync(transcript, lines([
     ...reviewerRun('rev1', REPORT_1, 1),
@@ -62,12 +72,12 @@ function fixture() {
     say('NOTE 1: user — "leave the empty list as it is"', 6),
     ...reviewerRun('rev2', REPORT_2, 8),
   ]));
-  return { notes, repo, report, transcript, brief: path.join(notes, 'note-check-brief.md'), list: path.join(notes, 'note-check.md'), answer: path.join(notes, 'note-check-report.md') };
+  return { notes, repo, git, report, transcript, brief: path.join(notes, 'note-check-brief.md'), list: path.join(notes, 'note-check.md'), answer: path.join(notes, 'note-check-report.md') };
 }
 
 test('--brief --transcript lists the open notes under the guards\' own NOTE numbers, and the answer is recorded under them', () => {
   const f = fixture();
-  const r = run(['--brief', '--notes', f.notes, '--reports', f.report, '--transcript', f.transcript]);
+  const r = run(['--brief', '--notes', f.notes, '--reports', f.report, '--transcript', f.transcript, '--repo', f.git]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   // Note 1 is closed by the user; 2 and 3 are open and keep their numbers, not K1 and K2.
   assert.deepEqual(kLines(f.brief), [
@@ -225,7 +235,7 @@ test('the author line is printed only for an answer shape the guards also read a
   const before = [...reviewerRun('rev1', REPORT_1, 1), userSays('leave the empty list as it is, it never happens', 5), say('NOTE 1: user — "leave the empty list as it is"', 6), ...reviewerRun('rev2', REPORT_2, 8)];
   for (const [name, shape] of Object.entries(SHAPES)) {
     const f = fixture();
-    assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.report, '--transcript', f.transcript]).status, 0);
+    assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.report, '--transcript', f.transcript, '--repo', f.git]).status, 0);
     // fixture(): note 1 is closed by the user, so notes 2 (Gap) and 3 (Blocker) are open; note 2 is the one refuted.
     const answer = `BRIEF ${idOf(f.brief)}\nCONFIRMED 3 — src/queue.ts:40 no guard\n${shape(EVIDENCE)}\n`;
     fs.writeFileSync(f.answer, answer);
@@ -348,4 +358,16 @@ test('a Gap that asks the user to decide, with a guard number: asked of the user
   assert.equal(rec.status, 0, rec.stdout + rec.stderr);
   assert.match(rec.stdout, /^ASK THE USER: NOTE 1 · .*src\/limit\.ts:9 holds 50, recommend 50/m);
   assert.doesNotMatch(rec.stdout, /THE AUTHOR MAY NOW WRITE|the guards cannot read/);
+});
+
+// 2026-11-18 (recheck by the other engine): with a brief that is not bound to a git repository the author line is never printed.
+test('R1: an unbound brief with the guards\' numbers: a REFUTED answer prints no author line and is UNSURE', () => {
+  const f = fixture();
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.report, '--transcript', f.transcript, '--repo', f.repo]).status, 0);
+  fs.writeFileSync(f.answer, `BRIEF ${idOf(f.brief)}\nREFUTED 2 — tests/roles.test.ts:88 already saves a user with two roles\n`);
+  const r = run(['--record', f.answer, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /THE AUTHOR MAY NOW WRITE|ASK THE USER: NOTE 2/);
+  assert.match(r.stdout, /^NOT SHOWN UNCHANGED: NOTE 2 — /m);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /NOTE 2 · UNSURE \(the code is not bound to a repository/);
 });
