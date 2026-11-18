@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -15,6 +15,14 @@ const at = (hhmm) => new Date(`2026-11-09T${hhmm}:00Z`);
 const SID = 'test-session';
 process.env.CLAUDE_CODE_SESSION_ID = SID;
 const POINTER = 'sanad-timer-active-' + SID;
+// 2026-11-17: the tests that use git never read this machine's git settings (an empty global file, no system
+// file), and a test that names no state folder of its own still never writes into the real one.
+const scratch = tmp();
+fs.writeFileSync(path.join(scratch, 'gitconfig'), '');
+process.env.GIT_CONFIG_GLOBAL = path.join(scratch, 'gitconfig');
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.SANAD_STATE_DIR = path.join(scratch, 'state');
+after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
 test('each step lasts until the next mark, waits are counted apart, and the total adds up', () => {
   const dir = tmp();
@@ -177,7 +185,7 @@ test('a timer last marked long ago is left alone', async () => {
 // were never ended. The hooks now start one at the first code edit and end it at a passing gate.
 test('the timer starts by itself at the first code edit, from the user message, and ends at GATE: PASS', async () => {
   const { createRequire } = await import('node:module');
-  const { autoStart, autoEnd, lastPromptAt } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const { autoStart, autoEnd, userEntries } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
   const state = tmp(), repo = tmp();
   const before = process.env.SANAD_STATE_DIR;
   process.env.SANAD_STATE_DIR = state;
@@ -193,7 +201,10 @@ test('the timer starts by itself at the first code edit, from the user message, 
       { type: 'user', isMeta: true, timestamp: now.toISOString(), message: { role: 'user', content: 'Stop hook feedback: …' } },
       { type: 'user', timestamp: now.toISOString(), message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } },
     ].map(e => JSON.stringify(e)).join('\n') + '\n');
-    assert.equal(lastPromptAt(transcript).toISOString(), asked.toISOString(), 'hook notes and tool results are not the user');
+    // 2026-11-17 (audit S7): this line asked lastPromptAt for the LAST message, the rule that lost the time
+    // before the user's "go". The start is the task's first request now, so the entries are asked for by time.
+    const typed = userEntries(transcript, new Date(now.getTime() - 3600000), now).filter((e) => e.typed);
+    assert.deepEqual(typed.map((e) => e.at.toISOString()), [asked.toISOString()], 'hook notes and tool results are not the user');
     // The temp folder never counts as code in a real session, so the test names what does.
     const isCode = (f) => f.endsWith('.cs');
     const edit = (file, tool = 'Edit') => ({ session_id: SID, transcript_path: transcript, cwd: repo, tool_name: tool, tool_input: { file_path: path.join(repo, file) } });
@@ -203,7 +214,7 @@ test('the timer starts by itself at the first code edit, from the user message, 
     const dir = autoStart(edit('a.cs'), now, { isCode });
     assert.ok(dir && dir.startsWith(path.join(state, 'timers')), String(dir));
     assert.deepEqual(readMarks(dir).map(m => [m.at.toISOString(), m.text]), [
-      [asked.toISOString(), `start (auto): the user's message — ${path.basename(repo)}`],
+      [asked.toISOString(), `start (auto, estimate): the user's message — ${path.basename(repo)}`],
       [now.toISOString(), 'first code edit'],
     ]);
     assert.equal(fs.readFileSync(path.join(state, POINTER), 'utf8'), dir);
@@ -358,4 +369,121 @@ test('a finished review goes on the timer once, beside the stages, and the repor
     fs.rmSync(state, { recursive: true, force: true });
     fs.rmSync(notes, { recursive: true, force: true });
   }
+});
+
+// 2026-11-17 (audit S7): the timer's start was the last message before the first edit, so the time before
+// the user's "go" was lost and no report said how long the plan took. The start is the task's first request
+// now (hooks/tests/timer-first-request.test.mjs), and the report names it.
+test('the report names the first request and the minutes before the first edit', () => {
+  const dir = tmp(), late = tmp(), byHand = tmp();
+  try {
+    mark(dir, 'step', "start (auto): the user's message — repo", at('10:00'));
+    mark(dir, 'step', 'first code edit', at('10:21'));
+    mark(dir, 'step', 'proof', at('10:30'));
+    mark(dir, 'step', 'end (auto: the gate passed; the ship brief)', at('10:40'));
+    // The time of day is shown where the report is read. The command runs in UTC here, so the line is known.
+    const lines = execFileSync(process.execPath, [script, 'report', dir], { encoding: 'utf8', env: { ...process.env, TZ: 'UTC' } }).trim().split(/\r?\n/);
+    assert.equal(lines.pop(), 'start: first request 10:00 · first edit after 21 min');
+    assert.equal(lines.pop(), '   40 min  total (work 40, waiting 0.0)', 'the lines before it stay as they were');
+    // In this process the clock is this machine's own.
+    const local = `${String(at('10:00').getHours()).padStart(2, '0')}:${String(at('10:00').getMinutes()).padStart(2, '0')}`;
+    assert.match(report(dir, at('11:00')), new RegExp(`^start: first request ${local} · first edit after 21 min$`, 'm'));
+
+    // A guessed start says so; a wait for the go is waiting, and the request command names the session's start.
+    const guess = tmp();
+    try {
+      mark(guess, 'step', "start (auto, estimate): the user's message — repo", at('10:00'));
+      mark(guess, 'wait', 'waiting for the user', at('10:03'));
+      mark(guess, 'step', "resumed: start (auto, estimate): the user's message — repo", at('10:20'));
+      mark(guess, 'step', 'first code edit', at('10:21'));
+      const g = report(guess, at('10:30'));
+      assert.match(g, /waiting 17\)/);
+      assert.match(g, /^start: first request \d\d:\d\d \(estimate\) · first edit after 21 min$/m);
+      assert.match(g, /read and plan 4\.0/);
+    } finally { fs.rmSync(guess, { recursive: true, force: true }); }
+    // A timer that began at the first edit, or by hand, knows no first request: no such line.
+    mark(late, 'step', 'start (auto): first code edit — repo', at('10:21'));
+    mark(late, 'step', 'proof', at('10:30'));
+    assert.doesNotMatch(report(late, at('10:40')), /^start:/m);
+    mark(byHand, 'step', 'read the ticket', at('10:00'));
+    mark(byHand, 'step', 'first code edit', at('10:21'));
+    assert.doesNotMatch(report(byHand, at('10:40')), /^start:/m);
+  } finally {
+    for (const d of [dir, late, byHand]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// A session of its own for the two tests below: a git repository, a transcript where a real one sits, and
+// the first code edit of the next piece of work at 10:21.
+function nextEdit(state, repo, messages) {
+  execFileSync('git', ['init', '-q'], { cwd: repo });
+  const transcript = path.join(state, '.claude', 'projects', 'p', 'session.jsonl');
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, messages.map(([hhmm, content]) => JSON.stringify({ type: 'user', timestamp: at(hhmm).toISOString(), message: { role: 'user', content } })).join('\n') + '\n');
+  return { session_id: SID, transcript_path: transcript, cwd: repo, tool_name: 'Edit', tool_input: { file_path: path.join(repo, 'a.cs') } };
+}
+// The waits for the user's go sit between the two marks and are left out here (timer-first-request.test.mjs).
+const startedAt = (dir, hhmm, repo) => assert.deepEqual(readMarks(dir).filter((m) => m.kind === 'step' && !m.text.startsWith('resumed')).slice(0, 2).map((m) => [m.at.toISOString(), m.text]), [
+  [at(hhmm).toISOString(), `start (auto, estimate): the user's message — ${path.basename(repo)}`],
+  [at('10:21').toISOString(), 'first code edit'],
+]);
+
+// 2026-11-17 (audit S7): the next task must not start at a message of the task before. A timer ended by
+// hand (`sanad-timer.mjs end`) is the timer before, as one the hooks ended is.
+test('a timer ended by hand: the next task starts at the first message after its end', async () => {
+  const { createRequire } = await import('node:module');
+  const { autoStart } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const { setActive, clearActive } = await import('../scripts/sanad-timer.mjs');
+  const state = tmp(), notes = tmp(), repo = tmp();
+  const before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    // Task one was asked 20 minutes before the next request: only its end sets the two apart.
+    const edit = nextEdit(state, repo, [['09:30', 'task one: fix the login'], ['09:50', 'next: the report page'], ['10:15', 'go']]);
+    // What `end` does, at a known time: the end mark, then no active timer.
+    mark(notes, 'step', 'build', at('09:31'));
+    setActive(notes, at('09:31'));
+    mark(notes, 'step', 'end', at('09:40'));
+    clearActive(notes);
+    assert.equal(fs.existsSync(path.join(state, POINTER)), false, 'ended: no active timer');
+    startedAt(autoStart(edit, at('10:21'), { isCode: (f) => f.endsWith('.cs') }), '09:50', repo);
+  } finally {
+    if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
+    for (const d of [state, notes, repo]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('other work in the middle of a paused task starts at the message that asked for it', async () => {
+  const { createRequire } = await import('node:module');
+  const { autoStart } = createRequire(import.meta.url)('../../../hooks/lib/timer-idle.cjs');
+  const { setActive, pause, resume } = await import('../scripts/sanad-timer.mjs');
+  const state = tmp(), notes = tmp(), repo = tmp();
+  const before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    const edit = nextEdit(state, repo, [['09:50', 'task one: fix the login'], ['10:09', 'first fix the hook, then go on'], ['10:20', 'go']]);
+    mark(notes, 'step', 'build', at('09:51'));
+    setActive(notes, at('09:51'));
+    pause(notes, 'hook fix', at('10:10'));
+    // Not 09:50 (the paused task's own request, 19 minutes before) and not 10:20 (the go).
+    const dir = autoStart(edit, at('10:21'), { isCode: (f) => f.endsWith('.cs') });
+    startedAt(dir, '10:09', repo);
+    // The paused task goes on as before: its timer is the active one again, and the other work waits.
+    assert.equal(resume(notes, at('10:30')), 'build');
+    assert.equal(path.resolve(fs.readFileSync(path.join(state, POINTER), 'utf8')), path.resolve(notes));
+    assert.equal(readMarks(dir).pop().text, `paused: other task (${path.basename(notes)})`);
+  } finally {
+    if (before === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = before;
+    for (const d of [state, notes, repo]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// 2026-11-17 (audit S7): Sanad writes the routing time of a new task; the hooks start the timer there.
+test('request writes the time the hooks use as the start of the task', () => {
+  const state = tmp();
+  try {
+    execFileSync(process.execPath, [script, 'request'], { encoding: 'utf8', env: { ...process.env, SANAD_STATE_DIR: state } });
+    const written = new Date(fs.readFileSync(path.join(state, 'sanad-task-start-' + SID), 'utf8').trim());
+    assert.ok(Math.abs(Date.now() - written.getTime()) < 60000, String(written));
+  } finally { fs.rmSync(state, { recursive: true, force: true }); }
 });

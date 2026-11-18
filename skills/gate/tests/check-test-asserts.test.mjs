@@ -12,12 +12,17 @@ test('a value read inside an assertion with ! is found; ?. and plain reads are n
     'expect(rows[0]!.name).toBe(1);', 'const el = screen.getByRole("group")!;'].map((text, i) => ({ file: 'src/a.test.tsx', line: i + 1, text }));
   assert.deepEqual(nonNullReads(lines).map(l => l.line), [1, 3]);
 });
-import { writeEntry, testFileHashes, provenTestFiles, skippedLines } from '../scripts/proof-record.mjs';
+import { writeEntry, testFileHashes, provenTestFiles, skippedLines, codeFingerprint } from '../scripts/proof-record.mjs';
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'check-test-asserts.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'test-asserts-'));
 process.env.SANAD_STATE_DIR = path.join(root, 'state');
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
+// A proof entry as red-proof.mjs writes it since 2026-11-17 (audit: one caught test certified another rule's
+// vacuous check, and a proof outlived an edit to other code): it names the tests its breaks made fail (`caught`,
+// by test file: line and title) and holds the id of the code as it is now (`code`). The two command tests below
+// wrote entries with test files and targets only, which pinned the old reading: such an entry proves nothing now.
+const proofOf = (repo, breaks, caught, targets) => ({ ok: true, breaks, files: testFileHashes(repo, Object.keys(caught)), targets, caught, code: codeFingerprint(repo) });
 
 test('"nothing happens" checks are found in test files, in each stack\'s words', () => {
   const lines = ['expect(api.create).not.toHaveBeenCalled();', 'expect(screen.queryByRole("dialog")).toBeNull();', 'expect(count()).toBe(0);',
@@ -45,19 +50,23 @@ test('the command: an unproven "nothing happens" check fails until a break run p
   let r = run();
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stdout, /UNPROVEN: src\/form\.test\.ts:1/);
-  writeEntry(repo, 'page', { ok: true, breaks: 1, files: testFileHashes(repo, ['src/form.test.ts']), targets: targets() });
+  // 2026-11-17: the entries name the caught tests and hold the code id (proofOf above); a list of files alone
+  // was enough before.
+  const first = { line: 1, title: '[C1] saves nothing' }, second = { line: 2, title: '[C1] again' };
+  writeEntry(repo, 'page', proofOf(repo, 1, { 'src/form.test.ts': [first] }, targets()));
   r = run();
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /TEST ASSERTS: none \(1 "nothing happens" check\(s\) proven by a break run\)/);
   fs.appendFileSync(path.join(repo, 'src/form.test.ts'), "it('[C1] again', () => { expect(x).toBeNull(); });\n");
   assert.equal(run().status, 1, 'a test edit after the proof needs a new proof run');
-  writeEntry(repo, 'page', { ok: true, breaks: 0, files: testFileHashes(repo, ['src/form.test.ts']), targets: targets() });
+  writeEntry(repo, 'page', proofOf(repo, 0, { 'src/form.test.ts': [first, second] }, targets()));
   assert.equal(run().status, 1, 'an old-code run alone is not a break proof');
   fs.writeFileSync(check, '- saves nothing\n- shows once\n');
-  writeEntry(repo, 'page', { ok: true, breaks: 1, files: testFileHashes(repo, ['src/form.test.ts']), targets: targets() });
+  writeEntry(repo, 'page', proofOf(repo, 1, { 'src/form.test.ts': [first, second] }, targets()));
   r = run();
   assert.equal(r.status, 1);
   assert.match(r.stdout, /UNTAGGED: check line C2 has no new test tagged \[C2\]/);
+  assert.doesNotMatch(r.stdout, /UNPROVEN/, 'both tests are named in the entry');
 });
 
 // 2026-11-13: run before the proof, the check skips only the proof part: tags, ranges and non-null reads
@@ -84,7 +93,11 @@ test('the command with --before-proof: an unproven "nothing happens" check passe
 
 // 2026-11-12 (S4/C5/S8): one record cleared every "nothing happens" check of both stacks; a frontend
 // proof cleared backend checks, and a product change after the proof kept clearing them.
-test('the command: a check counts as proven only when its own test file is in a current entry; a changed break target voids the entry', () => {
+// 2026-11-17 (audit: a stale proof survived an edit to a dependency): this test said that a change to rule.ts
+// voids only the page entry, whose break changed that file, and that the server entry stays. That was the gap:
+// the server tests may depend on rule.ts too. Any code edit voids every entry now; a changed break target still
+// voids its own entry, shown with entries proved again on the new code.
+test('the command: a check counts as proven only when its own test is in a current entry; a code edit voids every entry, a changed break target its own', () => {
   const repo = fs.mkdtempSync(path.join(root, 'stacks-'));
   const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid'); git('config', 'core.autocrlf', 'false');
@@ -94,16 +107,26 @@ test('the command: a check counts as proven only when its own test file is in a 
   fs.writeFileSync(path.join(repo, 'src/form.test.ts'), "it('saves nothing', () => { expect(api.create).not.toHaveBeenCalled(); });\n");
   fs.writeFileSync(path.join(repo, 'Api.Tests/RuleTests.cs'), '[Fact] public void Refuses() { rows.Should().BeEmpty(); }\n');
   const run = () => spawnSync(process.execPath, [script, '--repo', repo, '--base', 'main'], { encoding: 'utf8', windowsHide: true, env: process.env });
-  writeEntry(repo, 'page', { ok: true, breaks: 1, files: testFileHashes(repo, ['src/form.test.ts']), targets: testFileHashes(repo, ['rule.ts']) });
+  const page = () => proofOf(repo, 1, { 'src/form.test.ts': [{ line: 1, title: 'saves nothing' }] }, testFileHashes(repo, ['rule.ts']));
+  const server = () => proofOf(repo, 1, { 'Api.Tests/RuleTests.cs': [{ line: 1, title: 'Refuses' }] }, testFileHashes(repo, ['Rule.cs']));
+  const proved = page();
+  writeEntry(repo, 'page', proved);
   let r = run();
   assert.equal(r.status, 1, r.stdout);
   assert.match(r.stdout, /UNPROVEN: Api\.Tests\/RuleTests\.cs:1/, 'a frontend proof does not prove a backend check');
   assert.doesNotMatch(r.stdout, /UNPROVEN: src\/form/);
-  writeEntry(repo, 'server', { ok: true, breaks: 1, files: testFileHashes(repo, ['Api.Tests/RuleTests.cs']), targets: testFileHashes(repo, ['Rule.cs']) });
+  writeEntry(repo, 'server', server());
   r = run();
   assert.equal(r.status, 0, 'a second proof adds its entry; the first stays: ' + r.stdout);
   assert.deepEqual([...provenTestFiles(repo)].sort(), ['Api.Tests/RuleTests.cs', 'src/form.test.ts']);
   fs.writeFileSync(path.join(repo, 'rule.ts'), 'export const blocks = true; // reviewed\n');
+  r = run();
+  assert.equal(r.status, 1, 'the code changed after both proofs');
+  assert.match(r.stdout, /UNPROVEN: src\/form\.test\.ts:1/);
+  assert.match(r.stdout, /UNPROVEN: Api\.Tests\/RuleTests\.cs:1/, 'the server proof is of the code before the edit too');
+  // Both proved again on the new code, the page entry with rule.ts as its break found it before the edit.
+  writeEntry(repo, 'server', server());
+  writeEntry(repo, 'page', { ...page(), targets: proved.targets });
   r = run();
   assert.equal(r.status, 1, 'the page proof broke rule.ts as it was; it changed since');
   assert.match(r.stdout, /UNPROVEN: src\/form\.test\.ts:1/);

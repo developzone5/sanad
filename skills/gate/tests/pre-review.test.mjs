@@ -43,10 +43,11 @@ function placesFor(repo, names = 'a', { open = false } = {}) {
 }
 const siblingsScript = path.join(path.dirname(script), 'siblings.mjs');
 // The sibling check's record next to a places list (2026-11-14): one sibling with `outcome` ('' leaves it open).
+// 2026-11-17: S1 names the file of the place P1 (a.ts): a P<n> closes a sibling only in its own file (audit).
 // `job`: the same-job line's outcome (2026-11-16); null writes a list with no same-job search.
 function siblingsFor(places, outcome = 'P1', job = 'reuse') {
   const out = path.join(path.dirname(places), 'siblings.md');
-  fs.writeFileSync(out, `# Siblings\n\nS1 · web/src/b.ts:1 · b — the same rule on another screen → ${outcome}\n` +
+  fs.writeFileSync(out, `# Siblings\n\nS1 · web/src/a.ts:1 · a — the same rule on another screen → ${outcome}\n` +
     (job === null ? '' : `\nJ1 · web/src/c.ts:1 · c — the same kind of job done before → ${job}\n`));
   return out;
 }
@@ -85,10 +86,10 @@ test('siblings: an open sibling fails the run and is named; closed, it passes; t
   const places = placesFor(repo);
   const open = run(repo, ['--places', places, '--siblings', siblingsFor(places, '')]);
   assert.equal(open.status, 1, open.stdout);
-  assert.match(open.stdout, /✗ siblings[^\n]*\n\s+OPEN: S1 · web\/src\/b\.ts:1 · b\n\s+SIBLINGS: 1 found, 1 open/);
+  assert.match(open.stdout, /✗ siblings[^\n]*\n\s+OPEN: S1 · web\/src\/a\.ts:1 · a\n\s+SIBLINGS: 1 found, 1 open/);
   const missing = run(repo, ['--places', places, '--siblings', siblingsFor(places, 'P7')]);
   assert.equal(missing.status, 1, missing.stdout);
-  assert.match(missing.stdout, /OPEN: S1 · web\/src\/b\.ts:1 · b — P7 is not on the places list/, 'P<n> is checked against --places');
+  assert.match(missing.stdout, /OPEN: S1 · web\/src\/a\.ts:1 · a — P7 is not on the places list/, 'P<n> is checked against --places');
   const ok = run(repo, ['--places', places, '--siblings', siblingsFor(places, 'none: another screen with its own focus rule')]);
   assert.equal(ok.status, 0, ok.stdout);
   // 2026-11-16 (PR #784): the same kind of job done before needs reuse or a reason, and the search itself is required.

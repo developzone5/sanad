@@ -39,6 +39,9 @@ const userSays = (text, n) => ({ type: 'user', message: { role: 'user', content:
 const userQueued = (text, n) => ({ type: 'attachment', timestamp: at(n), attachment: { type: 'queued_command', commandMode: 'prompt', prompt: text, origin: { kind: 'human' }, humanTurn: true } });
 // A hook's feedback, written into the transcript as a user entry.
 const hookSays = (text, n) => ({ type: 'user', message: { role: 'user', content: 'Stop hook feedback:\n' + text }, timestamp: at(n), isMeta: true, userType: 'external' });
+// 2026-11-17 (audit 3): a `NOTE n: fixed` line closes a note only after a code edit and a passing check that follow its report.
+let changeCount = 0;
+const chg = (n) => { const k = ++changeCount; return [call('chgE' + k, 'Edit', { file_path: repo + '/src/App.cs' }, n), result('chgE' + k, 'File updated.', n), ...shell('chgT' + k, 'dotnet test', 'Passed!  - Failed:     0, Passed:     3', n)]; };
 const lines = (entries) => entries.map((e) => JSON.stringify(e) + '\n').join('');
 
 // A reviewer run as this host records it (seen in a real 450 MB session, 2026-11-12): the launch, its
@@ -186,7 +189,7 @@ test('a note inside a code fence is not a note', () => {
 const ONE_GAP = 'RECOMMEND: PASS\n- Gap — Upload.cs:9 — the error text is not translated';
 
 test('`NOTE n: fixed — …` closes it; a bare or placeholder line does not', () => {
-  const base = reviewerRun('rv1', ONE_GAP + '\n- Bug — Upload.cs:12 — null id throws', 1);
+  const base = (rest => [...rest, ...chg(4)])(reviewerRun('rv1', ONE_GAP +'\n- Bug — Upload.cs:12 — null id throws', 1));
   const fixed = scanOf([...base, say('NOTE 1: fixed — added the AR/EN key upload.errorTooBig; test UploadTests.TooBig_ShowsText', 5)]);
   assert.deepEqual(fixed.reviewNotes.map((n) => n.outcome), ['fixed', null]);
   assert.deepEqual(open(fixed), [2]);
@@ -235,7 +238,7 @@ test('an incremental scan equals a from-zero scan with notes and outcomes spread
   // A hook can run between a run's hand-back and its finish notice: the second copy must still count once.
   const steps = [
     [...reviewerLaunch('rv1', 1), handBack('rv1', REPORT_1, 2), userSays('the question one: keep the upload when cancelled', 4)],
-    [notice('rv1', 4, REPORT_1), ...shell('cx', 'cat C:/tmp/codex-review.md', REPORT_2, 5), say('NOTE 1: fixed — reworded pr-body.md:9; no code change', 6), userQueued('the extra test is not needed for this ticket', 7)],
+    [notice('rv1', 4, REPORT_1), ...chg(5), ...shell('cx', 'cat C:/tmp/codex-review.md', REPORT_2, 5), say('NOTE 1: fixed — reworded pr-body.md:9; no code change', 6), userQueued('the extra test is not needed for this ticket', 7)],
     [say('NOTE 4: user — "keep the upload when cancelled"\nNOTE 5: user — "the extra test is not needed"\nNOTE 6: user — "words nobody typed"', 8), say('REVIEW: PASS', 9)],
   ];
   fs.writeFileSync(file, '');
@@ -331,7 +334,7 @@ test('a stop with REVIEW: PASS and an open note is blocked with the list', () =>
   assert.match(r.reason, /^NOTE 1 \(Gap\): Gap — Upload\.cs:9 — the error text is not translated$/m);
   assert.match(r.reason, /^NOTE 2 \(Bug\): /m);
   // 2026-11-16: the instruction also says the NOTE lines go in a message with no tool call.
-  assert.match(r.reason, /Answer each one in your next message, on its own line: `NOTE 1: fixed — <what changed and its test>` or `NOTE 1: user — "<the user's exact words>"`\. The NOTE lines go in a message with no tool call \(text in a message that also runs a tool may never reach the record\)\. A note is never closed by the author's own judgement\.$/);
+  assert.match(r.reason, /Answer each one in your next message, on its own line: `NOTE 1: fixed — <what changed and its test>` \(only after a code change and a passing test that follow the note\), `NOTE 1: refuted — <the note check's evidence>` \(only a note the note check refuted, never a Blocker\) or `NOTE 1: user — "<the user's exact words>"`\. The NOTE lines go in a message with no tool call \(text in a message that also runs a tool may never reach the record\)\. A note is never closed by the author's own judgement\.$/);
   assert.equal(stop([...report(), say('GATE: PASS', 5)], 'GATE: PASS').decision, 'block', 'GATE: PASS too');
   const handed = stop([...report()], 'Run this to push:\n```bash\ngit -C C:/repos/example push -u origin fix/upload\n```');
   assert.equal(handed.decision, 'block', 'a push command handed to the user');
@@ -345,7 +348,7 @@ test('a stop with REVIEW: PASS and an open note is blocked with the list', () =>
 });
 
 test('the same stop with all notes closed is allowed', () => {
-  const closed = [...report(), userSays('leave the translation for later please', 3),
+  const closed = [...report(), ...chg(3), userSays('leave the translation for later please', 3),
     say('NOTE 1: user — "leave the translation for later"\nNOTE 2: fixed — Upload.cs:12 returns 404 for a gone row; test UploadTests.GoneRow_404', 4)];
   const r = stop([...closed, say('REVIEW: PASS', 5)], 'REVIEW: PASS');
   assert.equal(r.decision, 'allow');
@@ -397,9 +400,9 @@ test('with the final text, a repeated stop that claims a pass is still blocked; 
 // ---------------------------------------------------------------------------
 
 test('outcome lines in the final text close notes for this stop', () => {
-  const one = reviewerRun('rv1', ONE_GAP_REPORT, 1);
+  const one = [...reviewerRun('rv1', ONE_GAP_REPORT, 1), ...chg(2)];
   assert.equal(stop(one, 'NOTE 1: fixed — translated the error text in EN/AR; test UploadTests.TooBig_ShowsText\n\nREVIEW: PASS').decision, 'allow');
-  const left = stop(report(), 'NOTE 1: fixed — translated the error text in EN/AR; test UploadTests.TooBig_ShowsText\nREVIEW: PASS');
+  const left = stop([...report(), ...chg(3)], 'NOTE 1: fixed — translated the error text in EN/AR; test UploadTests.TooBig_ShowsText\nREVIEW: PASS');
   assert.equal(left.decision, 'block', 'one note left unanswered');
   assert.match(left.reason, /^NOTE 2 \(Bug\): /m);
   assert.doesNotMatch(left.reason, /NOTE 1 \(/, 'the list names only the open one');
@@ -424,7 +427,10 @@ test('a push with an open note is denied; with the note closed it is allowed', (
   const denied = invoke('policy-guard.js', proven());
   assert.equal(denied.decision, 'deny');
   assert.match(denied.reason, /NOTE 1 \(Gap\): Gap — Upload\.cs:9/);
-  assert.equal(invoke('policy-guard.js', proven([say('NOTE 1: fixed — added the AR/EN key and UploadTests.TooBig_ShowsText', 6)])).decision, 'allow');
+  // 2026-11-17: the fix changes code after the report, so the run is: report, change + passing test, proof, a re-check, then the fixed line.
+  const fixedRun = [...reviewerRun('rv1', ONE_GAP, 1), ...chg(2), ...shell('bound', 'node C:/Users/Asus/.claude/skills/gate/scripts/evidence.mjs --spec "C:/checks/bound.json"', 'CHECK_COMPLETED ' + JSON.stringify(checkRecord), 3),
+    ...reviewerRun('rv2', 'RECOMMEND: PASS', 4), say('NOTE 1: fixed — added the AR/EN key and UploadTests.TooBig_ShowsText', 6), say('REVIEW: PASS', 8), say('GATE: PASS', 9)];
+  assert.equal(invoke('policy-guard.js', fixedRun).decision, 'allow');
   assert.equal(invoke('policy-guard.js', proven([userSays('skip the translation note, it is a known gap', 6), say('NOTE 1: user — "skip the translation note"', 7)])).decision, 'allow');
   assert.equal(invoke('policy-guard.js', proven([say('NOTE 1: user — "skip the translation note"', 7)])).decision, 'deny', 'words the user never typed');
   assert.equal(invoke('policy-guard.js', proven(), { input: { tool_input: { command: 'gh pr create --base staging --draft --title "x"' } } }).decision, 'deny', 'opening the PR as well');

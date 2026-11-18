@@ -6,6 +6,7 @@
 //   node sanad-timer.mjs pause <notes-dir> <why…>         other work in the middle (the user's side request)
 //   node sanad-timer.mjs resume <notes-dir>               back to the task: its last step goes on
 //   node sanad-timer.mjs report <notes-dir>               print each step's minutes and the total
+//   node sanad-timer.mjs request                          a new task was routed: write its first request time (Sanad Step 0)
 //   node sanad-timer.mjs end <notes-dir>                  the task is done: stop the hooks' idle marks
 //
 // 2026-11-09 (TUW-238): the user asked three times "how much time … which parts take too long", and the
@@ -20,6 +21,10 @@
 // Each session has its own active timer (2026-11-10: a session on another project held the one shared
 // pointer, so its marks paused this task, and this session's stops were marked on its timer). The session
 // is CLAUDE_CODE_SESSION_ID, the same id the hooks get; with none, the one shared name.
+// 2026-11-17 (audit S7): the hooks start a task's timer at its first request, not at the last message before
+// the first edit (the time before the user's "go" was lost). `report` names that request and the minutes
+// before the first edit; a timer that ends or pauses stays named as the session's timer before
+// (sanad-timer-last-<id>), so the hooks never start the next task at a message of this one.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,7 +34,17 @@ const FILE = 'timer.tsv';
 /** The pointer file's name for a session id: sanad-timer-active-<id>, or sanad-timer-active with no id. */
 export const pointerName = (id) => { const key = String(id || '').replace(/[^A-Za-z0-9_-]/g, ''); return key ? `sanad-timer-active-${key}` : 'sanad-timer-active'; };
 const pointer = () => path.join(process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state'), pointerName(process.env.CLAUDE_CODE_SESSION_ID));
+// The timer the session had before its active one: the same file name with "last" (hooks/lib/timer-idle.cjs).
+const lastPointer = () => path.join(path.dirname(pointer()), path.basename(pointer()).replace('sanad-timer-active', 'sanad-timer-last'));
 const PAUSED = 'paused: ';
+// The time Sanad routed the task: the hooks start the timer there (hooks/lib/timer-idle.cjs routedAt).
+const requestPointer = () => path.join(path.dirname(pointer()), path.basename(pointer()).replace('sanad-timer-active', 'sanad-task-start'));
+
+/** A new task was routed now: its first request. Without it the hooks guess the start and the report says so. */
+export function requestStart(now = new Date()) {
+  fs.mkdirSync(path.dirname(pointer()), { recursive: true });
+  fs.writeFileSync(requestPointer(), now.toISOString());
+}
 
 /** Names the timer the hooks mark idle time on. A different timer that was running pauses. */
 export function setActive(dir, now = new Date()) {
@@ -60,8 +75,12 @@ export function resume(dir, now = new Date()) {
 }
 
 /** The task is done: no more idle marks, for this timer only. */
+// 2026-11-17: the pointer is kept as the timer before (lastPointer), not deleted; no timer is active either way.
 export function clearActive(dir) {
-  try { if (path.resolve(fs.readFileSync(pointer(), 'utf8').trim()) === path.resolve(dir)) fs.rmSync(pointer()); } catch { /* none */ }
+  try {
+    if (path.resolve(fs.readFileSync(pointer(), 'utf8').trim()) !== path.resolve(dir)) return;
+    try { fs.renameSync(pointer(), lastPointer()); } catch { fs.rmSync(pointer()); }
+  } catch { /* none */ }
 }
 
 export function mark(dir, kind, words, now = new Date()) {
@@ -109,7 +128,7 @@ export function report(dir, now = new Date()) {
   for (const r of rows) {
     if (r.kind === 'wait') { byStage.set('waiting', (byStage.get('waiting') || 0) + r.minutes); continue; }
     // The automatic timer's first marks, by what happens in them: reading and planning, then code.
-    const name = r.text.replace(/^resumed: /, '').replace(/^start \(auto\): the user's message.*$/, 'read and plan').replace(/^(?:start \(auto\): )?first code edit.*$/, 'code');
+    const name = r.text.replace(/^resumed: /, '').replace(/^start \(auto(?:, estimate)?\): the user's message.*$/, 'read and plan').replace(/^(?:start \(auto\): )?first code edit.*$/, 'code');
     if (name !== 'resumed') stage = name;
     if (isEnd(r)) continue;
     byStage.set(stage || name, (byStage.get(stage || name) || 0) + r.minutes);
@@ -121,11 +140,22 @@ export function report(dir, now = new Date()) {
     for (const [name, n] of sideSum) parts.push(`${name} ${fmt(n).trim()} (beside)`);
     lines.push(`by stage (min): ${parts.join(' · ')}`);
   }
+  // 2026-11-17 (audit S7): the automatic timer starts at the task's first request. This line says when that
+  // was and how long the reading, the plan and the wait for the user's "go" took before the first edit.
+  // The time of day is the reader's own (the one local time here; the marks stay in UTC).
+  const edit = marks.find((m) => m.kind === 'step' && m.text === 'first code edit');
+  if (edit && /^start \(auto(?:, estimate)?\): the user's message/.test(marks[0].text)) {
+    // No start was written down when the task was routed: the time is a guess from the typed messages.
+    const estimate = /^start \(auto, estimate\)/.test(marks[0].text) ? ' (estimate)' : '';
+    const clock = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    lines.push(`start: first request ${clock(marks[0].at)}${estimate} · first edit after ${fmt((edit.at - marks[0].at) / 60000).trim()} min`);
+  }
   return lines.join('\n');
 }
 
 if (isMain(import.meta.url)) {
   const [cmd, dir, ...words] = process.argv.slice(2);
+  if (cmd === 'request') { requestStart(); console.log('TIMER request: the task starts now'); process.exit(0); }
   if (!cmd || !dir) {
     console.error('Usage: sanad-timer.mjs mark|wait|pause|resume|report|end <notes-dir> [step words…]');
     process.exit(2);

@@ -8,12 +8,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scripts = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts');
 const script = path.join(scripts, 'siblings.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'siblings-'));
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
+// 2026-11-17: the git of these fixtures reads no config of this machine, and nothing here writes hook state
+// outside the temp folder. Set once: every child process below inherits it.
+fs.writeFileSync(path.join(root, 'empty.gitconfig'), '');
+Object.assign(process.env, { GIT_CONFIG_GLOBAL: path.join(root, 'empty.gitconfig'), GIT_CONFIG_NOSYSTEM: '1', SANAD_STATE_DIR: path.join(root, 'state') });
 const run = (args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', windowsHide: true });
 const slash = (p) => p.replace(/\\/g, '/');
 // A folder's real name: on CI the temp folder is RUNNER~1 to Node and runneradmin to git (2026-11-13).
@@ -348,4 +352,123 @@ test('--check: a list with no same-job search (an older list) is open', () => {
   const r = run(['--check', file]);
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /^OPEN: SAME JOB — the same-job search is missing/m);
+});
+
+// 2026-11-17 (audit, "a sibling can close against an unrelated place"): any P number that was on the places list
+// closed an S line, so a number copied from another line closed a sibling whose own file was never searched.
+const fillS = (list, map) => {
+  let text = fs.readFileSync(list, 'utf8');
+  for (const [n, outcome] of Object.entries(map)) text = text.replace(new RegExp('^(' + n + ' · .*?→).*$', 'm'), (all, head) => head + ' ' + outcome);
+  fs.writeFileSync(list, text);
+};
+const openOf = (r) => r.stdout.split(/\r?\n/).filter((l) => l.startsWith('OPEN:'));
+const addNames = (repo, places, names) => spawnSync(process.execPath, [path.join(scripts, 'places.mjs'), '--repo', repo, '--names', names, '--out', places], { encoding: 'utf8', windowsHide: true });
+
+test('a P<n> closes a sibling only when that place is in the file the sibling names; of several, at least one; a line that names no file is closed as before', async () => {
+  // The input of the audit, through the checker itself: a sibling in PublishNow.cs, closed with a place of Schedule.cs.
+  const { openReason, checkSiblings } = await import(pathToFileURL(script).href);
+  const onePlace = { repo: 'C:/r', names: ['Validate'], places: [{ n: 1, mark: '', name: 'Validate', file: 'Schedule.cs', fn: 'Schedule', lines: '3', outcome: 'C1' }] };
+  const row = { n: 1, body: 'PublishNow.cs:8 · Publish — same date rule', outcome: 'P1' };
+  const how = ": add the sibling's own name with places.mjs --names, or write none: <reason>";
+  assert.equal(openReason(row, onePlace), 'P1 is in Schedule.cs, not in PublishNow.cs' + how);
+  const checked = checkSiblings({ rows: [row], jobs: [], jobNone: true }, { places: onePlace });
+  assert.equal(checked.ok, false);
+  assert.equal(checked.text.split('\n')[0], 'OPEN: S1 · PublishNow.cs:8 · Publish — P1 is in Schedule.cs, not in PublishNow.cs' + how);
+  assert.equal(openReason({ ...row, body: 'Schedule.cs:20 · Reschedule — same date rule' }, onePlace), '', 'a place in the same file closes it');
+  assert.equal(openReason(row, undefined), '', 'without --places no P<n> is looked up, as before');
+
+  const { repo, notes, places, report, list } = briefed(TWO + '\nSIBLING: the rich-text description editor - same focus defect on save\n');
+  assert.equal(run(['--record', report, '--notes', notes]).status, 0);
+  // P1 and P2 are in src/ChipGroup.tsx and P3 is in src/focus.ts: no sibling is in either file.
+  fillS(list, { S1: 'P1', S2: 'P2, P3', S3: 'P1' });
+  let r = run(['--check', list, '--places', places]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.deepEqual(openOf(r), [
+    'OPEN: S1 · src/DatePicker.tsx:1 · DueDatePicker — P1 is in src/ChipGroup.tsx, not in src/DatePicker.tsx' + how,
+    'OPEN: S2 · src/StudentList.tsx:1 · studentIds — P2, P3 are in src/ChipGroup.tsx, src/focus.ts, not in src/StudentList.tsx' + how,
+  ], 'S3 names no file: any place on the list closes it, as before');
+  assert.match(r.stdout, /^SIBLINGS: 3 found, 2 open$/m);
+  // The author adds the own name of each sibling: P4 is in src/DatePicker.tsx and P5 in src/StudentList.tsx.
+  const added = addNames(repo, places, 'DueDatePicker,studentIds');
+  assert.equal(added.status, 0, added.stderr);
+  const now = fs.readFileSync(places, 'utf8');
+  assert.match(now, /^P4 \(new\) · DueDatePicker · src\/DatePicker\.tsx · /m);
+  assert.match(now, /^P5 \(new\) · studentIds · src\/StudentList\.tsx · /m);
+  fillS(list, { S1: 'P4', S2: 'P1, P5' });
+  r = run(['--check', list, '--places', places]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^SIBLINGS: 3 found, 0 open$/m);
+  // The two outcomes swapped: each number is on the list, and each is a place in the file of the other sibling.
+  fillS(list, { S1: 'P5', S2: 'P4' });
+  r = run(['--check', list, '--places', places]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.deepEqual(openOf(r), [
+    'OPEN: S1 · src/DatePicker.tsx:1 · DueDatePicker — P5 is in src/StudentList.tsx, not in src/DatePicker.tsx' + how,
+    'OPEN: S2 · src/StudentList.tsx:1 · studentIds — P4 is in src/DatePicker.tsx, not in src/StudentList.tsx' + how,
+  ]);
+});
+
+test('the file of a sibling is read as the places list names it: backslashes, "./", a whole path, and letter case where the file system ignores it', async () => {
+  const { openReason } = await import(pathToFileURL(script).href);
+  const onePlace = { repo: 'C:/r', names: ['due'], places: [{ n: 1, mark: '', name: 'due', file: 'src/Forms/DatePicker.tsx', fn: '(file)', lines: '4', outcome: '' }] };
+  const row = (file) => ({ n: 1, body: `${file}:4 · due — the same rule`, outcome: 'P1' });
+  const elsewhere = /^P1 is in src\/Forms\/DatePicker\.tsx, not in /;
+  assert.match(openReason(row('src/Forms/Other.tsx'), onePlace), elsewhere);
+  assert.equal(openReason(row('src\\Forms\\DatePicker.tsx'), onePlace), '', 'backslashes');
+  assert.equal(openReason(row('./src/Forms/DatePicker.tsx'), onePlace), '', 'a leading ./');
+  assert.equal(openReason(row('SRC/forms/datepicker.TSX'), onePlace, { ignoreCase: true }), '', 'Windows: one file, whatever the letter case');
+  assert.match(openReason(row('SRC/forms/datepicker.TSX'), onePlace, { ignoreCase: false }), elsewhere, 'a file system that tells letter case apart: two files');
+  assert.match(openReason(row('src\\Forms\\Other.tsx'), onePlace), /, not in src\/Forms\/Other\.tsx: /, 'the message names the file with forward slashes');
+
+  // Through the command: a report from Windows names one file with backslashes and one by its whole path. The
+  // temp folder can have a short and a long spelling; the list holds the one git gives.
+  const f = fixture();
+  assert.equal(run(['--brief', '--notes', f.notes, '--repo', f.repo]).status, 0);
+  const report = path.join(f.notes, 'siblings-report.md'), list = path.join(f.notes, 'siblings.md');
+  const whole = path.join(f.repo, 'src', 'StudentList.tsx');
+  fs.writeFileSync(report, [
+    'SIBLING: src\\DatePicker.tsx:1 · DueDatePicker — a field on the same form whose error never gets the focus',
+    `SIBLING: ${whole}:1 · studentIds — the list shows its error, but the focus stays on the save button`,
+    'SAME JOB: none', '',
+  ].join('\n'));
+  assert.equal(run(['--record', report, '--notes', f.notes]).status, 0);
+  assert.equal(addNames(f.repo, f.places, 'DueDatePicker,studentIds').status, 0);
+  fillS(list, { S1: 'P4', S2: 'P5' });
+  let r = run(['--check', list, '--places', f.places]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  fillS(list, { S1: 'P5', S2: 'P4' });
+  r = run(['--check', list, '--places', f.places]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(openOf(r)[0], / — P5 is in src\/StudentList\.tsx, not in src\/DatePicker\.tsx: /);
+  assert.match(openOf(r)[1], / — P4 is in src\/DatePicker\.tsx, not in .*StudentList\.tsx: /);
+});
+
+// 2026-11-17 (audit, bug-detection 6): the file guard read the file only from "<file>:<line> · ", so a line kept
+// as written in another shape had no file and any place closed it.
+test('an S line that names its file in another shape still closes only with a place of that file', async () => {
+  const { siblingFile } = await import(pathToFileURL(script).href);
+  assert.equal(siblingFile('web/src/DatePicker.tsx:1:17 · x — y'), 'web/src/DatePicker.tsx');
+  assert.equal(siblingFile('web/src/DatePicker.tsx:1 - DueDatePicker - a field'), 'web/src/DatePicker.tsx');
+  assert.equal(siblingFile('`src/DatePicker.tsx:1` · x'), 'src/DatePicker.tsx');
+  assert.equal(siblingFile('/src/DatePicker.tsx:1: x'), 'src/DatePicker.tsx');
+  assert.equal(siblingFile('src/a.ts:12-20 · x'), 'src/a.ts');
+  assert.equal(siblingFile('Note: 5 items'), '', 'no file: the old behavior');
+  const f = fixture();
+  assert.equal(run(['--brief', '--notes', f.notes, '--repo', f.repo]).status, 0);
+  const report = path.join(f.notes, 'siblings-report.md'), list = path.join(f.notes, 'siblings.md');
+  fs.writeFileSync(report, [
+    'SIBLING: src/DatePicker.tsx:1 - DueDatePicker - a field on the same form whose error never gets the focus',
+    'SIBLING: src/StudentList.tsx:1 — studentIds: the list shows its error, but the focus stays on the save button',
+    'SAME JOB: none', '',
+  ].join('\n'));
+  assert.equal(run(['--record', report, '--notes', f.notes]).status, 0);
+  assert.equal(addNames(f.repo, f.places, 'DueDatePicker,studentIds').status, 0);
+  // P1 is in src/focus.ts or src/ChipGroup.tsx: no S line closes with it.
+  fillS(list, { S1: 'P1', S2: 'P1' });
+  let r = run(['--check', list, '--places', f.places]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /^SIBLINGS: 2 found, 2 open$/m);
+  fillS(list, { S1: 'P4', S2: 'P5' });
+  r = run(['--check', list, '--places', f.places]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
 });

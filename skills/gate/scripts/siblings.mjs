@@ -31,7 +31,8 @@
 //       `J<n> · … → ` lines under their own heading (or `SAME JOB: none`); a report with neither is refused too.
 //   node siblings.mjs --check <siblings.md> [--places <places.md>]
 //       Every S line needs `P<n>` (the sibling is a place now: its name added with places.mjs --names; with
-//       --places, P<n> is on that list and not gone) or `none: <reason>` (at least 12 characters). Every J line
+//       --places, P<n> is on that list, not gone and, when the S line names a file, a place in that file: with
+//       several P numbers, at least one of them) or `none: <reason>` (at least 12 characters). Every J line
 //       needs `reuse` (the design follows that pattern) or `not: <reason>` (at least 12 characters), and a list
 //       with no J line and no `SAME JOB: none` is open. Prints `OPEN: S<n>|J<n> · …` per open line and
 //       `SIBLINGS: <k> found, <m> open` plus `SAME JOB: <j> found, <o> open`.
@@ -187,7 +188,7 @@ export function renderSiblings({ brief, report, recorded, rows, outside = [], jo
     `Brief: ${slash(brief)}`,
     `Report: ${slash(report)}`,
     `Recorded: ${recorded}`, '',
-    "Write the outcome after each →: `P<n>` (add the sibling's name with places.mjs --names; n is the place it gets) or `none: <why it is not the same rule>`.",
+    "Write the outcome after each →: `P<n>` (add the sibling's name with places.mjs --names; n is the place it gets in the sibling's own file) or `none: <why it is not the same rule>`.",
     'siblings.mjs --record keeps every outcome when it records again; pre-review.mjs --siblings checks this file.', '',
     ...(rows.length ? rows.map(siblingLine) : ['SIBLINGS: none']), '',
     ...(jobs.length || jobNone ? [JOB_HEADING, '', ...(jobs.length ? jobs.map(jobLine) : ['SAME JOB: none']), ''] : []),
@@ -232,8 +233,36 @@ export function jobOpenReason(row) {
   return 'write reuse or not: <why this pattern does not fit>';
 }
 
+// 2026-11-17 (audit, "a sibling can close against an unrelated place"): any P number that was on the list
+// closed an S line, so a number copied from another line closed a sibling in PublishNow.cs with a place in
+// Schedule.cs, and the sibling's own file was never searched. A place closes a sibling in its own file only.
+
+// The file an S line names: a leading "<file>:<line>" (the shape --record writes is "<file>:<line> · …", but a
+// line kept as written may continue with ":<col>", " - ", backticks or a leading "/"); '' when the line starts
+// with no file. The file has an extension or a folder, and no space.
+export const siblingFile = (body) => {
+  const m = /^[`'"(]*\/*([^\s`'"]*[./][^\s`'"]*?):\d+(?!\w)/.exec(String(body).trim());
+  return m ? m[1].trim() : '';
+};
+
+// One folder can have two names (Windows' short RUNNER~1 spelling of a temp folder, a junction): its real path.
+const real = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
+
+// A file as the places list names it: relative to the list's repo, forward slashes, no "./". Letter case is
+// ignored where the file system ignores it (Windows).
+export function listPath(file, repo, { ignoreCase = process.platform === 'win32' } = {}) {
+  let f = slash(String(file).trim());
+  if (repo && path.isAbsolute(f)) {
+    const rel = slash(path.relative(real(repo), real(f)));
+    if (rel && rel !== '..' && !rel.startsWith('../') && !path.isAbsolute(rel)) f = rel;
+  }
+  f = path.posix.normalize(f);
+  return ignoreCase ? f.toLowerCase() : f;
+}
+
 // Why an S line is still open ('' = closed). `places`: the parsed places list, when --places is given.
-export function openReason(row, places) {
+// `ignoreCase`: see listPath.
+export function openReason(row, places, { ignoreCase } = {}) {
   const o = row.outcome.trim();
   if (!o) return 'no outcome';
   const none = /^none:\s*(.*)$/i.exec(o);
@@ -249,7 +278,12 @@ export function openReason(row, places) {
   if (missing.length) return `${names(missing)} not on the places list: add the sibling's name with places.mjs --names`;
   const gone = nums.filter((n) => places.places.some((p) => p.n === n && p.mark === 'gone'));
   if (gone.length) return `${names(gone)} gone from the places list`;
-  return '';
+  const file = siblingFile(row.body);
+  if (!file) return '';
+  const at = (f) => listPath(f, places.repo, { ignoreCase });
+  const found = nums.map((n) => places.places.find((p) => p.n === n));
+  if (found.some((p) => at(p.file) === at(file))) return '';
+  return `${names(nums)} in ${[...new Set(found.map((p) => p.file))].join(', ')}, not in ${slash(file)}: add the sibling's own name with places.mjs --names, or write none: <reason>`;
 }
 
 // `jobs` undefined: a caller that only checks S lines (siblings --record); a list read from a file always has it.

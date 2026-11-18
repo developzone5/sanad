@@ -429,7 +429,15 @@ function gateCheck(base) {
     // "You are the independent reviewer", launched (or continued) after the last
     // change and completed before the verdict. A reused review (promotion) instead
     // needs a `git range-diff` equivalence check after the last change.
-    const reused = /\breused\b/i.test(r.lastReviewText || '') && r.lastRangeDiff > lastEdit;
+    // 2026-11-17 (audit F1/F3): the newest readable range-diff decides, and its new side must be exactly the commits being pushed.
+    const reused = /\breused\b/i.test(r.lastReviewText || '') && (r.lastRangeDiffProof ?? -1) > lastEdit && (r.lastRangeDiffProof ?? -1) > (r.lastRangeDiffChanged ?? -1) && rangeDiffCoversPush(r.lastRangeDiffNew);
+    if (!reused && /reused/i.test(r.lastReviewText || '') && r.lastReviewerRun <= lastEdit) {
+      deny((r.lastRangeDiff ?? -1) > lastEdit && (r.lastRangeDiffChanged ?? -1) > lastEdit
+        ? 'the range-diff shows a changed or new commit: this is a new patch and needs its own review' + file + '.'
+        : (r.lastRangeDiff ?? -1) > lastEdit
+          ? 'the range-diff output proves no equal series of the commits being pushed' + file + ': run git range-diff <old-base>..<old-head> <new-base>..<new-head> by itself so its output can be read.'
+          : 'a "reused" review needs a range-diff after the last change' + file + ': run git range-diff <old-base>..<old-head> <new-base>..<new-head> by itself so its output can be read.');
+    }
     if (!reused && (r.lastReviewerRun <= lastEdit || r.lastReviewerResult === -1 || r.lastReview <= r.lastReviewerResult)) {
       deny('`REVIEW: PASS` needs a completed independent reviewer run after the last change' + file + '. ' +
            'Launch (or continue) the Sanad Step 3.5 reviewer — its prompt starts "You are the independent reviewer" — collect its finished report, then write the verdict. ' +
@@ -503,6 +511,17 @@ function pushBase() {
   const base = git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
   if (!base) return '';
   return cachedBase = gitRaw(['merge-base', base, 'HEAD']).trim();
+}
+
+// The new-side commits of an equal range-diff must be exactly the rev-list of the push base..HEAD (same count, same order, last = HEAD);
+// otherwise a commit added after the run, or a range that stops below HEAD, would ride on the proof.
+function rangeDiffCoversPush(hashes) {
+  try {
+    const base = pushBase();
+    if (!base || !Array.isArray(hashes) || hashes.length === 0) return false;
+    const list = gitRaw(['rev-list', '--reverse', base + '..HEAD']).split(/\r?\n/).filter(Boolean);
+    return list.length === hashes.length && list.every((full, i) => hashes[i].length >= 7 && full.toLowerCase().startsWith(hashes[i].toLowerCase()));
+  } catch (e) { return false; }
 }
 
 function pushCodePaths() {

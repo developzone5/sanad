@@ -7,11 +7,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'places.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'places-'));
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
+// 2026-11-17: the git of these fixtures reads no config of this machine, and nothing here writes hook state
+// outside the temp folder. Set once: every child process below inherits it.
+fs.writeFileSync(path.join(root, 'empty.gitconfig'), '');
+Object.assign(process.env, { GIT_CONFIG_GLOBAL: path.join(root, 'empty.gitconfig'), GIT_CONFIG_NOSYSTEM: '1', SANAD_STATE_DIR: path.join(root, 'state') });
 
 // A repo where dueAfterPublish is used by two tracked files, one untracked file and one test; an ignored
 // file, a binary file and a longer name (dueAfterPublishNow) also hold the word and are not places.
@@ -359,4 +363,255 @@ test('a place line in the old shape (no function part) is read as the file-level
     'P3 · dueAfterPublish · src/draft.ts · (file) · lines 1 → ',
     'P4 (new) · dueAfterPublish · src/rules.ts · dueAfterPublish · lines 1 → ',
   ], 'the use inside a function is a new, open place: the old file-wide outcome does not close it');
+});
+
+// 2026-11-17 (audit, "distinct methods collapse into a single place"): hits were grouped by the bare function
+// name, so the schedule path and the publish-now path of one file were ONE place again whenever both functions
+// had the same name (Schedule.Apply and PublishNow.Apply), and so were two overloads. A place is one declaration.
+const TWO_APPLY = [
+  'public class Schedule {',       // 1
+  '    public void Apply() {',     // 2
+  '        DateRule.Validate();',  // 3
+  '    }',                         // 4
+  '}',                             // 5
+  'public class PublishNow {',     // 6
+  '    public void Apply() {',     // 7
+  '        DateRule.Validate();',  // 8
+  '    }',                         // 9
+  '}',                             // 10
+  '',
+];
+const OVERLOADS = [
+  'public class Rules',                     // 1
+  '{',                                      // 2
+  '    public void Apply(int id)',          // 3
+  '    {',                                  // 4
+  '        Validate(id);',                  // 5
+  '    }',                                  // 6
+  '',                                       // 7
+  '    public void Apply(string name)',     // 8
+  '    {',                                  // 9
+  '        Validate(name);',                // 10
+  '    }',                                  // 11
+  '}',                                      // 12
+  '',
+].join('\n');
+const openLines = (r) => r.stdout.split(/\r?\n/).filter(l => l.startsWith('OPEN:'));
+
+test('two functions with one name in one file are two places, each with its own outcome (audit: Schedule.Apply and PublishNow.Apply)', async () => {
+  // The audit's input, through the grouping function itself: it gave [["Apply", [3, 8]]].
+  const { byFunction } = await import(pathToFileURL(script).href);
+  assert.deepEqual([...byFunction('Service.cs', [3, 8], TWO_APPLY)], [['Schedule.Apply', [3]], ['PublishNow.Apply', [8]]]);
+  const { repo, write } = fixture();
+  // Windows line ends: a declaration's line is the same line whatever ends it.
+  write('Api/Service.cs', TWO_APPLY.join('\r\n'));
+  const out = path.join(root, 'list-twins.md');
+  assert.equal(run(['--repo', repo, '--names', 'Validate', '--out', out]).status, 0);
+  assert.deepEqual(lineOf(out), [
+    'P1 · Validate · Api/Service.cs · Schedule.Apply · lines 3 → ',
+    'P2 · Validate · Api/Service.cs · PublishNow.Apply · lines 8 → ',
+  ]);
+  fill(out, { P1: 'C1' });
+  const r = run(['--check', out]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.deepEqual(openLines(r), ['OPEN: P2 · Validate · Api/Service.cs · PublishNow.Apply'], 'the outcome of the schedule path does not close the publish-now path');
+});
+
+test('overloads, and same-named functions with no type, are told apart by the line they start on; two handlers of one name by their component', () => {
+  const { repo, write } = fixture();
+  write('Api/Rules.cs', OVERLOADS);
+  write('src/paths.ts', [
+    'export const schedule = {',     // 1
+    '  apply(a, b) {',               // 2
+    '    return Validate(a, b);',    // 3
+    '  },',                          // 4
+    '};',                            // 5
+    'export const publishNow = {',   // 6
+    '  apply(a, b) {',               // 7
+    '    return Validate(a, b);',    // 8
+    '  },',                          // 9
+    '};',                            // 10
+    '',
+  ].join('\n'));
+  write('src/Forms.tsx', [
+    'export function CreateForm() {',    // 1
+    '  const handleSubmit = () => {',    // 2
+    '    Validate(1);',                  // 3
+    '  };',                              // 4
+    '  return null;',                    // 5
+    '}',                                 // 6
+    'export function EditForm() {',      // 7
+    '  const handleSubmit = () => {',    // 8
+    '    Validate(2);',                  // 9
+    '  };',                              // 10
+    '  return null;',                    // 11
+    '}',                                 // 12
+    '',
+  ].join('\n'));
+  const out = path.join(root, 'list-overloads.md');
+  assert.equal(run(['--repo', repo, '--names', 'Validate', '--out', out]).status, 0);
+  assert.deepEqual(lineOf(out), [
+    'P1 · Validate · Api/Rules.cs · Rules.Apply(int id) · lines 5 → ',
+    'P2 · Validate · Api/Rules.cs · Rules.Apply(string name) · lines 10 → ',
+    'P3 · Validate · src/Forms.tsx · CreateForm.handleSubmit · lines 3 → ',
+    'P4 · Validate · src/Forms.tsx · EditForm.handleSubmit · lines 9 → ',
+    'P5 · Validate · src/paths.ts · apply(a, b) (line 2) · lines 3 → ',
+    'P6 · Validate · src/paths.ts · apply(a, b) (line 7) · lines 8 → ',
+  ]);
+  // Each of the six is closed alone: --close by number, and a check that still names the other five.
+  const closed = run(['--close', out, '--set', 'P2=C1']);
+  assert.equal(closed.status, 0, closed.stdout + closed.stderr);
+  assert.match(closed.stdout, /^ {2}P2 · Validate · Api\/Rules\.cs · Rules\.Apply\(string name\)$/m);
+  assert.deepEqual(openLines(run(['--check', out])).map(l => l.slice(0, 9)), ['OPEN: P1 ', 'OPEN: P3 ', 'OPEN: P4 ', 'OPEN: P5 ', 'OPEN: P6 ']);
+});
+
+test('a list from before one place was one declaration: a place that was two functions is gone, both are open and say why; a place that is still one function keeps its number and outcome', () => {
+  const { repo, write } = fixture();
+  write('Api/Service.cs', TWO_APPLY.join('\n'));
+  // In Other.cs only Schedule.Apply uses Stamp: its old place `Apply` is still exactly one declaration.
+  write('Api/Other.cs', TWO_APPLY.join('\n').replace('DateRule.Validate();', 'Clock.Stamp();').replace('DateRule.Validate();', 'Log();'));
+  const out = path.join(root, 'list-before.md');
+  // The list as places.mjs wrote it before 2026-11-17: one place per function name.
+  fs.writeFileSync(out, [
+    '# Places that use what this change touches', '', `Repo: ${repo.replace(/\\/g, '/')}`, 'Names: Validate, Stamp', 'Searched: 2026-11-16T08:00:00.000Z', '',
+    '## Validate', '',
+    'P1 · Validate · Api/Service.cs · Apply · lines 3, 8 → C1', 'Tests that mention it: none', '',
+    '## Stamp', '',
+    'P2 · Stamp · Api/Other.cs · Apply · lines 3 → C2', 'Tests that mention it: none', '',
+  ].join('\n'));
+  const refresh = run(['--refresh', out]);
+  assert.equal(refresh.status, 0, refresh.stdout + refresh.stderr);
+  assert.deepEqual(lineOf(out), [
+    'P1 (gone) · Validate · Api/Service.cs · Apply · lines none → C1',
+    'P3 (new) · Validate · Api/Service.cs · Schedule.Apply · lines 3 → ',
+    'P4 (new) · Validate · Api/Service.cs · PublishNow.Apply · lines 8 → ',
+    'P2 · Stamp · Api/Other.cs · Schedule.Apply · lines 3 → C2',
+  ], 'the outcome of the split place stays on its gone line and closes neither function; the unsplit place keeps C2');
+  const why = [
+    'OPEN: P3 · Validate · Api/Service.cs · Schedule.Apply — split from P1 (Apply → C1): 2 functions named Apply use Validate in this file, and each is its own place with its own outcome',
+    'OPEN: P4 · Validate · Api/Service.cs · PublishNow.Apply — split from P1 (Apply → C1): 2 functions named Apply use Validate in this file, and each is its own place with its own outcome',
+  ];
+  // The run that splits the place says why, and so does every check until each function has its outcome.
+  assert.deepEqual(openLines(refresh), why);
+  assert.match(refresh.stdout, /^PLACES: 3 place\(s\), 2 open — refreshed /m);
+  const check = run(['--refresh', out, '--check', out]);
+  assert.equal(check.status, 1, check.stdout);
+  assert.deepEqual(openLines(check), why);
+  fill(out, { P3: 'C1' });
+  assert.deepEqual(openLines(run(['--check', out])), [why[1]]);
+  fill(out, { P4: 'none: publish now takes no date from the user' });
+  const ok = run(['--refresh', out, '--check', out]);
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.match(ok.stdout, /^PLACES: 3 place\(s\), 0 open$/m);
+  assert.equal(lineOf(out)[0], 'P1 (gone) · Validate · Api/Service.cs · Apply · lines none → C1');
+});
+
+test('a refresh keeps each same-named place with its number and outcome when lines move or its twin goes, and never moves an outcome to the twin', () => {
+  const { repo, write } = fixture();
+  write('Api/Rules.cs', OVERLOADS);
+  write('Api/Service.cs', TWO_APPLY.join('\n'));
+  const out = path.join(root, 'list-moved.md');
+  assert.equal(run(['--repo', repo, '--names', 'Validate', '--out', out]).status, 0);
+  fill(out, { P1: 'C1', P2: 'C2', P3: 'C3', P4: 'none: publish now takes no date from the user' });
+  // Five lines above both overloads, as many as lie between them: the first now starts on the line the label of
+  // the second names, and each still keeps its own outcome. The class PublishNow leaves Service.cs, so one
+  // Apply is left there.
+  write('Api/Rules.cs', 'using System;\nusing System.Linq;\nusing System.Text;\n\nnamespace App;\n' + OVERLOADS);
+  write('Api/Service.cs', TWO_APPLY.slice(0, 5).join('\n') + '\n');
+  assert.equal(run(['--refresh', out]).status, 0);
+  assert.deepEqual(lineOf(out), [
+    'P1 · Validate · Api/Rules.cs · Rules.Apply(int id) · lines 10 → C1',
+    'P2 · Validate · Api/Rules.cs · Rules.Apply(string name) · lines 15 → C2',
+    'P3 · Validate · Api/Service.cs · Apply · lines 3 → C3',
+    'P4 (gone) · Validate · Api/Service.cs · PublishNow.Apply · lines none → none: publish now takes no date from the user',
+  ]);
+  // The call leaves the second overload and the first keeps its own: no line moved, so the place of the second
+  // is gone and its outcome is not handed to the first.
+  const lone = path.join(root, 'list-twin.md');
+  write('Api/Twin.cs', OVERLOADS.replace('Validate(id);', 'Log(id);').replace('Validate(name);', 'Stamp(name);'));
+  assert.equal(run(['--repo', repo, '--names', 'Stamp', '--out', lone]).status, 0);
+  assert.deepEqual(lineOf(lone), ['P1 · Stamp · Api/Twin.cs · Rules.Apply(string name) · lines 10 → ']);
+  fill(lone, { P1: 'C1' });
+  write('Api/Twin.cs', OVERLOADS.replace('Validate(id);', 'Stamp(id);').replace('Validate(name);', 'Log(name);'));
+  assert.equal(run(['--refresh', lone]).status, 0);
+  assert.deepEqual(lineOf(lone), [
+    'P1 (gone) · Stamp · Api/Twin.cs · Rules.Apply(string name) · lines none → C1',
+    'P2 (new) · Stamp · Api/Twin.cs · Rules.Apply(int id) · lines 5 → ',
+  ]);
+  // The call goes back to the second overload and a line is added above: an overload is told by its parameter
+  // list, not its line, so the place of the string overload is itself again with its own outcome, and the
+  // outcome of the int overload is not handed to it.
+  fill(lone, { P2: 'C2' });
+  write('Api/Twin.cs', '// moved\n' + OVERLOADS.replace('Validate(id);', 'Log(id);').replace('Validate(name);', 'Stamp(name);'));
+  assert.equal(run(['--refresh', lone]).status, 0);
+  assert.deepEqual(lineOf(lone), [
+    'P1 · Stamp · Api/Twin.cs · Rules.Apply(string name) · lines 11 → C1',
+    'P2 (gone) · Stamp · Api/Twin.cs · Rules.Apply(int id) · lines none → C2',
+  ]);
+});
+
+// 2026-11-17 (audit, bug-detection 3): overloads were told apart by their start line, so a new or replaced
+// overload took over the outcome written for another one, and reordering swapped them.
+test('a new, a replaced or a reordered overload never takes over the outcome written for another overload', () => {
+  const { repo, write } = fixture();
+  const part = (sig, arg) => [`    public void Apply(${sig})`, '    {', `        Validate(${arg});`, '    }', ''];
+  const INT = part('int id', 'id'), STR = part('string name', 'name'), BOOL = part('bool on', 'on');
+  const rules = (...parts) => ['public class Rules', '{', ...parts.flat(), '}', ''].join('\n');
+  const start = (name) => {
+    write('Api/Rules.cs', rules(INT, STR));
+    const list = path.join(root, name);
+    assert.equal(run(['--repo', repo, '--names', 'Validate', '--out', list]).status, 0);
+    assert.equal(run(['--close', list, '--set', 'P1=C1', '--set', 'P2=C2']).status, 0);
+    return list;
+  };
+  // 1. A bool overload is added above both: the two outcomes stay with their overloads, the new one is open.
+  let list = start('list-insert.md');
+  write('Api/Rules.cs', rules(BOOL, INT, STR));
+  let r = run(['--refresh', list, '--check', list]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.deepEqual(lineOf(list), [
+    'P1 · Validate · Api/Rules.cs · Rules.Apply(int id) · lines 10 → C1',
+    'P2 · Validate · Api/Rules.cs · Rules.Apply(string name) · lines 15 → C2',
+    'P3 (new) · Validate · Api/Rules.cs · Rules.Apply(bool on) · lines 5 → ',
+  ]);
+  assert.deepEqual(openLines(r), ['OPEN: P3 · Validate · Api/Rules.cs · Rules.Apply(bool on)']);
+  // 2. The int overload is replaced by a bool one below the string one (same count of overloads).
+  list = start('list-replace.md');
+  write('Api/Rules.cs', rules(STR, BOOL));
+  r = run(['--refresh', list, '--check', list]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.deepEqual(lineOf(list), [
+    'P1 (gone) · Validate · Api/Rules.cs · Rules.Apply(int id) · lines none → C1',
+    'P2 · Validate · Api/Rules.cs · Rules.Apply(string name) · lines 5 → C2',
+    'P3 (new) · Validate · Api/Rules.cs · Rules.Apply(bool on) · lines 10 → ',
+  ]);
+  assert.deepEqual(openLines(r), ['OPEN: P3 · Validate · Api/Rules.cs · Rules.Apply(bool on)']);
+  // 3. The two overloads swap places: each keeps its outcome.
+  list = start('list-reorder.md');
+  write('Api/Rules.cs', rules(STR, INT));
+  r = run(['--refresh', list, '--check', list]);
+  assert.equal(r.status, 0, r.stdout);
+  assert.deepEqual(lineOf(list), [
+    'P1 · Validate · Api/Rules.cs · Rules.Apply(int id) · lines 10 → C1',
+    'P2 · Validate · Api/Rules.cs · Rules.Apply(string name) · lines 5 → C2',
+  ]);
+});
+
+test('a closed place stays closed when a line is added above it, although a same-named twin in its scope does not use the name (audit: AssignmentVisibility.IsLive)', () => {
+  const { repo, write } = fixture();
+  const live = (extra = '') => extra + [
+    'public static class Visibility', '{',
+    '    public static bool IsLive(int id)', '    {', '        return id > 0;', '    }', '',
+    '    public static bool IsLive(string name)', '    {', '        return Status(name) == 1;', '    }', '}', '',
+  ].join('\n');
+  write('Api/Visibility.cs', live());
+  const list = path.join(root, 'list-twin-unrelated.md');
+  assert.equal(run(['--repo', repo, '--names', 'Status', '--out', list]).status, 0);
+  assert.deepEqual(lineOf(list), ['P1 · Status · Api/Visibility.cs · Visibility.IsLive(string name) · lines 10 → ']);
+  assert.equal(run(['--close', list, '--set', 'name:Status=C1']).status, 0);
+  write('Api/Visibility.cs', live('using System.Globalization;\n'));
+  const r = run(['--refresh', list, '--check', list]);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /^PLACES: 1 place\(s\), 0 open$/m);
+  assert.deepEqual(lineOf(list), ['P1 · Status · Api/Visibility.cs · Visibility.IsLive(string name) · lines 11 → C1']);
 });

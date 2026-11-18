@@ -12,12 +12,16 @@
 // --names gives the names the places list searched: each named function in the planned files is read
 // whole (attributes, signature, body) by the same content rules as a diff; without it a plan reads
 // file names only (2026-11-15: a plan that removed four actions deleting stored objects by a client
-// key sized small; its diff sized big).
+// key sized small; its diff sized big). The callers of each named function are counted before code
+// too, by the rules of a diff (2026-11-17: a plan read the function and did not count who calls it,
+// so a task planned small turned big only on its diff — SIZE GREW — when the expert planning step
+// before code was already missed).
 //
 // Usage: node size-check.mjs --repo <path> (--base <ref> | --files <a,b,...> [--names <n1,n2,...>]) [--was <size>] [--json]
 // Exit 0: sized (and not grown). 1: --was given and the change grew. 2: usage error.
 import fs from 'node:fs';
 import path from 'node:path';
+import { builtinModules } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { readStack } from './stack.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
@@ -408,16 +412,17 @@ function queryChanged(repo, f) {
 
 // A local function is called only from its own file; an exported or public one from anywhere.
 const SHARED = /^\s*(?:export\b|(?:public|internal|protected)\b)/;
-// Callers are counted for the first 12 changed functions; the output names how many more there were
-// (2026-11-12: the rest were dropped without a word).
+// Callers are counted for EVERY changed function; only the printed rows are capped at 12, and the output says
+// how many more rows there were (2026-11-17, audit 5: the cap was applied before the analysis, so a 13th
+// function with eleven callers could not raise the size).
 const MAX_SYMBOLS = 12;
-export function changedSymbols(repo, files) { return allChangedSymbols(repo, files).slice(0, MAX_SYMBOLS); }
+export function changedSymbols(repo, files) { return allChangedSymbols(repo, files); }
 // `moved` collects the changed functions whose body moved into a new function (movedTo): they are not kept.
 function allChangedSymbols(repo, files, moved = []) {
   const names = new Map(), judged = new Map();
   let added = null;
   const addedOnce = () => (added ||= addedFunctions(repo, files));
-  const keep = (n, f, line, at) => {
+  const keep = (n, f, line, at, lines) => {
     if (!n) return;
     const key = f.name + ':' + at;
     if (!judged.has(key)) {
@@ -425,7 +430,13 @@ function allChangedSymbols(repo, files, moved = []) {
       judged.set(key, to);
       if (to) moved.push({ name: n, file: f.name, to });
     }
-    if (!judged.get(key) && !names.has(n)) names.set(n, { file: f.name, shared: SHARED.test(line), at });
+    if (judged.get(key)) return;
+    // One function per file, name and (C#) declaring type: two definitions named Apply in two files or two types
+    // are two functions, each with its own callers (2026-11-17, audit 5: they were merged by bare name).
+    const id = f.name + ':' + n + (CS.test(f.name) ? ':' + declaringType(lines, at).name : '');
+    const had = names.get(id);
+    if (!had) names.set(id, { name: n, file: f.name, shared: SHARED.test(line), at });
+    else if (SHARED.test(line)) had.shared = true;
   };
   for (const f of files) {
     if (KIND(f.name) !== 'code' || !CODE.test(f.name)) continue;
@@ -437,15 +448,15 @@ function allChangedSymbols(repo, files, moved = []) {
       if (commentOnlyHunk(repo, f, h)) continue;
       const from = Math.max(0, h.start - 1), to = Math.min(lines.length, from + Math.max(h.count, 1));
       for (let i = from; i < to; i++) {
-        keep(defName(lines[i]), f, lines[i], i);
+        keep(defName(lines[i]), f, lines[i], i, lines);
         const under = cs ? attributeTarget(lines, i) : -1;
-        if (under >= 0) keep(defName(lines[under]), f, lines[under], under);
+        if (under >= 0) keep(defName(lines[under]), f, lines[under], under, lines);
       }
       const around = enclosingDef(lines, from, to, { wide: cs });
-      if (around.name) keep(around.name, f, lines[around.at], around.at);
+      if (around.name) keep(around.name, f, lines[around.at], around.at, lines);
     }
   }
-  return [...names.entries()].map(([name, v]) => ({ name, ...v }));
+  return [...names.values()];
 }
 
 /**
@@ -548,8 +559,9 @@ function attributeTarget(lines, i) {
 
 /**
  * Plan mode with --names: each definition of a named function in one planned C#, JS or TS file, as
- * `{ name, line, raw, code }`: the attributes or decorators stacked right above it, its signature and its whole body
- * (`raw` the lines whole, `code` its code lines through codeOnly). [] for a missing file or another language.
+ * `{ name, line, shared, raw, code }`: the attributes or decorators stacked right above it, its signature and its whole
+ * body (`raw` the lines whole, `code` its code lines through codeOnly); `shared`: exported or public, so reached from
+ * other files (SHARED). [] for a missing file or another language.
  */
 function namedDefinitions(repo, file, names) {
   const cs = CS.test(file);
@@ -563,7 +575,7 @@ function namedDefinitions(repo, file, names) {
     if (!name || !wanted.has(name)) continue;
     const from = attributesAbove(lines, at, cs), to = definitionEnd(lines, at, isCode);
     const raw = lines.slice(from, to + 1);
-    out.push({ name, line: at + 1, raw, code: raw.filter((_, k) => isCode[from + k]).map(codeOnly) });
+    out.push({ name, line: at + 1, shared: SHARED.test(lines[at]), raw, code: raw.filter((_, k) => isCode[from + k]).map(codeOnly) });
   }
   return out;
 }
@@ -592,6 +604,25 @@ function definitionEnd(lines, at, isCode) {
     if (/[;})\]]\s*$/.test(code)) return k;
   }
   return at;
+}
+/**
+ * Plan mode with --names (2026-11-17): the functions whose callers are counted before code, in the shape
+ * allChangedSymbols gives for a diff (`at`: the definition line, 0-based), so callers() counts both by one rule set.
+ * One per planned file and name: a name defined in two planned files (a controller action and the service method it
+ * calls) is two functions, each with its own callers. Several definitions of a name in one file (overloads) are one
+ * function to a search by name, shared when any of them is. The file is named as git names it (`./a.ts` is `a.ts`),
+ * since a caller's file is compared with it.
+ */
+function plannedSymbols(files) {
+  const rows = new Map();
+  for (const f of files) {
+    const file = path.posix.normalize(f.name);
+    for (const d of f.named || []) {
+      const key = file + ':' + d.name, had = rows.get(key);
+      if (!had || (d.shared && !had.shared)) rows.set(key, { name: d.name, file, shared: d.shared, at: d.line - 1 });
+    }
+  }
+  return [...rows.values()];
 }
 
 // A moved body is not a change (2026-11-13, PR #773: HomeworkLifecycle.MinuteOf became a one-line call to a new
@@ -808,6 +839,131 @@ export function reachingFiles(repo, file, name, candidates) {
   }
   return reach;
 }
+// 2026-11-17 (audit 4, repair round): JS/TS imports and re-exports read as statements from code text (comments
+// left out), so a caller is followed through an alias (`{ validate as check }`, `{ validate: check }`), a default
+// import, a namespace import and any chain of barrels (`export * from`, `export { validate as check } from`),
+// found by the import PATH and not by the name, which a barrel importer that only uses the alias never contains.
+const jsListCache = new Map(), stmtCache = new Map(), indexCache = new Map(), depsCache = new Map();
+function jsFileList(repo) {
+  if (!jsListCache.has(repo)) {
+    jsListCache.set(repo, git(repo, ['-c', 'core.quotepath=off', 'ls-files', '--cached', '--others', '--exclude-standard'], { allowFail: true })
+      .split(/\r?\n/).filter(f => f && JS.test(f) && !SKIP_PATH.test(f)));
+  }
+  return jsListCache.get(repo);
+}
+// The code of a file with comment-only lines blanked and the line structure kept (strings stay: an import path is one).
+function jsCodeText(repo, file) {
+  const text = fileText(repo, file), isCode = codeLines(text);
+  return text.split(/\r?\n/).map((l, i) => isCode[i] ? l : '').join('\n');
+}
+function parseClause(clause, destructure) {
+  const out = { imported: [], def: null, ns: null, star: false };
+  let rest = clause;
+  const ns = /\*\s*as\s+([\w$]+)/.exec(rest);
+  if (ns) { out.ns = ns[1]; rest = rest.replace(ns[0], ' '); } else if (rest.includes('*')) { out.star = true; rest = rest.replace('*', ' '); }
+  const br = /\{([^}]*)\}/.exec(rest);
+  if (br) {
+    for (const part of br[1].split(',')) {
+      const p = part.trim().replace(/^type\s+/, '');
+      const m = destructure ? /^([\w$]+)\s*(?::\s*([\w$]+))?/.exec(p) : /^([\w$]+)(?:\s+as\s+([\w$]+))?/.exec(p);
+      if (m) out.imported.push({ name: m[1], local: m[2] || m[1] });
+    }
+    rest = rest.replace(br[0], ' ');
+  }
+  const d = /^\s*([\w$]+)\s*,?\s*$/.exec(rest);
+  if (d) out.def = d[1];
+  return out;
+}
+const normTarget = p => p.replace(JS_EXT, '').replace(/\/index$/, '');
+// Every import, export-from and require / dynamic-import destructuring of a file:
+// `{ kind, spec, target, from, to, imported: [{ name, local }], def, ns, star }` (lines 1-based).
+function jsStatements(repo, file) {
+  if (stmtCache.has(file)) return stmtCache.get(file);
+  const code = jsCodeText(repo, file), out = [];
+  const lineOf = i => code.slice(0, i).split('\n').length;
+  const push = (m, kind, clause, spec, destructure) => {
+    const p = resolveSpec(repo, file, spec);
+    const from = lineOf(m.index);
+    out.push({ kind, spec, target: p ? normTarget(p) : null, from, to: from + m[0].split('\n').length - 1, ...parseClause(clause, destructure) });
+  };
+  for (const m of code.matchAll(/(?<![\w$.])(import|export)\s+(type\s+)?([\w$\s{},*]*?)\s*from\s*(['"`])([^'"`\n]+)\4/g)) {
+    if (!m[2]) push(m, m[1], m[3], m[5], false);
+  }
+  for (const m of code.matchAll(/(?<![\w$.])(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*(['"`])([^'"`\n]+)\2\s*\)/g)) push(m, 'require', `{${m[1]}}`, m[3], true);
+  for (const m of code.matchAll(/(?<![\w$.])(?:const|let|var)\s+([\w$]+)\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*(['"`])([^'"`\n]+)\2\s*\)/g)) push(m, 'require', `* as ${m[1]}`, m[3], true);
+  stmtCache.set(file, out);
+  return out;
+}
+// Statements by the file they name, over all JS files of the repo.
+function importIndex(repo) {
+  if (!indexCache.has(repo)) {
+    const index = new Map();
+    for (const f of jsFileList(repo)) {
+      for (const s of jsStatements(repo, f)) {
+        if (!s.target) continue;
+        if (!index.has(s.target)) index.set(s.target, []);
+        index.get(s.target).push({ file: f, s });
+      }
+    }
+    indexCache.set(repo, index);
+  }
+  return indexCache.get(repo);
+}
+function hasDefaultExport(repo, file, name) {
+  const n = escapeRe(name);
+  return new RegExp(`export\\s+default\\s+(?:async\\s+)?(?:function\\s*\\*?\\s*|class\\s+)${n}\\b|export\\s+default\\s+${n}\\s*;?\\s*$|export\\s*\\{[^}]*\\b${n}\\s+as\\s+default\\b`, 'm').test(jsCodeText(repo, file));
+}
+/**
+ * The files that reach `name` of `file` by an import PATH, through any chain of barrels:
+ * `local` (file -> the names it binds it to: its own name, an alias, a default name) and
+ * `ns` (file -> `{ ns, exported }` namespace imports: `ns.exported` is the use).
+ */
+export function followExport(repo, file, name) {
+  const local = new Map(), nsMap = new Map(), seen = new Set(), queue = [{ file, exported: name }];
+  if (hasDefaultExport(repo, file, name)) queue.push({ file, exported: 'default' });
+  const add = (map, f, v) => { if (!map.has(f)) map.set(f, new Set()); map.get(f).add(v); };
+  const index = importIndex(repo);
+  while (queue.length) {
+    const { file: t, exported: e } = queue.shift();
+    const key = t + '\0' + e;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (const { file: f, s } of index.get(normTarget(t)) || []) {
+      if (f === file) continue;
+      if (s.kind === 'export') {
+        if (s.star && e !== 'default') queue.push({ file: f, exported: e });
+        for (const im of s.imported) if (im.name === e) queue.push({ file: f, exported: im.local });
+        continue;
+      }
+      for (const im of s.imported) if (im.name === e) add(local, f, im.local);
+      if (s.def && e === 'default') add(local, f, s.def);
+      if (s.ns) add(nsMap, f, JSON.stringify({ ns: s.ns, exported: e }));
+    }
+  }
+  return { local, ns: new Map([...nsMap].map(([f, v]) => [f, [...v].map(x => JSON.parse(x))])), files: new Set([...local.keys(), ...nsMap.keys()]) };
+}
+// The package names a file's nearest package.json and the repo root one list (dependencies of every kind).
+function dependencyNames(repo, file) {
+  const names = new Set();
+  for (const dir of new Set([packageDir(repo, file), ''])) {
+    if (!depsCache.has(dir)) {
+      let json = {};
+      try { json = JSON.parse(fs.readFileSync(path.join(repo, dir, 'package.json'), 'utf8')); } catch { /* none */ }
+      depsCache.set(dir, ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].flatMap(k => Object.keys(json[k] || {})));
+    }
+    for (const n of depsCache.get(dir)) names.add(n);
+  }
+  return names;
+}
+// An import path this search cannot follow: not relative, not `@/`, and neither a node built-in nor a package the
+// project depends on (`~/rule`, `#rule`, `$lib/rule`, a tsconfig `paths` alias, a `baseUrl` path).
+function unresolvablePath(repo, file, spec) {
+  if (resolveSpec(repo, file, spec)) return false;
+  if (spec.startsWith('node:')) return false;
+  const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+  return !(builtinModules.includes(pkg) || dependencyNames(repo, file).has(pkg));
+}
+
 // The lines of a JS/TS file that name a symbol without calling it: import statements (all their lines),
 // export lists and `export … from`, and `export default X;` (2026-11-12, audit C19: a component used in
 // 4 files counted 12 "callers").
@@ -823,6 +979,8 @@ function jsSkipLines(repo, file) {
         if (/[};]|\bfrom\s*['"`]|^\s*import\s+['"`]/.test(lines[j])) { i = j; break; }
       }
     }
+    // A const { a: b } = require('./x') destructuring declares names; it does not call them.
+    for (const s of jsStatements(repo, file)) if (s.kind === 'require') for (let l = s.from; l <= s.to; l++) skip.add(l);
     skipCache.set(file, skip);
   }
   return skipCache.get(file);
@@ -850,14 +1008,23 @@ function declaringType(lines, at) {
 const memberDecl = name => new RegExp(`^\\s*(?!(?:return|await|throw|yield|new|else|case|using|var|in|is|not|select|let|where|from|orderby|group|join|on|into)\\b)[A-Za-z_][\\w<>\\[\\],.? ]*?\\s${escapeRe(name)}\\s*(?:<[^>()]*>)?\\s*\\(`);
 
 export function callers(repo, symbols) {
-  return symbols.map(({ name, file, shared = true, at }) => {
+  // One search per name, however many files define it: a plan can name a function that two planned files each
+  // define, and both rows read the same hits (2026-11-17). The hits are only filtered, never changed.
+  const searched = new Map();
+  const search = (name) => {
     // --untracked: a caller in a new file not yet added to git counts too (2026-11-12, audit C16).
-    const all = git(repo, ['grep', '--untracked', '-n', '-w', '-I', '--no-color', '-e', name], { allowFail: true }).split(/\r?\n/).filter(Boolean)
+    if (!searched.has(name)) searched.set(name, git(repo, ['grep', '--untracked', '-n', '-w', '-I', '--no-color', '-e', name], { allowFail: true }).split(/\r?\n/).filter(Boolean)
       .map(l => { const m = /^(.+?):(\d+):(.*)$/.exec(l); return m ? { file: m[1], line: Number(m[2]), text: m[3] } : null; })
-      .filter(r => r && CODE.test(r.file) && !SKIP_PATH.test(r.file));
+      .filter(r => r && CODE.test(r.file) && !SKIP_PATH.test(r.file)));
+    return searched.get(name);
+  };
+  return symbols.map(({ name, file, shared = true, at }) => {
+    const all = search(name);
     let rows = all.filter(r => (shared || r.file === file) && defName(r.text) !== name && !/^\s*(?:\/\/|\*|#)/.test(r.text));
+    let follow = null;
     if (shared && JS.test(file)) {
-      const reach = reachingFiles(repo, file, name, [...new Set(rows.map(r => r.file))]);
+      follow = followExport(repo, file, name);
+      const reach = new Set([...reachingFiles(repo, file, name, jsFileList(repo)), ...follow.files]);
       rows = rows.filter(r => reach.has(r.file));
     }
     // C#: only files that name the declaring type count, and a call through another type that declares the
@@ -902,19 +1069,67 @@ export function callers(repo, symbols) {
       return n;
     };
     const counted = rows.map(r => ({ ...r, n: usesOf(r) })).filter(r => r.n > 0);
+    // JS/TS: a caller that imports the name under another name (`{ validate as check }`, `{ validate: check }`
+    // from a require or dynamic import, a default import, a barrel's `export { validate as check } from`) never
+    // writes the name again, so the search above found only its import line. followExport finds those files by
+    // their import path, through any chain of barrels, and the uses of each local name are counted here. A file
+    // whose import statement names the function through a path this search cannot resolve, or that holds a
+    // computed import / require while it uses the name, makes the count UNKNOWN, never zero (2026-11-17,
+    // audit 4).
+    const unresolved = [];
+    if (shared && JS.test(file)) {
+      const word = a => new RegExp(String.raw`(?<![\w$.])` + escapeRe(a) + String.raw`(?![\w$])`, 'g');
+      const bare = (text, a) => word(a).test(text);
+      const countLine = (f, lineText, i, matchers) => {
+        const code = codeOnly(lineText);
+        let n = 0;
+        for (const [re, len] of matchers) n += [...code.matchAll(re)].filter(m => !code.slice(0, m.index).endsWith('</') && !/^\s*:/.test(code.slice(m.index + len(m)))).length;
+        if (!n) return;
+        const had = counted.find(r => r.file === f && r.line === i + 1);
+        if (had) had.n += n; else counted.push({ file: f, line: i + 1, text: lineText, n });
+      };
+      for (const f of follow.files) {
+        if (SKIP_PATH.test(f)) continue;
+        const matchers = [];
+        for (const a of follow.local.get(f) || []) if (a !== name && a !== 'default') matchers.push([word(a), m => m[0].length]);
+        for (const { ns, exported } of follow.ns.get(f) || []) {
+          if (exported === name || exported === 'default') continue;
+          matchers.push([new RegExp(String.raw`(?<![\w$.])` + escapeRe(ns) + String.raw`\s*\.\s*` + escapeRe(exported) + String.raw`(?![\w$])`, 'g'), m => m[0].length]);
+        }
+        if (!matchers.length) continue;
+        const skip = jsSkipLines(repo, f);
+        fileText(repo, f).split(/\r?\n/).forEach((lineText, i) => { if (!skip.has(i + 1)) countLine(f, lineText, i, matchers); });
+      }
+      for (const f of new Set(all.map(r => r.file))) {
+        if (f === file || follow.files.has(f) || !JS.test(f) || TEST_FILE.test(f) || SKIP_PATH.test(f)) continue;
+        const codeLinesOf = jsCodeText(repo, f).split('\n').map(codeOnly);
+        if (!codeLinesOf.some(l => bare(l, name))) continue;
+        if (codeLinesOf.some(l => defName(l) === name)) continue;
+        const text = jsCodeText(repo, f);
+        const names = s => s.imported.some(im => im.name === name) || (s.ns && new RegExp(String.raw`(?<![\w$.])` + escapeRe(s.ns) + String.raw`\s*\.\s*` + escapeRe(name) + String.raw`(?![\w$])`).test(text));
+        const bad = jsStatements(repo, f).some(s => s.target === null && unresolvablePath(repo, f, s.spec) && names(s))
+          || codeLinesOf.some(l => /(?<![\w$.])(?:import|require)\s*\(\s*[^'"`\s)]/.test(l));
+        if (bad) unresolved.push(f);
+      }
+    }
     const uses = list => list.reduce((n, r) => n + r.n, 0);
     const code = counted.filter(r => !TEST_FILE.test(r.file));
-    return { name, file, count: uses(code), tests: uses(counted) - uses(code), where: code.slice(0, 6).map(r => (r.file === file ? path.basename(r.file) : r.file) + ':' + r.line) };
+    const row = { name, file, count: uses(code), tests: uses(counted) - uses(code), where: code.slice(0, 6).map(r => (r.file === file ? path.basename(r.file) : r.file) + ':' + r.line) };
+    if (unresolved.length) row.unresolved = unresolved;
+    return row;
   });
 }
 const SKIP_PATH = /(?:^|\/)(?:node_modules|dist|build|bin|obj|\.claude|\.agents|docs\/db)\//i;
 
-export function decide(found, callerRows, files) {
+// `plan`: the callers signal names its hit file:Function, as the other hits of a plan do (signals); a diff names
+// the function alone.
+export function decide(found, callerRows, files, { plan = false } = {}) {
   const logic = files.filter(f => KIND(f.name) === 'code' && !NOT_LOGIC.test(f.name) && !GENERATED.test(f.name));
   const lines = logic.reduce((n, f) => n + f.added.length + f.removed.length, 0);
   if (lines > 400 || logic.length > 30) found.set('split', [`${logic.length} code files, ${lines} lines`]);
-  const many = callerRows.filter(c => c.count > 10);
-  if (many.length) found.set('callersMany', many.map(c => `${c.name} ×${c.count}`));
+  // An unresolved caller count counts as more than 10: unknown is never zero (2026-11-17, audit 4).
+  const many = callerRows.filter(c => c.count > 10 || (c.unresolved && c.unresolved.length));
+  if (many.length) found.set('callersMany', many.map(c => `${plan ? path.basename(c.file) + ':' : ''}${c.name} ×${c.unresolved && c.unresolved.length && c.count <= 10 ? '?' : c.count}`));
   let size = files.length && files.every(f => KIND(f.name) !== 'code' && !RE.infra.test(f.name) && !RE.lockfile.test(f.name) && !/package\.json$|\.csproj$/i.test(f.name)) ? 'tiny' : 'small';
   for (const key of found.keys()) if (SIZES.indexOf(SIGNALS[key].size) > SIZES.indexOf(size)) size = SIGNALS[key].size;
   return { size, lines, codeFiles: logic.length };
@@ -932,27 +1147,40 @@ export function roles(size, found) {
   return ['boss + expert panel before code (Pragmatist + a seat per open question)', ...seats.map(s => '+ ' + s), 'risk reviewer (Opus) on the risk files', reviewers];
 }
 
-// `names` (plan mode only): the names the places list searched; each one defined in a planned file is read whole.
+// A planned path as git spells it: Windows reads `src/Lib.ts` from `src/lib.ts`, but a caller's file is compared as
+// text with the names git prints (2026-11-17, audit 5: a planned file in another letter case counted no caller).
+function spelledByGit(repo, names) {
+  const listed = git(repo, ['-c', 'core.quotepath=off', 'ls-files', '--cached', '--others', '--exclude-standard'], { allowFail: true }).split(/\r?\n/).filter(Boolean);
+  const exact = new Set(listed), lower = new Map(listed.map(f => [f.toLowerCase(), f]));
+  return names.map(n => { const c = path.posix.normalize(n); return exact.has(c) ? c : (lower.get(c.toLowerCase()) || n); });
+}
+// `names` (plan mode only): the names the places list searched; each one defined in a planned file is read whole
+// and its callers are counted (plannedSymbols), as a diff counts the callers of each changed function.
 export function sizeTask({ repo, base, files: planned, names = null }) {
   const root = path.resolve(git(path.resolve(repo), ['rev-parse', '--show-toplevel']).trim());
   texts.clear();
   oldTexts.clear();
   importsCache.clear();
   skipCache.clear();
+  jsListCache.clear(); stmtCache.clear(); indexCache.clear(); depsCache.clear();
   const plan = !base;
   const named = plan && names && names.length ? names : null;
   const extra = { renamed: [], binary: [] };
-  const files = plan ? planned.map(n => n.replace(/\\/g, '/')).map(name => ({ name, added: [], removed: [], hunks: [], named: named && KIND(name) === 'code' ? namedDefinitions(root, name, named) : [] })) : readDiff(root, base, extra);
+  const files = plan ? spelledByGit(root, planned.map(n => n.replace(/\\/g, '/'))).map(name => ({ name, added: [], removed: [], hunks: [], named: named && KIND(name) === 'code' ? namedDefinitions(root, name, named) : [] })) : readDiff(root, base, extra);
   const found = signals(files, { plan, repo: root });
   const moved = [];
-  const symbols = plan ? [] : allChangedSymbols(root, files, moved);
-  const callerRows = callers(root, symbols.slice(0, MAX_SYMBOLS));
-  const { size, lines, codeFiles } = decide(found, callerRows, files);
+  const symbols = plan ? plannedSymbols(files) : allChangedSymbols(root, files, moved);
+  const allRows = callers(root, symbols);
+  const { size, lines, codeFiles } = decide(found, allRows, files, { plan });
+  // Every function is analysed; only the printed rows are capped.
+  // The rows that raised the callers signal are printed first, so the cap never hides the row that decided the size.
+  const raised = c => c.count > 10 || (c.unresolved && c.unresolved.length);
+  const callerRows = [...allRows.filter(raised), ...allRows.filter(c => !raised(c))].slice(0, MAX_SYMBOLS);
   let stack = null; try { stack = readStack(root); } catch { /* not fatal */ }
   const read = [...new Set(files.flatMap(f => (f.named || []).map(d => `${path.basename(f.name)}:${d.name}`)))];
   const unread = named ? named.filter(n => !files.some(f => (f.named || []).some(d => d.name === n))) : [];
   return { mode: plan ? 'plan' : 'diff', size, stack: stack && stack.line, signals: Object.fromEntries(found), roles: roles(size, found), callers: callerRows,
-    moreSymbols: Math.max(0, symbols.length - MAX_SYMBOLS), moved, files: files.length, codeFiles, lines, renamed: extra.renamed, binary: extra.binary,
+    moreSymbols: Math.max(0, allRows.length - MAX_SYMBOLS), moved, files: files.length, codeFiles, lines, renamed: extra.renamed, binary: extra.binary,
     names: named, read, unread };
 }
 
@@ -962,8 +1190,10 @@ export function format(r, was) {
   const why = Object.entries(r.signals).map(([k, w]) => `${SIGNALS[k].label} (${w.join(', ')})`);
   out.push(`SIZE: ${r.size} (${r.mode}) — ${why.length ? why.join('; ') : r.size === 'tiny' ? 'docs, tests, texts or styles only' : 'behavior code with no risk signal'}`);
   out.push('  roles: ' + r.roles.join('; '));
-  const named = r.callers.filter(c => c.count || c.tests).map(c => `${c.name} ×${c.count}${c.tests ? ` (+${c.tests} in tests)` : ''}${c.where.length ? ' [' + c.where.join(', ') + ']' : ''}`);
-  if (r.moreSymbols) named.push(`+${r.moreSymbols} more changed functions not counted`);
+  // A plan can count one name in two planned files: each of those rows then carries its file (file:Function).
+  const twice = c => r.callers.some(d => d !== c && d.name === c.name);
+  const named = r.callers.filter(c => c.count || c.tests || (c.unresolved && c.unresolved.length)).map(c => `${twice(c) ? path.basename(c.file) + ':' : ''}${c.name} ×${c.unresolved && c.unresolved.length ? (c.count > 10 ? c.count : '?') : c.count}${c.unresolved && c.unresolved.length ? ` (not resolved: ${c.unresolved.join(', ')})` : ''}${c.tests ? ` (+${c.tests} in tests)` : ''}${c.where.length ? ' [' + c.where.join(', ') + ']' : ''}`);
+  if (r.moreSymbols) named.push(`(+${r.moreSymbols} more ${r.mode === 'plan' ? 'named' : 'changed'} functions, all analysed; rows not printed)`);
   if (named.length) out.push('  callers: ' + named.join('; '));
   if (r.moved && r.moved.length) out.push('  moved, callers not counted: ' + r.moved.map(m => `${m.name} (${m.file} → ${m.to})`).join(', '));
   if (r.mode === 'plan' && !r.names) out.push('  hint: pass --names <the places list names> so the plan reads the code it will change');

@@ -15,6 +15,9 @@
 //                  on a tiny, small or medium change only the Claude fresh eyes (tiny and small 2026-11-11;
 //                  medium 2026-11-12, user-approved sizes). A medium change keeps the full brief, and its one
 //                  review gets the checklist sentence.
+//                  2026-11-17 (audit S4): on a big change the Test designer runs before code and its cases
+//                  become the tests, so its line is left out once its report is saved in the notes folder (or
+//                  with --designer-done); launched again after the proof, it repeated the planning.
 //
 // 2026-11-07: a brief copied by hand from the last round lacked the newest rule; the designer got
 // other lines than the reviewers; launch prompts drifted between rounds; the diff named a moving
@@ -35,6 +38,7 @@
 //
 // Usage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file>
 //          [--repo <path>] [--base <ref>] [--outside <file>] [--places <file>] [--size <size>] [--proof-log <file>]
+//          [--designer-done]
 //   --ticket     the ticket and QA text, verbatim
 //   --lines      every requirement line of the ticket, one per line (the check-ticket-lines file)
 //   --check      what must hold, one line each, each starting with its source tag; numbered C1..Cn
@@ -46,6 +50,8 @@
 //                answer is used, and tiny or small adds the focused budget and the one-review launch
 //   --proof-log  a red-proof.mjs --log file; give it once per proof (server, page); the result lines of
 //                each go into the framed brief, with a note when the code changed after that proof ran
+//   --designer-done  (no value) the Test designer already ran before code, and its report is not saved in the
+//                notes folder (the folder of --out) as test-designer.md, test-designer-report.md or test-design.md
 // Run it before the Test designer starts, and again after the proof run, before the reviewers:
 // the second run adds the callers and the proof. Exit 0: written. 2: usage error.
 import fs from 'node:fs';
@@ -172,7 +178,10 @@ export function sizeFacts(repo, base, { script = path.join(here, 'size-check.mjs
 export function signalFiles(r) {
   const files = {};
   for (const [key, where] of Object.entries(r.signals)) {
-    files[key] = key === 'callersMany' ? r.callers.filter(c => where.includes(`${c.name} ×${c.count}`)).map(c => c.file)
+    // 2026-11-17: matched on the function name (the text before " ×", after an optional "<basename>:" prefix), so
+    // "name ×?" (count unknown) and plan mode's "base:name ×n" still name the defining file; same-named ones all list.
+    const names = new Set(key === 'callersMany' ? where.map(w => String(w).replace(/ ×[^ ]*$/, '')) : []);
+    files[key] = key === 'callersMany' ? r.callers.filter(c => names.has(c.name) || [...names].some(n => n.endsWith(`:${c.name}`))).map(c => c.file)
       : key === 'split' ? [] : where.map(String);
   }
   return files;
@@ -193,13 +202,18 @@ export function chooseSize(facts, routed) {
   return { size, note: asked && measured && asked !== measured ? `size: routed ${asked}, measured ${measured} → using ${size}` : '' };
 }
 
-const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`; or "no findings" and what you checked. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any. Last, one line `ONE JOB: yes|no`: does this PR do more than one thing? A yes is also a `Question` finding that names the jobs (user rule 2026-11-15).';
+// The sentence on the checklist line (2026-11-17, review score): a finding that names its line in brackets after
+// the kind can be counted by kind across tasks (hooks/lib/transcript-scan.js noteClass, review-score.mjs).
+const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`; or "no findings" and what you checked. When a finding falls under a line of the review checklist, name that line in round brackets ( ) after the kind, as the checklist names it (CALLERS, CLIENT STATE, DATABASE, FAILURES / LOCALES, USERS FOUND BY SEARCH, …): `Bug (CLIENT STATE) — file:line — …`. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any. Last, one line `ONE JOB: yes|no`: does this PR do more than one thing? A yes is also a `Question` finding that names the jobs (user rule 2026-11-15).';
 // The standing rules. A new rule replaces one of these or becomes a script check. The last two (2026-11-16, PR #784:
 // a teammate found 6 real issues after 5 reviewers passed the PR): the author's design was never attacked, and weak
 // spots passed because "the old code does it too".
+// 2026-11-17 (audit, review brief): the test rule's last sentence. Fresh eyes never see the Check lines, and a
+// ticket seldom names every access, concurrency or rollback rule, so a missing test for a rule the change itself
+// adds was only an EXTRA TEST line. It is a Gap now; EXTRA TEST is for every other case.
 const RULES = [
   '- A `Question` is only for what the ticket lines above leave open: quote the line that leaves it open. A question those lines already answer (an "Expected" line, a rule row) is not listed; check the change against that answer instead. A better design is a different `Question`: see the design rule below.',
-  '- A test weakness on a Check line is reported as a concrete break: the change to the product code (file, what changes) that the tests would let through, and the test that should then fail. A case that no Check line covers and the ticket does not name is an `EXTRA TEST:` line (one line: the case and why it matters), not a finding: the user decides it.',
+  '- A test weakness on a Check line is reported as a concrete break: the change to the product code (file, what changes) that the tests would let through, and the test that should then fail. A case that no Check line covers and the ticket does not name is an `EXTRA TEST:` line (one line: the case and why it matters), not a finding: the user decides it. But a missing test for a correctness or security rule that this change adds, widens or newly exposes (access, tenant, a concurrent or repeated request, a rollback, a failure path) is a `Gap` finding, whatever the ticket says; `EXTRA TEST:` is for every other case.',
   '- A defect on a path the change neither touches, exposes nor makes reachable goes under `OUTSIDE PR:`. A problem outside the ticket that is already listed is not reported, unless this change alters or worsens it; then it is a finding.',
   '- Attack the design, not only the code: is this the best way to do the job, and does the repo already do the same kind of job another way (a queue table and its worker, a shared helper, an existing screen)? A better way is a `Question` finding that names it, with file:line. A `[design]` Check line is the author\'s choice, never a goal: a change that only matches it has not passed.',
   '- "The old code does it too" or "the other calls do the same" is never a pass. When the change relies on, copies or widens a weak spot (a token never cleared, an error kept as text, a missing retry), it is a `Gap` or `Bug` finding that names the weak spot; the user decides it.',
@@ -401,18 +415,36 @@ function areaLine(changed = []) {
   return `Area: ${[code.length ? 'the changed files ' + code.join(', ') : '', tests.length ? 'the changed tests ' + tests.join(', ') : ''].filter(Boolean).join('; ')}.`;
 }
 
+// 2026-11-17 (audit S4): on a Big task the Test designer runs before code, and its SETUP / CASES / BREAKS became
+// the tests. launch.md listed it again after the proof, and "launch every line" ran the planning twice. Its saved
+// report in the notes folder, under any of these names, takes its launch line out. An empty file is no report.
+const DESIGNER_REPORTS = ['test-designer.md', 'test-designer-report.md', 'test-design.md'];
+// A report older than `notBefore` (ms; the newest of the lines and check files) is from before a requirement changed:
+// the designer must run again then, so it does not count.
+export function designerReport(notesDir, notBefore = 0) {
+  return DESIGNER_REPORTS.find(n => {
+    try {
+      const f = path.join(notesDir, n);
+      return fs.readFileSync(f, 'utf8').trim() !== '' && fs.statSync(f).mtimeMs >= notBefore;
+    } catch { return false; }
+  }) || '';
+}
+// Under the designer's line while no report is saved: the same launch.md is written before code and after the proof.
+const DESIGNER_AGAIN = `(Launch it before code. After that, launch it only for a requirement that changed after the plan: its cases are already the tests. Save its report in this folder as ${DESIGNER_REPORTS[0]}, or pass --designer-done, and this line is left out.)`;
+
 // `size`: the size used (chooseSize); big or an unknown size gets the full round. `facts` (sizeFacts) gives the
 // risk files their signals; `changed` (the changed files, as the briefs list them) gives their repo paths and
-// the Test designer's area.
-export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '', facts = null, changed = [] }) {
+// the Test designer's area. `designerDone` (2026-11-17): the designer's saved report (its file name) or
+// '--designer-done'; a big launch then holds no designer line, and one line says why.
+export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '', facts = null, changed = [], designerDone = '' }) {
   const one = ONE_REVIEW[size];
   return [
     '# Launch lines (copy as they are)', '',
     ...(sizeNote ? [sizeNote, ''] : []),
     // The Test designer is a Big-task seat (loop-rare-cases.md, the expert panel); a tiny, small or medium change
     // listed it too, and the line looked like a step to run (2026-11-13).
-    ...(one ? [] : ['## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
-    `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. ${areaLine(changed)} Deliver per your guide.`, '']),
+    ...(one ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
+    `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. ${areaLine(changed)} Deliver per your guide.`, '', DESIGNER_AGAIN, '']),
     '## Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', '',
     `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}Read-only: no builds, no tests, no edits.`, '',
     ...(one ? [one, ''] : [
@@ -430,6 +462,8 @@ function parse(argv) {
   const o = {};
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
+    // The one option with no value (2026-11-17).
+    if (k === '--designer-done') { o['designer-done'] = true; continue; }
     if (!['--out', '--ticket', '--lines', '--check', '--repo', '--base', '--outside', '--places', '--missed', '--size', '--proof-log'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     // --proof-log may come more than once: a server proof and a page proof give two logs.
     if (k === '--proof-log') (o['proof-log'] ||= []).push(argv[++i]);
@@ -492,12 +526,15 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     const chosen = chooseSize(facts, o.size);
     fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof, changed: changedFiles, places }));
     fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size: o.size, changed: changedFiles, places, checks }));
-    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, size: chosen.size, sizeNote: chosen.note, facts, changed: changedFiles }));
+    // 2026-11-17: the notes folder is the folder of --out; a saved report names itself, the flag only says so.
+    const reqTime = Math.max(fs.statSync(o.lines).mtimeMs, fs.statSync(o.check).mtimeMs);
+    const designerDone = designerReport(path.dirname(out), reqTime) || (o['designer-done'] ? '--designer-done' : '');
+    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, size: chosen.size, sizeNote: chosen.note, facts, changed: changedFiles, designerDone }));
     process.stdout.write((chosen.note ? chosen.note + '\n' : '') + (facts.failed ? `SIZE CHECK FAILED: ${facts.failed}\n` : '') +
       `BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.failed ? 'SIZE CHECK FAILED' : facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'} · ${changedFiles.length} changed file(s), ${changedFiles.length - tracked.length} new untracked · places: ${placesState ? `${placesState.count}, ${placesState.open.length} open` : 'none (text-only change)'}\n` +
       `FRESH: ${fresh}\nLAUNCH: ${launch}\n`);
   } catch (error) {
-    process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--places <file>] [--size <size>] [--proof-log <file>]\n');
+    process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--places <file>] [--size <size>] [--proof-log <file>] [--designer-done]\n');
     process.exitCode = 2;
   }
 }

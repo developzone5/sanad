@@ -73,6 +73,8 @@ function sessionParts(dir) {
   ];
   const part3 = [
     { type: 'attachment', timestamp: at(20), attachment: { type: 'queued_command', commandMode: 'task-notification', prompt: '<task-notification>\n<task-id>rv1</task-id>\n<status>completed</status>\n<summary>Agent "review" completed</summary>\n<result>RECOMMEND: PASS\n- Gap — Api/X.cs:9 — a stale comment</result>\n</task-notification>' } },
+    // 2026-11-17 (audit 3): the fixed line below needs a code edit and a passing test after the note's report.
+    ...edit('fx1', 20.5, repo + '/src/Api.cs'), ...shell('fx2', 'dotnet test', passingDotnet, 20.6),
     verdict('NOTE 1: user — "keep the status code as it is"\nNOTE 2: fixed — removed the stale comment at Api/X.cs:9; no behavior change', 21),
     verdict('REVIEW: PASS', 21),
     ...shell('ev1', evidenceCommand('a'), receipt(), 22),

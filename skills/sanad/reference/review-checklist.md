@@ -6,7 +6,7 @@ What a reviewer checks in Sanad Step 3.5 ([loop.md](loop.md)). The whole-diff an
 
 1. `RECOMMEND: PASS|FAIL`
 2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. A confirmed defect, a rare one included, is a Blocker or a Bug. A `Question` is only for what the quoted ticket lines leave open, and it quotes that line.
-3. A test the ticket does not name but this change needs: `EXTRA TEST: <the product change the tests would let through> — <the test that should fail>`.
+3. A test for a case this change does not touch, that the ticket does not name: `EXTRA TEST: <the product change the tests would let through> — <the test that should fail>`. A missing test for a correctness or security rule this change adds, widens or newly exposes (access, tenant, a concurrent or repeated request, a rollback, a failure path) is a `Gap`, whatever the ticket says.
 4. The checklist below, one short line each: `✓`, `✗ <what>` or `– n/a <why>`.
 5. `NOT VERIFIED:` one line. `OUTSIDE PR:` defects on paths the change neither touches, shows nor makes reachable, one line each. A defect on a path the change adds, changes, shows or makes reachable is a finding in item 2, even when the line is older than the branch.
 

@@ -11,6 +11,11 @@ const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'sc
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'size-check-'));
 process.env.SANAD_STATE_DIR = path.join(root, 'state');
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
+// 2026-11-17: no test here sees this machine's own git settings (an alias, a pager, autocrlf, a default branch name).
+const emptyConfig = path.join(root, 'empty.gitconfig');
+fs.writeFileSync(emptyConfig, '');
+process.env.GIT_CONFIG_GLOBAL = emptyConfig;
+process.env.GIT_CONFIG_NOSYSTEM = '1';
 
 // A base commit with the given files, then the change on top (committed, or left in the work tree).
 function change(baseFiles, changed, { commit = true } = {}) {
@@ -402,6 +407,165 @@ test('--names is a usage error with --base, and when it names nothing', () => {
   assert.equal(spawnSync(process.execPath, [script, '--repo', repo, '--files', controllerPath, '--names', ' , '], { encoding: 'utf8', env: process.env }).status, 2);
 });
 
+// 2026-11-17: before code the plan read each named function whole but did not count who calls it, so a task planned
+// small turned big only on its diff (SIZE GREW), when the expert planning step before code was already missed. With
+// --names the plan counts the callers of each named function by the rules of a diff: the import path (JS/TS), the
+// declaring type (C#).
+const dateLib = 'export function formatDate(d) {\n  return d;\n}\n';
+const dateUsers = n => Object.fromEntries(Array.from({ length: n }, (_, i) => [`src/u${i}.ts`, "import { formatDate } from './lib';\nexport const day = formatDate(1);\n"]));
+const planCli = (repo, ...more) => spawnSync(process.execPath, [script, '--repo', repo, ...more], { encoding: 'utf8', env: process.env });
+
+test('plan mode with --names: a planned JS function with 11 importing callers plans big, with the callers signal and the callers line', () => {
+  const repo = change({ 'src/lib.ts': dateLib, ...dateUsers(11) }, {});
+  const r = sizeTask({ repo, files: ['src/lib.ts'], names: ['formatDate'] });
+  assert.equal(r.size, 'big', JSON.stringify(r.callers));
+  assert.deepEqual(r.signals.callersMany, ['lib.ts:formatDate ×11'], 'the hit is named file:Function, as the other hits of a plan');
+  assert.match(r.roles.join('; '), /^boss \+ expert panel before code .*\+ Architect/, 'the experts are called before code, not after it');
+  const out = planCli(repo, '--files', 'src/lib.ts', '--names', 'formatDate');
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /^SIZE: big \(plan\) — a changed function with more than 10 callers \(lib\.ts:formatDate ×11\)$/m, out.stdout);
+  assert.match(out.stdout, /^ {2}callers: formatDate ×11 \[src\/u\d+\.ts:2(?:, src\/u\d+\.ts:2){5}\]$/m, 'the line a diff prints: ' + out.stdout);
+});
+
+test('plan mode with --names: a planned JS function with 2 importing callers stays small; a same-named local function elsewhere and the import lines are no callers', () => {
+  const locals = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`src/page${i}.ts`, 'function formatDate() { return 1; }\nexport const x = formatDate();\n']));
+  const repo = change({ 'src/lib.ts': dateLib, ...dateUsers(2), ...locals }, {});
+  const r = sizeTask({ repo, files: ['src/lib.ts'], names: ['formatDate'] });
+  assert.equal(r.callers.length, 1, JSON.stringify(r.callers));
+  assert.equal(r.callers[0].count, 2, 'one call in each of the two importers: ' + JSON.stringify(r.callers[0]));
+  assert.deepEqual([...r.callers[0].where].sort(), ['src/u0.ts:2', 'src/u1.ts:2']);
+  assert.equal(r.signals.callersMany, undefined);
+  assert.equal(r.size, 'small');
+  const out = planCli(repo, '--files', 'src/lib.ts', '--names', 'formatDate');
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /^SIZE: small \(plan\) — behavior code with no risk signal$/m, out.stdout);
+  assert.match(out.stdout, /^ {2}callers: formatDate ×2 \[src\/u[01]\.ts:2, src\/u[01]\.ts:2\]$/m, out.stdout);
+  const dotted = sizeTask({ repo, files: ['./src/lib.ts'], names: ['formatDate'] });
+  assert.equal(dotted.callers.length && dotted.callers[0].count, 2, 'a planned path written ./src/lib.ts is the same file: ' + JSON.stringify(dotted.callers));
+});
+
+test('plan mode with --names: a planned C# method is counted by its declaring type, not by its bare name', () => {
+  const rules = n => `internal static class ${n}\n{\n    public static void Apply<T>(Validator<T> v)\n    {\n        v.Rule(1);\n    }\n}\n`;
+  const validator = n => `public class ${n} : Validator<Dto>\n{\n    public ${n}()\n    {\n        PublishRules.Apply(this);\n        SettingsRules.Apply(this);\n    }\n}\n`;
+  const days = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Api/Days/Day${i}.cs`, `public class Day${i}\n{\n    public int Run(int q) => OnlineScope.Apply(q);\n}\n`]));
+  const repo = change({
+    'Api/Rules/PublishRules.cs': rules('PublishRules'), 'Api/Rules/SettingsRules.cs': rules('SettingsRules'),
+    'Api/Rules/OnlineScope.cs': 'public static class OnlineScope\n{\n    public static int Apply(int q)\n    {\n        return q;\n    }\n}\n',
+    'Api/CreateValidator.cs': validator('CreateValidator'), 'Api/UpdateValidator.cs': validator('UpdateValidator'), ...days,
+  }, {});
+  const r = sizeTask({ repo, files: ['Api/Rules/PublishRules.cs'], names: ['Apply'] });
+  assert.equal(r.callers.length, 1, JSON.stringify(r.callers));
+  assert.equal(r.callers[0].count, 2, 'PublishRules.Apply: one call in each validator, not the Apply of the other classes: ' + JSON.stringify(r.callers[0]));
+  assert.deepEqual([...r.callers[0].where].sort(), ['Api/CreateValidator.cs:5', 'Api/UpdateValidator.cs:5']);
+  assert.equal(r.signals.callersMany, undefined);
+  assert.equal(r.size, 'small');
+  const many = sizeTask({ repo, files: ['Api/Rules/OnlineScope.cs'], names: ['Apply'] });
+  assert.deepEqual(many.signals.callersMany, ['OnlineScope.cs:Apply ×12'], 'the class with the twelve callers: ' + JSON.stringify(many.callers));
+  assert.equal(many.size, 'big');
+});
+
+test('plan mode with --names: a name with no definition in the planned files gets no count and stays on the "not read" line', () => {
+  const label = 'export function dateLabel(d) {\n  return String(d);\n}\n';
+  const labelUsers = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`src/l${i}.ts`, "import { dateLabel } from './label';\nexport const text = dateLabel(1);\n"]));
+  const repo = change({ 'src/lib.ts': dateLib, ...dateUsers(2), 'src/label.ts': label, ...labelUsers }, {});
+  const names = ['formatDate', 'dateLabel'];
+  const r = sizeTask({ repo, files: ['src/lib.ts'], names });
+  assert.deepEqual(r.callers.map(c => `${c.name} ×${c.count}`), ['formatDate ×2'], 'only the name defined in a planned file is counted: ' + JSON.stringify(r.callers));
+  assert.deepEqual(r.unread, ['dateLabel']);
+  assert.equal(r.signals.callersMany, undefined, 'the 12 callers of a function the plan does not read raise nothing');
+  assert.equal(r.size, 'small');
+  const out = planCli(repo, '--files', 'src/lib.ts', '--names', names.join(','));
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /^ {2}callers: formatDate ×2 \[[^\]]*\]$/m, out.stdout);
+  assert.doesNotMatch(out.stdout, /callers:.*dateLabel/);
+  assert.match(out.stdout, /^ {2}not read \(no definition in the planned files\): dateLabel$/m);
+  // With its own file planned too, the name has a definition: it is read and counted.
+  const both = sizeTask({ repo, files: ['src/lib.ts', 'src/label.ts'], names });
+  assert.deepEqual(both.signals.callersMany, ['label.ts:dateLabel ×12'], JSON.stringify(both.callers));
+  assert.deepEqual(both.unread, []);
+});
+
+test('plan mode with --names: --json carries the callers in the fields a diff gives, and a plan and its diff count alike', () => {
+  const libTest = "import { formatDate } from './lib';\nit('formats', () => { formatDate(2); });\n";
+  const repo = change({ 'src/lib.ts': dateLib, ...dateUsers(11), 'src/lib.test.ts': libTest }, { 'src/lib.ts': dateLib.replace('return d;', 'return String(d);') });
+  const out = planCli(repo, '--files', 'src/lib.ts', '--names', 'formatDate', '--json');
+  assert.equal(out.status, 0, out.stderr);
+  const r = JSON.parse(out.stdout);
+  assert.equal(r.mode, 'plan');
+  assert.equal(r.size, 'big');
+  assert.deepEqual(r.signals.callersMany, ['lib.ts:formatDate ×11']);
+  assert.equal(r.callers.length, 1, out.stdout);
+  const { where, ...row } = r.callers[0];
+  assert.deepEqual(row, { name: 'formatDate', file: 'src/lib.ts', count: 11, tests: 1 });
+  assert.equal(where.length, 6, 'the first six places, as on a diff: ' + JSON.stringify(where));
+  assert.equal(r.moreSymbols, 0);
+  const diff = JSON.parse(planCli(repo, '--base', 'base', '--json').stdout);
+  assert.deepEqual(r.callers, diff.callers, 'the diff of the same function gives the same rows');
+  assert.deepEqual(Object.keys(r).sort(), Object.keys(diff).sort(), 'and the same fields');
+  assert.deepEqual(diff.signals.callersMany, ['formatDate ×11'], 'a diff still names the function alone');
+});
+
+test('plan mode with --names: a local function counts only its own file and an exported one its importers, as on the diff of the same functions', () => {
+  const a = 'function helper(x) {\n  return x;\n}\nexport function shared(y) {\n  return y;\n}\nhelper(1); shared(1);\n';
+  const b = "import { shared } from './a';\nfunction helper() {}\nhelper(); shared(2); shared(3);\n";
+  const repo = change({ 'src/a.ts': a, 'src/b.ts': b }, { 'src/a.ts': a.replace('return x;', 'return x * 2;').replace('return y;', 'return y * 2;') });
+  const planned = sizeTask({ repo, files: ['src/a.ts'], names: ['helper', 'shared'] });
+  assert.deepEqual(planned.callers.map(c => `${c.name} ×${c.count}`), ['helper ×1', 'shared ×3'], 'b.ts has its own helper: ' + JSON.stringify(planned.callers));
+  assert.deepEqual(planned.callers, size(repo).callers, 'the plan and the diff count alike');
+});
+
+test('plan mode with --names: a name defined in two planned files is counted in each, with one search for the name', () => {
+  const rules = n => `public static class ${n}\n{\n    public static int Total(int a)\n    {\n        return a;\n    }\n}\n`;
+  const repo = change({
+    'Api/Rules/PageRules.cs': rules('PageRules'), 'Api/Rules/ScoreRules.cs': rules('ScoreRules'),
+    'Api/Pager.cs': 'public class Pager\n{\n    public int Pages(int rows) => PageRules.Total(rows);\n}\n',
+    'Api/Report.cs': 'public class Report\n{\n    public int First(int a) => ScoreRules.Total(a);\n    public int Second(int a) => ScoreRules.Total(a + 1);\n}\n',
+  }, {});
+  const files = ['Api/Rules/PageRules.cs', 'Api/Rules/ScoreRules.cs'];
+  const r = sizeTask({ repo, files, names: ['Total'] });
+  assert.deepEqual(r.callers.map(c => `${c.file} ×${c.count}`), ['Api/Rules/PageRules.cs ×1', 'Api/Rules/ScoreRules.cs ×2'], JSON.stringify(r.callers));
+  // Git writes each command it runs to the GIT_TRACE file: the search ran once for the name, not once per file.
+  const trace = path.join(root, 'git-trace-two-files.log');
+  const out = spawnSync(process.execPath, [script, '--repo', repo, '--files', files.join(','), '--names', 'Total'], { encoding: 'utf8', env: { ...process.env, GIT_TRACE: trace } });
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /^ {2}callers: PageRules\.cs:Total ×1 \[Api\/Pager\.cs:3\]; ScoreRules\.cs:Total ×2 \[Api\/Report\.cs:3, Api\/Report\.cs:4\]$/m, 'two rows of one name carry their file: ' + out.stdout);
+  const searches = fs.readFileSync(trace, 'utf8').split(/\r?\n/).filter(l => /\bgrep\b.*\bTotal\b/.test(l));
+  assert.equal(searches.length, 1, searches.join('\n'));
+});
+
+test('plan mode with --names: several definitions of a name in one file are one row, shared when any of them is', () => {
+  const fmt = 'public static class Fmt\n{\n    private static string Day(int d)\n    {\n        return d.ToString();\n    }\n\n    public static string Day(DateOnly at)\n    {\n        return Day(at.DayNumber);\n    }\n}\n';
+  const users = Object.fromEntries(Array.from({ length: 3 }, (_, i) => [`Api/U${i}.cs`, `public class U${i}\n{\n    public string X(DateOnly at) => Fmt.Day(at);\n}\n`]));
+  const r = sizeTask({ repo: change({ 'Api/Fmt.cs': fmt, ...users }, {}), files: ['Api/Fmt.cs'], names: ['Day'] });
+  assert.equal(r.callers.length, 1, JSON.stringify(r.callers));
+  assert.equal(r.callers[0].count, 4, 'the three callers in other files and the call in its own file: ' + JSON.stringify(r.callers[0]));
+});
+
+test('plan mode with --names: more than 12 named functions says how many were not counted', () => {
+  const names = Array.from({ length: 15 }, (_, i) => `fn${i}`);
+  const repo = change({ 'src/many.ts': names.map((n, i) => `export function ${n}(a) {\n  return a + ${i};\n}\n`).join('') }, {});
+  const r = sizeTask({ repo, files: ['src/many.ts'], names });
+  assert.equal(r.callers.length, 12);
+  assert.equal(r.moreSymbols, 3);
+  const out = planCli(repo, '--files', 'src/many.ts', '--names', names.join(','));
+  // 2026-11-17: every function is analysed now; only the printed rows are capped.
+  assert.match(out.stdout, /^ {2}callers: \(\+3 more named functions, all analysed; rows not printed\)$/m, out.stdout);
+});
+
+// Must not change: without --names a plan reads file names only and counts no callers.
+test('plan mode without --names counts no callers, whatever the callers of the planned file (the hint line stays)', () => {
+  const repo = change({ 'src/lib.ts': dateLib, ...dateUsers(11) }, {});
+  const r = sizeTask({ repo, files: ['src/lib.ts'] });
+  assert.equal(r.size, 'small');
+  assert.deepEqual(r.callers, []);
+  assert.equal(r.signals.callersMany, undefined);
+  const out = planCli(repo, '--files', 'src/lib.ts');
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /^SIZE: small \(plan\) — behavior code with no risk signal$/m, out.stdout);
+  assert.doesNotMatch(out.stdout, /callers:/);
+  assert.match(out.stdout, /^ {2}hint: pass --names <the places list names> so the plan reads the code it will change$/m);
+});
+
 test('uncommitted work counts; --was fails when the change grew, and usage errors exit 2', () => {
   const svc = 'public class S {\n  private readonly AppDbContext _context;\n  public object Get() { return _context.Items.ToList(); }\n}\n';
   const repo = change({ 'Api/S.cs': svc }, { 'Api/S.cs': svc.replace('.ToList()', '.Where(i => i.Active).ToList()') }, { commit: false });
@@ -629,7 +793,7 @@ test('more than 12 changed functions says how many were not counted', () => {
   assert.equal(r.callers.length, 12);
   assert.equal(r.moreSymbols, 3);
   const out = spawnSync(process.execPath, [script, '--repo', repo, '--base', 'base'], { encoding: 'utf8', env: process.env }).stdout;
-  assert.match(out, /^ {2}callers: .*\+3 more changed functions not counted$/m);
+  assert.match(out, /^ {2}callers: .*\(\+3 more changed functions, all analysed; rows not printed\)$/m);
 });
 
 // 2026-11-12 (audit M6): TUW-243 changed AssignmentPublishRules.Apply; the bare name `Apply` matched every
