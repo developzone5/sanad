@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildBrief, buildFreshBrief, buildLaunch, outsideItems, splitOutside, checkLines, decidedItems, checkSources, coverageProblems, chooseSize, sizeFacts, riskFiles, signalFiles } from '../scripts/review-brief.mjs';
+import crypto from 'node:crypto';
+import { buildBrief, buildFreshBrief, buildLaunch, outsideItems, splitOutside, checkLines, decidedItems, checkSources, coverageProblems, chooseSize, sizeFacts, riskFiles, signalFiles, designerReport } from '../scripts/review-brief.mjs';
 
 // 2026-11-08 (user: "check lines should comes from all tickets"): every ticket line has a Check line,
 // every Check line names its source, and cases outside the ticket are EXTRA TEST lines for the user.
@@ -610,4 +611,182 @@ test('a missing test for a rule this change adds, widens or newly exposes is a G
     assert.match(rule, /a missing test for a correctness or security rule that this change adds, widens or newly exposes \(access, tenant, a concurrent or repeated request, a rollback, a failure path\) is a `Gap` finding, whatever the ticket says/, name);
     assert.match(rule, /`EXTRA TEST:` is for every other case\.$/, name);
   }
+});
+
+// 2026-11-18 (audit finding 6): buildLaunch had no engine input. Every size printed "Fresh eyes (Claude)", and a Big plan
+// printed Claude seats plus Codex as the other engine, whatever engine the task had chosen.
+const engArgs = { brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b' };
+const sha = t => crypto.createHash('sha256').update(t).digest('hex');
+const seats = t => t.split(/^## /m).slice(1).map(s => s.split('\n')[0]);
+const stripEngine = t => t.replace(/^Engine: [^\n]*\n\n/m, '');
+
+// MUST NOT CHANGE (fails only on the engine line on the old code): the Claude plan is byte for byte today's.
+test('the Claude plan is unchanged except its engine line', () => {
+  const gold = { small: 'e63e00d983b7d592c25f66b326c13151bef8daebcc6dd02d892f86b4e8d90caf', medium: 'f14462e6112ef3469d1bab02d8f4c97d456fd358f5f43662e9bf072e9db6a09a', big: '8eb4a517fcf9b9101897ba02e9aa19b19dbc7e1db59aeeed23253d6a2f9b5256' };
+  for (const size of ['small', 'medium', 'big']) {
+    assert.equal(sha(stripEngine(buildLaunch({ ...engArgs, size, engine: 'claude' }))), gold[size], size);
+    assert.equal(buildLaunch({ ...engArgs, size }), buildLaunch({ ...engArgs, size, engine: 'claude' }), size + ': claude is the default');
+  }
+});
+
+test('every launch file says in its first lines which engine it was built for', () => {
+  for (const size of ['small', 'medium', 'big', '']) {
+    const claude = buildLaunch({ ...engArgs, size, engine: 'claude' }).split('\n').slice(0, 4).join('\n');
+    const codex = buildLaunch({ ...engArgs, size, engine: 'codex' }).split('\n').slice(0, 4).join('\n');
+    assert.match(claude, /^Engine: Claude\b/m, size);
+    assert.match(codex, /^Engine: Codex\b/m, size);
+  }
+});
+
+test('a Codex task: small and medium get one Codex fresh-eyes review and no Claude agent', () => {
+  for (const size of ['tiny', 'small', 'medium']) {
+    const launch = buildLaunch({ ...engArgs, size, engine: 'codex' });
+    assert.deepEqual(seats(launch), ['Fresh eyes (Codex) — Bash, run_in_background'], size);
+    assert.doesNotMatch(launch, /Agent independent-reviewer|Agent routine-reviewer|Agent braintrust|Fresh eyes \(Claude\)/, size);
+    assert.match(launch, /codex exec -s read-only -c model_reasoning_effort="xhigh" -C "C:\/r" -o "C:\/n\/codex-fresh\.md"/, size);
+    // 2026-11-18 (finding 2): fresh eyes is the risk reviewer again (loop-rare-cases.md), not the whole-diff role.
+    assert.match(launch, /Your Codex role is sanad-risk-reviewer/, size);
+    assert.doesNotMatch(launch, /sanad-reviewer\b/, size);
+    assert.match(launch, /Read and follow only the brief at C:\/n\/brief-fresh\.md/, size);
+    assert.equal((launch.match(/"You are the independent reviewer/g) || []).length, 1, size);
+  }
+  assert.match(buildLaunch({ ...engArgs, size: 'medium', engine: 'codex' }), /Fill the coverage checklist lines that apply/);
+  assert.doesNotMatch(buildLaunch({ ...engArgs, size: 'small', engine: 'codex' }), /Fill the coverage checklist/);
+});
+
+const CLAUDE_OTHER = 'Fresh eyes (Claude) — Bash, run_in_background (claude -p)';
+test('a Codex task: a big plan is Codex designer, fresh eyes, risk files and whole diff, and Claude is the one other engine', () => {
+  const launch = buildLaunch({ ...engArgs, size: 'big', engine: 'codex', facts: riskFacts, changed: riskChanged });
+  assert.deepEqual(seats(launch), ['Test designer — Bash, run_in_background (Codex sanad-practical-expert)', 'Fresh eyes (Codex) — Bash, run_in_background', 'Risk files (Codex) — Bash, run_in_background',
+    'Whole diff (Codex) — Bash, run_in_background', CLAUDE_OTHER]);
+  assert.equal((launch.match(/codex exec -s read-only -c model_reasoning_effort="xhigh"/g) || []).length, 4);
+  for (const role of ['sanad-practical-expert', 'sanad-reviewer', 'sanad-risk-reviewer']) assert.match(launch, new RegExp(role));
+  // Finding 5: the designer's output file is the name the tool accepts as its saved report, so its line leaves after it ran.
+  for (const f of ['test-designer.md', 'codex-fresh.md', 'codex-risk.md', 'codex-whole.md']) assert.match(launch, new RegExp(`-o "C:/n/${f.replace('.', '\\.')}"`), f);
+  assert.doesNotMatch(launch, /codex-designer\.md/);
+  // Finding 4: the other engine is a shell line a Codex host can run (claude -p), never the Claude-only Agent tool.
+  assert.equal((launch.match(/Agent /g) || []).length, 0, 'no Claude Agent tool call in a Codex host');
+  assert.equal((launch.match(/claude -p --agent independent-reviewer --permission-mode plan /g) || []).length, 1, 'one Claude launch, the other engine');
+  assert.match(launch, /> "C:\/n\/claude-fresh\.md" 2> "C:\/n\/claude-fresh\.log"/);
+  assert.doesNotMatch(launch, /Agent routine-reviewer|Agent braintrust/);
+  // The risk files and the trace list reach the Codex prompt.
+  assert.match(launch, /Api\/Controllers\/FilesController\.cs — server access rules/);
+  assert.ok(launch.includes(ACCESS_Q) && launch.includes(CLOSING_Q));
+  // The Claude other-engine seat is the same one-line fresh eyes.
+  assert.match(launch, /You are the independent reviewer — FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
+  // The designer already ran: the line leaves, the reason stays, the reviewers stay.
+  const done = buildLaunch({ ...engArgs, size: 'big', engine: 'codex', designerDone: 'test-designer.md' });
+  assert.deepEqual(seats(done), ['Fresh eyes (Codex) — Bash, run_in_background', 'Risk files (Codex) — Bash, run_in_background', 'Whole diff (Codex) — Bash, run_in_background', CLAUDE_OTHER]);
+  assert.match(done, /^Test designer: already ran before code \(test-designer\.md\)$/m);
+});
+
+test('hostile characters in a risk file name cannot break out of the Codex prompt quotes', () => {
+  const nasty = [{ name: 'Api/Controllers/Files"$(id)`x`Controller.cs' }];
+  const launch = buildLaunch({ ...engArgs, size: 'big', engine: 'codex', facts: { ...riskFacts, signals: { access: ['Files"$(id)`x`Controller.cs'] } }, changed: nasty });
+  assert.doesNotMatch(launch, /[^\\]\$\(id\)|[^\\]`x`/);
+  assert.match(launch, /\\"\\\$\(id\)\\`x\\`/);
+});
+
+test('the command takes --engine, writes it into launch.md, and refuses another value', () => {
+  const repo = fs.mkdtempSync(path.join(root, 'repo-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'x\n'); git('add', '-A'); git('commit', '-qm', 'base'); git('switch', '-q', '-c', 'fix/e');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'y\n');
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
+  fs.writeFileSync(ticket, 'edit\n'); fs.writeFileSync(lines, '- edit\n'); fs.writeFileSync(check, '- [T1] edited\n');
+  const run = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'), ...extra], { encoding: 'utf8', env, windowsHide: true });
+  const launch = () => fs.readFileSync(path.join(notes, 'launch.md'), 'utf8');
+  let r = run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(launch(), /^Engine: Claude\b/m);
+  assert.match(r.stdout, /^ENGINE: claude$/m);
+  r = run('--engine', 'codex');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^ENGINE: codex$/m);
+  assert.match(launch(), /^Engine: Codex\b/m);
+  assert.match(launch(), /codex exec/);
+  assert.doesNotMatch(launch(), /Agent independent-reviewer/);
+  r = run('--engine', 'gemini');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /--engine must be one of claude, codex/);
+});
+
+// Finding 1: the tool runs twice per task (before code, after the proof) and the written command has no --engine.
+// The engine is saved in the notes folder when given, read back when absent, and a different value is refused.
+test('the engine is kept in the notes folder: a run without --engine keeps it, a different one is refused', () => {
+  const repo = fs.mkdtempSync(path.join(root, 'repo-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'x\n'); git('add', '-A'); git('commit', '-qm', 'base'); git('switch', '-q', '-c', 'fix/e');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'y\n');
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  const ticket = path.join(notes, 'ticket.md'), lines = path.join(notes, 'lines.md'), check = path.join(notes, 'check.md'), out = path.join(notes, 'brief.md');
+  fs.writeFileSync(ticket, 'edit\n'); fs.writeFileSync(lines, '- edit\n'); fs.writeFileSync(check, '- [T1] edited\n');
+  const run = (...extra) => spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--outside', path.join(notes, 'none.md'), ...extra], { encoding: 'utf8', env, windowsHide: true });
+  const launch = () => fs.readFileSync(path.join(notes, 'launch.md'), 'utf8');
+  let r = run('--engine', 'codex');
+  assert.equal(r.status, 0, r.stderr);
+  // The command as loop.md writes it (no --engine): the saved Codex plan stays a Codex plan.
+  r = run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^ENGINE: codex$/m);
+  assert.match(launch(), /^Engine: Codex\b/m);
+  assert.match(launch(), /codex exec/);
+  r = run('--engine', 'codex');
+  assert.equal(r.status, 0, r.stderr);
+  // A different engine for the same task is refused and nothing is rewritten.
+  r = run('--engine', 'claude');
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /this task's engine is codex/);
+  assert.match(launch(), /^Engine: Codex\b/m);
+  // An unreadable saved value is refused too, never read as claude.
+  fs.writeFileSync(path.join(notes, 'engine.txt'), 'gemini\n');
+  r = run();
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /engine\.txt/);
+});
+
+// Finding 5: the designer's saved report is the file its own launch line writes, so a second run drops the line.
+test('a Codex designer report written where its launch line says counts as saved', () => {
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  const first = buildLaunch({ brief: notes.replace(/\\/g, '/') + '/brief.md', fresh: notes.replace(/\\/g, '/') + '/brief-fresh.md', repo: 'C:/r', branch: 'b', size: 'big', engine: 'codex' });
+  const named = /-o "([^"]*)"/.exec(first.split('## Test designer')[1])[1];
+  fs.writeFileSync(named, 'SETUP\nCASES\nBREAKS\n');
+  assert.equal(designerReport(notes), path.basename(named));
+});
+
+// The remote launcher starts Claude agents only: a Codex task is refused with one line, before any ssh.
+const launcher = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'scripts', 'remote', 'orca-launch.sh');
+test('orca-launch.sh: --engine codex is refused in one line before ssh; claude is accepted; the file parses', () => {
+  const bash = spawnSync('bash', ['-n', launcher], { encoding: 'utf8', windowsHide: true });
+  assert.equal(bash.status, 0, bash.stderr);
+  // ssh and orca are made to fail loudly: a refusal must never reach them.
+  const bin = fs.mkdtempSync(path.join(root, 'bin-'));
+  for (const n of ['ssh', 'orca']) fs.writeFileSync(path.join(bin, n), '#!/usr/bin/env bash\necho CALLED-' + n + ' >&2\nexit 99\n', { mode: 0o755 });
+  const run = (...a) => spawnSync('bash', [launcher, ...a], { encoding: 'utf8', windowsHide: true, env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+  for (const args of [['--engine', 'codex', 'env', 'C:/w', 'C:/b.md'], ['--role', 'review', '--engine', 'codex', 'env', 'C:/w', 'C:/b.md'], ['--engine', 'codex', '--role', 'review', 'env', 'C:/w', 'C:/b.md']]) {
+    const r = run(...args);
+    assert.equal(r.status, 2, args.join(' ') + r.stdout + r.stderr);
+    assert.equal(r.stdout.trim().split(/\r?\n/).length, 1, 'one line');
+    assert.match(r.stdout, /^REFUSED: remote launches support Claude tasks only/);
+    assert.doesNotMatch(r.stdout + r.stderr, /CALLED-/);
+  }
+  // Finding 3: an option after the positional arguments is refused, never ignored and never put in the prompt.
+  for (const args of [['env', 'C:/w', 'C:/b.md', '--engine', 'codex'], ['env', 'C:/w', 'C:/b.md', 'note for part 2', '--engine', 'codex'], ['--engine=codex', 'env', 'C:/w', 'C:/b.md'],
+    ['env', 'C:/w', 'C:/b.md', '--engine=codex'], ['env', 'C:/w', 'C:/b.md', 'note', 'extra'], ['env', 'C:/w', 'C:/b.md', '--role', 'review']]) {
+    const r = run(...args);
+    assert.equal(r.status, 2, args.join(' ') + r.stdout + r.stderr);
+    assert.equal(r.stdout.trim().split(/\r?\n/).length, 1, 'one line');
+    assert.match(r.stdout, /^REFUSED: /);
+    assert.doesNotMatch(r.stdout + r.stderr, /CALLED-/, args.join(' '));
+  }
+  const bad = run('--engine', 'gemini', 'env', 'C:/w', 'C:/b.md');
+  assert.equal(bad.status, 2);
+  assert.match(bad.stdout, /^REFUSED: unknown engine/);
+  // Claude passes the argument check and reaches ssh (the fake one).
+  const ok = run('--engine', 'claude', 'env', 'C:/w', 'C:/b.md');
+  assert.match(ok.stdout + ok.stderr, /CALLED-ssh|REFUSED: brief not found/);
+  assert.doesNotMatch(ok.stdout, /remote launches support Claude tasks only/);
 });

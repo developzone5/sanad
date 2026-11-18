@@ -118,13 +118,16 @@ test('the test machine cannot be asked: the run is not credited', async () => {
   assert.match(after.reason, /Cannot read the code on the test machine/);
 });
 
-test('a local run, and an ssh run outside the clone, are not asked about the test machine', async () => {
+// 2026-11-18: the ssh run outside the clone used to PASS here, bound to the local folder only; that is the finding
+// "another spelling of the host skips the binding". It now fails before it starts (still not asked about the test machine).
+test('a local run passes; an ssh run outside the clone is not asked about the test machine and does not pass', async () => {
   const { repo } = fixture();
   let asked = 0;
   const local = await runCommand({ executable: process.execPath, args: ['-e', '0'], cwd: repo, outputRoot: root, remoteProbe: () => { asked++; return { tree: 'x', dirty: '' }; } });
   assert.equal(local.status, 'passed');
   assert.equal(local.remote, undefined);
   const elsewhere = await runCommand({ executable: ssh, args: ['-e', '0', 'pc2', 'docker ps'], cwd: repo, outputRoot: root, remoteProbe: () => { asked++; return { tree: 'x', dirty: '' }; } });
-  assert.equal(elsewhere.status, 'passed');
+  assert.equal(elsewhere.status, 'failed');
+  assert.match(elsewhere.reason, /not bound to the test machine clone/);
   assert.equal(asked, 0);
 });

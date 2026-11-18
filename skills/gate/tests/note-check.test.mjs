@@ -34,7 +34,9 @@ const lib = () => import(pathToFileURL(script).href);
 // A path as the script prints it in a command: in double quotes when it holds a space.
 const quote = (p) => (/\s/.test(p) ? `"${p}"` : p);
 // The id a brief carries ('no-id' when it has none).
-const idOf = (brief) => (/^Brief id: ([0-9a-f]{8})$/m.exec(fs.readFileSync(brief, 'utf8')) || [])[1] || 'no-id';
+// 2026-11-18 (repair 4): the answer names the run, as the brief asks: '<id> g<N>' (idBare: the id alone).
+const idBare = (brief) => (/^Brief id: ([0-9a-f]{8})$/m.exec(fs.readFileSync(brief, 'utf8')) || [])[1] || 'no-id';
+const idOf = (brief) => idBare(brief) + ((g) => (g ? ' g' + g[1] : ''))(/^Generation: (\d+)\s*$/m.exec(fs.readFileSync(brief, 'utf8')));
 // A refusal: exit 2, its reason as the first line of stderr (the usage text under it never counts), and no
 // stack. A crash exits 2 as well, with a stack and another first line.
 function refused(r, reason) {
@@ -224,8 +226,10 @@ test('--record writes one line per note: the three verdicts with their evidence,
   const out = r.stdout.split(/\r?\n/).filter(Boolean);
   assert.equal(out[0], 'NOTE CHECK: 5 note(s) — 1 confirmed, 2 refuted, 2 unsure');
   // A refuted note is not closed and not fixed: the user is asked, with the evidence (rule 5).
-  assert.deepEqual(out.slice(1, 4), [
+  // 2026-11-18: a Question is asked of the user too, with the checker's view (it is never refuted).
+  assert.deepEqual(out.slice(1, 5), [
     'ASK THE USER: K2 · Gap — no test covers a user with two roles in one school — refuted: tests/roles.test.ts:88 already saves a user with two roles in one school',
+    `ASK THE USER: K3 · The export may also include archived rows: you decide. — Question, the checker's view (UNSURE): the export code is not in this repo`,
     'ASK THE USER: K4 · Blocker — src/queue.ts:40 two workers can take the same row — refuted: `src/queue.ts:44` takes the row with a guarded UPDATE, so one worker wins',
     REFUTED_RULE,
   ]);
@@ -268,7 +272,9 @@ test('--record: REFUTED with fewer than 12 characters of evidence counts as UNSU
     `K5 · CONFIRMED · ${EXTRA}`,
   ]);
   assert.match(r.stdout, /^NOTE CHECK: 5 note\(s\) — 1 confirmed, 1 refuted, 3 unsure$/m);
-  assert.deepEqual(starting(r.stdout, 'ASK THE USER: '), ['ASK THE USER: K4 · Blocker — src/queue.ts:40 two workers can take the same row — refuted: src/a.ts:120']);
+  assert.deepEqual(starting(r.stdout, 'ASK THE USER: '), [
+    "ASK THE USER: K3 · The export may also include archived rows: you decide. — Question, the checker's view (UNSURE (no verdict)): no view given",
+    'ASK THE USER: K4 · Blocker — src/queue.ts:40 two workers can take the same row — refuted: src/a.ts:120']);
 });
 
 test('--record: the last verdict line for a note wins; with no refuted note nobody is asked; recorded again, the list follows the newest report', () => {
@@ -285,7 +291,7 @@ test('--record: the last verdict line for a note wins; with no refuted note nobo
     `K2 · UNSURE · ${GAP} — could not find the test file`,
   ]);
   assert.match(r.stdout, /^NOTE CHECK: 5 note\(s\) — 1 confirmed, 0 refuted, 4 unsure$/m);
-  assert.deepEqual(starting(r.stdout, 'ASK THE USER'), []);
+  assert.deepEqual(starting(r.stdout, 'ASK THE USER').filter((l) => !l.startsWith('ASK THE USER: K3 ')), [], 'only the Question (K3) is asked of the user');
   assert.ok(!r.stdout.includes('Refuted notes'), r.stdout);
 
   fs.writeFileSync(f.report, `BRIEF ${f.id}\nREFUTED K1 — src/save.ts:9 returns early on every path, create included\n`);
@@ -344,7 +350,7 @@ test('--record: an answer written for an older brief is refused by its id, and a
   fs.writeFileSync(fresh, 'Bug — src/a.ts:1 alpha is wrong when the list is empty\nGap — no test for beta with two roles\n');
   let r = run(['--brief', '--notes', notes, '--reports', fresh]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  const first = idOf(brief);
+  const first = idBare(brief);
   const firstRows = fs.readFileSync(brief, 'utf8').split(/\r?\n/);
   const late = `BRIEF ${first}\nREFUTED K1 — src/a.ts:3 returns early when the list is empty\nCONFIRMED K2 — no test names beta\n`;
 
@@ -353,7 +359,7 @@ test('--record: an answer written for an older brief is refused by its id, and a
   r = run(['--brief', '--notes', notes, '--reports', codex + ',' + fresh]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(kLines(brief)[0], 'K1 · Blocker · from review-codex.md · Blocker — src/pay.ts:9 money is charged twice on retry');
-  const second = idOf(brief);
+  const second = idBare(brief);
 
   // The first agent answers late. Its K1 was the Bug: recorded, the Blocker would be set aside on the Bug's evidence.
   fs.writeFileSync(report, late);
@@ -362,7 +368,7 @@ test('--record: an answer written for an older brief is refused by its id, and a
   assert.equal(r.stdout, '', 'no totals and no ASK THE USER line');
   assert.equal(fs.existsSync(list), false, 'nothing recorded');
   assert.match(first, /^[0-9a-f]{8}$/, 'the brief carries its id:\n' + firstRows.join('\n'));
-  assert.ok(firstRows.includes('First line of your answer: BRIEF ' + first), 'the agent is asked to repeat the id:\n' + firstRows.join('\n'));
+  assert.ok(firstRows.some((l) => l.startsWith('First line of your answer: BRIEF ' + first)), 'the agent is asked to repeat the id:\n' + firstRows.join('\n'));
   assert.notEqual(second, first, 'other notes, another id');
   refused(r, new RegExp(`answers brief ${first}; the brief in .* is ${second}: the K numbers are not the same notes`));
 
@@ -375,7 +381,7 @@ test('--record: an answer written for an older brief is refused by its id, and a
   assert.equal(fs.existsSync(list), false, 'nothing recorded');
 
   // The answer for the brief on disk is recorded; words before the id line, bold and "Brief id:" are read.
-  fs.writeFileSync(report, `I opened the file the note names.\n\n**Brief id: ${second}**\nCONFIRMED K1 — src/pay.ts:9 charges before the retry check\n`);
+  fs.writeFileSync(report, `I opened the file the note names.\n\n**Brief id: ${idOf(brief)}**\nCONFIRMED K1 — src/pay.ts:9 charges before the retry check\n`);
   r = run(['--record', report, '--notes', notes]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual(kLines(list), [
@@ -391,7 +397,7 @@ test('the brief id follows the notes and the repo; a brief changed after it was 
   const idFor = (...args) => {
     const r = run(['--brief', '--notes', f.notes, ...args]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    return idOf(f.brief);
+    return idBare(f.brief);
   };
   const id = idFor('--reports', f.reports, '--repo', repoA);
   assert.match(id, /^[0-9a-f]{8}$/);
@@ -403,7 +409,7 @@ test('the brief id follows the notes and the repo; a brief changed after it was 
 
   // A K line changed by hand: the id in the brief is no longer the id of its notes.
   const written = fs.readFileSync(f.brief, 'utf8');
-  const answer = `BRIEF ${id}\nCONFIRMED K1 — src/save.ts:12 sends with an empty list\n`;
+  const answer = `BRIEF ${idOf(f.brief)}\nCONFIRMED K1 — src/save.ts:12 sends with an empty list\n`;
   fs.writeFileSync(f.brief, written.replace('K2 · Gap ·', 'K2 · Bug ·'));
   fs.writeFileSync(f.report, answer);
   refused(run(['--record', f.report, '--notes', f.notes]), /does not carry the id of its notes.*run --brief again/);
@@ -434,7 +440,7 @@ test('--brief starts a new check: the last answer and list are removed, and the 
   assert.deepEqual(starting(r.stdout, 'REMOVED: '), [], 'nothing to remove, no line');
 
   // The next round's report holds no note: no brief stays for the old answer to be recorded against.
-  fs.writeFileSync(f.report, `BRIEF ${f.id}\n` + answer);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\n` + answer);
   assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
   const clean = path.join(f.notes, 'review-round-2.md');
   fs.writeFileSync(clean, 'RECOMMEND: PASS\n\nNo Blocker or Bug found.\n');
@@ -562,7 +568,7 @@ test('--record: REFUTED counts only with a file and line in its evidence; dots o
   ]);
   assert.match(r.stdout, /^NOTE CHECK: 5 note\(s\) — 0 confirmed, 2 refuted, 3 unsure$/m);
   // Only a note refuted with a file and line goes to the user as refuted.
-  assert.deepEqual(starting(r.stdout, 'ASK THE USER: ').map((l) => l.slice(0, 'ASK THE USER: K4'.length)), ['ASK THE USER: K4', 'ASK THE USER: K5']);
+  assert.deepEqual(starting(r.stdout, 'ASK THE USER: ').map((l) => l.slice(0, 'ASK THE USER: K4'.length)), ['ASK THE USER: K3', 'ASK THE USER: K4', 'ASK THE USER: K5']);
 });
 
 test('the THEN command runs as printed when the notes path has a space', () => {
@@ -590,11 +596,11 @@ test('--record says that K numbers are not NOTE numbers, in its output and in th
   let r = run(['--record', f.report, '--notes', f.notes]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   // The hooks count the same finding of two reviewer runs twice, and NOTE numbers go on across rounds.
-  assert.deepEqual(r.stdout.split(/\r?\n/).filter(Boolean).slice(2), [REFUTED_RULE, K_RULE, 'WRITTEN: ' + slash(f.list)]);
+  assert.deepEqual(r.stdout.split(/\r?\n/).filter(Boolean).slice(3), [REFUTED_RULE, K_RULE, 'WRITTEN: ' + slash(f.list)]);
   assert.ok(fs.readFileSync(f.list, 'utf8').split(/\r?\n/).includes(K_RULE), 'the list says it too');
   fs.writeFileSync(f.report, `BRIEF ${f.id}\nCONFIRMED K1 — src/save.ts:12 sends with an empty list\n`);
   r = run(['--record', f.report, '--notes', f.notes]);
-  assert.deepEqual(r.stdout.split(/\r?\n/).filter(Boolean).slice(1), [K_RULE, 'WRITTEN: ' + slash(f.list)], 'with no refuted note too');
+  assert.deepEqual(r.stdout.split(/\r?\n/).filter(Boolean).filter((l) => !l.startsWith('ASK THE USER: K3 ')).slice(1), [K_RULE, 'WRITTEN: ' + slash(f.list)], 'with no refuted note too (the Question K3 is asked of the user)');
 });
 
 test('a report that cannot be read is refused by name, never taken as a clean report: empty, or UTF-16 without its byte order mark', () => {
@@ -648,4 +654,278 @@ test('one very long line in the answer is read fast, and a verdict on a long lin
   assert.equal(read.get(1).verdict, 'REFUTED');
   assert.ok(read.get(1).evidence.startsWith('src/a.ts:12 yyy') && read.get(1).evidence.length < 2100, 'the long line is cut, its start is kept');
   assert.deepEqual(read.get(2), { verdict: 'CONFIRMED', evidence: 'src/b.ts:3 has no guard' });
+});
+
+// ---- 2026-11-18 (audit 3 + user decision): the brief binds the code, and a Question is for the user ----
+
+// A real git repository with one committed code file: the brief's id binds its code state.
+function gitRepo() {
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(root, 'gitrepo-')));
+  const git = (...args) => { const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8', windowsHide: true }); assert.equal(r.status, 0, r.stderr); };
+  git('init', '-q');
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.writeFileSync(path.join(dir, 'src', 'roles.ts'), 'export const canSave = (user) => user.role === "admin";\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'init');
+  return dir;
+}
+
+test('C1: the brief id binds the code: the same notes over other code give another id, and an answer for the old code is refused', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  const brief = () => { const r = run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]); assert.equal(r.status, 0, r.stdout + r.stderr); return idBare(f.brief); };
+  const id = brief();
+  assert.match(fs.readFileSync(f.brief, 'utf8'), /^Code: [0-9a-f]{40,64}$/m);
+  assert.equal(brief(), id, 'the same notes over the same code: the same id');
+  // a prose file and the check's own files do not change the id
+  fs.writeFileSync(path.join(repo, 'NOTES.md'), 'a note in prose\n');
+  assert.equal(brief(), id, 'a prose edit keeps the id');
+  // the code goes from a role check to open access: the same notes, another id
+  fs.writeFileSync(path.join(repo, 'src', 'roles.ts'), 'export const canSave = (user) => true;\n');
+  const answer = `BRIEF ${idOf(f.brief)}\nREFUTED K1 — src/roles.ts:1 checks the role before saving, so the claim is false\n`;
+  fs.writeFileSync(f.report, answer);
+  // 2026-11-18 (scoped staleness): the record is no longer refused for any code change; the note whose cited file changed
+  // is UNSURE with no author line (the file roles.ts was changed after the brief).
+  const changed = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(changed.status, 0, changed.stdout + changed.stderr);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · UNSURE \(the code it cites changed: check again\)/);
+  assert.match(changed.stdout, /^CHANGED SINCE THE BRIEF: K1 /m);
+  assert.doesNotMatch(changed.stdout, /ASK THE USER: K1/);
+  const next = brief();
+  assert.notEqual(next, id, 'other code, another id');
+  // the old answer names the old brief: refused too, and the new brief takes its own answer
+  fs.writeFileSync(f.report, answer);
+  refused(run(['--record', f.report, '--notes', f.notes]), /answers brief /);
+  fs.writeFileSync(f.report, answer.replace(/^BRIEF .*$/m, 'BRIEF ' + idOf(f.brief)));
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  // an edit of the cited file between the brief and the record turns the refutation into UNSURE (scoped, 2026-11-18)
+  brief();
+  fs.writeFileSync(f.report, answer.replace(/^BRIEF .*$/m, 'BRIEF ' + idOf(f.brief)));
+  fs.appendFileSync(path.join(repo, 'src', 'roles.ts'), 'export const more = 1;\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · UNSURE \(the code it cites changed: check again\)/);
+});
+
+test('C1: must not change: a folder that is no git repository has no code line and keeps the old id', () => {
+  const f = fixture();
+  const plain = fs.mkdtempSync(path.join(root, 'plain-'));
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', plain]).status, 0);
+  assert.doesNotMatch(fs.readFileSync(f.brief, 'utf8'), /^Code/m);
+});
+
+test('C5: a Question is asked of the user with the checker\'s view, never offered to the author as refuted', () => {
+  // the brief tells the checker what to say about a Question
+  const f = briefed([
+    'REFUTED K3 — src/export.ts:20 already filters archived rows; recommend: keep it as it is',
+    'CONFIRMED K1 — src/save.ts:12 sends with an empty list',
+  ].join('\n') + '\n');
+  const text = fs.readFileSync(f.brief, 'utf8');
+  assert.match(text, /For a Question line.*what the code shows \(file:line\).*recommended answer/);
+  const r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const ask = starting(r.stdout, 'ASK THE USER: K3');
+  assert.equal(ask.length, 1, r.stdout);
+  assert.ok(ask[0].includes('src/export.ts:20 already filters archived rows; recommend: keep it as it is'), ask[0]);
+  assert.match(ask[0], /Question/);
+  assert.doesNotMatch(r.stdout, /THE AUTHOR MAY NOW WRITE/);
+  // no Question line is in the REFUTED rule: only the user's words close it
+  assert.ok(fs.readFileSync(f.list, 'utf8').includes("A Question is never closed here or by the author: the user's words close it; the checker's view is advice."));
+});
+
+// ---- 2026-11-18 (audit 3 repair) ----
+
+test('6: a brief with no --repo, or a repo folder that is no git repository, says CODE: NOT BOUND, and --record repeats it', () => {
+  // no --repo: the current folder is never taken (it may be another repository); the line is in the brief, on the screen and at record
+  const f = fixture();
+  const b = run(['--brief', '--notes', f.notes, '--reports', f.reports]);
+  assert.equal(b.status, 0, b.stdout + b.stderr);
+  assert.match(b.stdout, /^CODE: NOT BOUND /m);
+  assert.match(fs.readFileSync(f.brief, 'utf8'), /^CODE: NOT BOUND /m);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — src/save.ts:12 holds the role check\n`);
+  const r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /^CODE: NOT BOUND /m);   // on stderr: the result lines on stdout stay as they were
+  // a folder that is no git repository: the same
+  const plain = fs.mkdtempSync(path.join(root, 'plain-'));
+  const g = fixture();
+  assert.equal(run(['--brief', '--notes', g.notes, '--reports', g.reports, '--repo', plain]).status, 0);
+  assert.match(fs.readFileSync(g.brief, 'utf8'), /^CODE: NOT BOUND /m);
+  // a repository: bound, no such line
+  const repo = gitRepo();
+  const h = fixture();
+  const hb = run(['--brief', '--notes', h.notes, '--reports', h.reports, '--repo', repo]);
+  assert.doesNotMatch(hb.stdout, /CODE: NOT BOUND/);
+  assert.doesNotMatch(fs.readFileSync(h.brief, 'utf8'), /CODE: NOT BOUND/);
+  // run from inside another repository without --repo: it is not taken as the code of these notes
+  const other = gitRepo();
+  const k = fixture();
+  const inOther = spawnSync(process.execPath, [script, '--brief', '--notes', k.notes, '--reports', k.reports], { encoding: 'utf8', windowsHide: true, cwd: other });
+  assert.equal(inOther.status, 0, inOther.stdout + inOther.stderr);
+  assert.match(inOther.stdout, /^CODE: NOT BOUND /m);
+  assert.doesNotMatch(fs.readFileSync(k.brief, 'utf8'), /^Code root:/m);
+});
+
+// 2026-11-18 (scoped staleness): --record keeps a REFUTED verdict when every file the note and its evidence name is
+// unchanged, whatever else changed since the brief (a plainly right note fixed meanwhile); a touched file makes it UNSURE.
+test('7: a REFUTED stands for an untouched cited file, and is UNSURE for a touched one, a new one or a gone one', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]).status, 0);
+  assert.ok(fs.existsSync(path.join(f.notes, 'note-check-files.json')), 'the file fingerprint is saved beside the brief');
+  assert.doesNotMatch(fs.readFileSync(f.brief, 'utf8'), /roles\.ts/, 'and is not in the brief text');
+  const answer = `BRIEF ${idOf(f.brief)}\nREFUTED K1 — src/roles.ts:1 holds the role check\n`;
+  fs.writeFileSync(f.report, answer);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · REFUTED/);
+  // another file changes (new), the cited one does not: it stands, and the author line is still printed
+  fs.writeFileSync(path.join(repo, 'src', 'other.ts'), 'export const x = 1;\n');
+  fs.writeFileSync(path.join(repo, 'NOTES.md'), 'prose\n');
+  const kept = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(kept.status, 0, kept.stdout + kept.stderr);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · REFUTED/);
+  assert.doesNotMatch(kept.stdout, /CHANGED SINCE THE BRIEF/);
+  // the cited file is edited: UNSURE
+  fs.appendFileSync(path.join(repo, 'src', 'roles.ts'), 'export const more = 1;\n');
+  const touched = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(touched.status, 0, touched.stdout + touched.stderr);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · UNSURE \(the code it cites changed: check again\)/);
+  assert.match(touched.stdout, /1 note\(s\)|5 note\(s\)/);
+  assert.match(touched.stdout, /0 refuted/);
+  // the cited file is gone: UNSURE too
+  fs.rmSync(path.join(repo, 'src', 'roles.ts'));
+  run(['--record', f.report, '--notes', f.notes]);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · UNSURE \(the code it cites changed/);
+  // a brief with no file fingerprint (removed): nothing shows the file unchanged
+  fs.writeFileSync(path.join(repo, 'src', 'roles.ts'), 'export const canSave = (user) => user.role === "admin";\n');
+  fs.rmSync(path.join(f.notes, 'note-check-files.json'));
+  run(['--record', f.report, '--notes', f.notes]);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · UNSURE \(the code it cites changed/);
+});
+
+test('7: a REFUTED that cites a prose file (README.md:1) is UNSURE once that prose file changes', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  fs.writeFileSync(path.join(repo, 'README.md'), 'the limit is 50\n');
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]).status, 0);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — README.md:1 says the limit is 50, so the claim is false\n`);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · REFUTED/);
+  fs.writeFileSync(path.join(repo, 'README.md'), 'the limit is 100\n');
+  run(['--record', f.report, '--notes', f.notes]);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · UNSURE \(the code it cites changed/);
+});
+
+test('7: a note that names no file of the repository is not judged by the files (e.g, a path outside it)', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]).status, 0);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — docs/outside.txt:3 (e.g. the vendor copy) holds the guard\n`);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · REFUTED/);
+});
+
+// 2026-11-18 (scoped staleness): every --brief run has its own generation; an older saved answer is never recorded
+// after a newer one, though the two briefs share one id (the same notes over the same code).
+test('9: an answer written for an older generation of the same brief is refused', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  const brief = () => { const r = run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]); assert.equal(r.status, 0, r.stdout + r.stderr); return fs.readFileSync(f.brief, 'utf8'); };
+  const first = brief(), id = idBare(f.brief);
+  const gen = (text) => Number(/^Generation: (\d+)$/m.exec(text)[1]);
+  const second = brief();
+  assert.equal(idBare(f.brief), id, 'the same notes over the same code share one id');
+  assert.equal(gen(second), gen(first) + 1, 'but not the generation');
+  assert.match(second, new RegExp(`BRIEF ${id} g${gen(second)}`), 'the brief tells the agent to repeat it');
+  const old = `BRIEF ${id} g${gen(first)}\nCONFIRMED K1 — src/save.ts:12 sends with an empty list\n`;
+  const newer = `BRIEF ${id} g${gen(second)}\nREFUTED K1 — src/roles.ts:1 holds the role check\n`;
+  fs.writeFileSync(f.report, newer);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  fs.writeFileSync(f.report, old);
+  refused(run(['--record', f.report, '--notes', f.notes]), /written for generation \d+ of this check; generation \d+ is already recorded|older answer never replaces/);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · REFUTED/, 'the newer record is untouched');
+  // an older answer before anything was recorded is refused too (the brief on disk is newer)
+  const third = brief();
+  fs.writeFileSync(f.report, newer);
+  refused(run(['--record', f.report, '--notes', f.notes]), /written for generation \d+ of this check/);
+  assert.ok(gen(third) > gen(second));
+});
+
+test('9: must not change: the right run is recorded, and again (changed 2026-11-18: an answer with no g part is refused, test 4)', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  const b = run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]);
+  assert.equal(b.status, 0, b.stdout + b.stderr);
+  const id = idBare(f.brief);
+  const g = Number(/^Generation: (\d+)\s*$/m.exec(fs.readFileSync(f.brief, 'utf8'))[1]);
+  fs.writeFileSync(f.report, `BRIEF ${id} g${g}\nCONFIRMED K1 — src/save.ts:12 sends with an empty list\n`);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0, 'the same generation again is no older');
+});
+
+test('8: a Gap or Bug that asks the user to decide is asked of the user with the checker view, never offered to the author', () => {
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  const report = path.join(notes, 'review.md');
+  fs.writeFileSync(report, 'RECOMMEND: FAIL\n- Gap — src/limit.ts:9 the limit is 50 here and 100 in the ticket: you decide which one.\n- Bug — src/save.ts:12 sends with an empty list\n');
+  assert.equal(run(['--brief', '--notes', notes, '--reports', report]).status, 0);
+  const brief = path.join(notes, 'note-check-brief.md');
+  assert.match(fs.readFileSync(brief, 'utf8'), /^K1 · Gap \(asks the user\) · from review\.md · /m);
+  assert.match(fs.readFileSync(brief, 'utf8'), /For a Question line/);
+  const answer = path.join(notes, 'note-check-report.md');
+  fs.writeFileSync(answer, `BRIEF ${idOf(brief)}\nREFUTED K1 — src/limit.ts:9 holds 50, recommend 50\nREFUTED K2 — src/save.ts:12 holds the empty check\n`);
+  const r = run(['--record', answer, '--notes', notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(starting(r.stdout, 'ASK THE USER: K1')[0], /asks the user to decide|Question|decide/);
+  assert.ok(starting(r.stdout, 'ASK THE USER: K1')[0].includes('src/limit.ts:9 holds 50, recommend 50'));
+  assert.match(starting(r.stdout, 'ASK THE USER: K2')[0], /refuted: src\/save\.ts:12/);
+  assert.doesNotMatch(r.stdout, /THE AUTHOR MAY NOW WRITE: NOTE 1/);
+});
+
+// ---- 2026-11-18 (repair 1, 2, 4) ----
+// One refutation of K1 that cites `cite`, then a change of `touch` (a path under the repo) after the brief; the list line of K1.
+function refutedThenChanged(cite, touch, setup = () => {}) {
+  const f = fixture();
+  const repo = gitRepo();
+  setup(repo);
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]).status, 0);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — ${cite(repo)} filters the school id before the upload\n`);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · REFUTED/, 'untouched: the refutation stands');
+  const file = path.join(repo, touch);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, '\nexport const more = 1;\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  return /K1 · UNSURE \(the code it cites changed/.test(fs.readFileSync(f.list, 'utf8'));
+}
+test('1/2: a refutation that cites its file as an absolute Windows path, a leading slash, a diff prefix, a dot-dot folder or brackets is UNSURE once the file changes', () => {
+  const win = (p) => p.replace(/\//g, '\\');
+  const cites = {
+    'backslashes': (repo) => win(repo) + '\\src\\roles.ts:1',
+    'forward slashes with a drive': (repo) => repo.replace(/\\/g, '/') + '/src/roles.ts:1',
+    'leading slash': () => '/src/roles.ts:1',
+    'diff prefix': () => 'b/src/roles.ts:1',
+    'dot dot backslash': () => '..\\src\\roles.ts:1',
+  };
+  for (const [name, cite] of Object.entries(cites)) assert.ok(refutedThenChanged(cite, 'src/roles.ts'), name);
+  assert.ok(refutedThenChanged(() => 'app/[id]/page.tsx:4', 'app/[id]/page.tsx', (repo) => { fs.mkdirSync(path.join(repo, 'app', '[id]'), { recursive: true }); fs.writeFileSync(path.join(repo, 'app', '[id]', 'page.tsx'), 'export default 1;\n'); }), 'brackets');
+  assert.ok(refutedThenChanged(() => 'src/My Upload.cs:9', 'src/My Upload.cs', (repo) => fs.writeFileSync(path.join(repo, 'src', 'My Upload.cs'), 'class A {}\n')), 'a space in the name');
+});
+test('1/2: must not change: a change of another file, or of a file the refutation does not name, leaves it REFUTED', () => {
+  const other = (repo) => fs.writeFileSync(path.join(repo, 'src', 'other.ts'), 'export const a = 1;\n');
+  assert.equal(refutedThenChanged((repo) => repo.replace(/\\/g, '/') + '/src/roles.ts:1', 'src/other.ts', other), false);
+  assert.equal(refutedThenChanged((repo) => repo.replace(/\//g, '\\') + '\\src\\roles.ts:1', 'src/other.ts', other), false);
+});
+test('4: the brief asks for the run number in the first line, and an answer with no g part is refused, an older one too', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  const brief = () => { const r = run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]); assert.equal(r.status, 0, r.stdout + r.stderr); return fs.readFileSync(f.brief, 'utf8'); };
+  const gen = (t) => Number(/^Generation: (\d+)\s*$/m.exec(t)[1]);
+  const first = brief(), second = brief();
+  const id = idBare(f.brief);
+  assert.match(second, new RegExp(`^First line of your answer: BRIEF ${id} g${gen(second)}$`, 'm'));
+  fs.writeFileSync(f.report, `BRIEF ${id} g${gen(second)}\nCONFIRMED K1 — src/save.ts:12 sends with an empty list\n`);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  fs.writeFileSync(f.report, `BRIEF ${id}\nREFUTED K1 — src/roles.ts:1 holds the role check so the text is fine\n`);
+  refused(run(['--record', f.report, '--notes', f.notes]), /names the brief but not the run/);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · CONFIRMED/, 'the newer record is untouched');
+  assert.ok(gen(second) > gen(first));
 });

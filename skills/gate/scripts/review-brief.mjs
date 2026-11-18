@@ -38,8 +38,10 @@
 //
 // Usage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file>
 //          [--repo <path>] [--base <ref>] [--outside <file>] [--places <file>] [--size <size>] [--proof-log <file>]
-//          [--designer-done]
-//   --ticket     the ticket and QA text, verbatim
+//          [--designer-done] [--engine claude|codex]
+//   --engine     the task's engine (2026-11-18, default claude): launch.md names it in its first lines and plans
+//                the task's own reviewers on it (a Codex task: codex exec launches; Claude is then the other engine)
+//   --ticket    the ticket and QA text, verbatim
 //   --lines      every requirement line of the ticket, one per line (the check-ticket-lines file)
 //   --check      what must hold, one line each, each starting with its source tag; numbered C1..Cn
 //                here, and each needs a test tagged [Cn]
@@ -389,21 +391,27 @@ export function riskFiles(signals, changed = []) {
 
 // The risk-files launch line of a big change. With no file named (the size check failed, or the size was set
 // above what it measured), every changed file that is not a test is in scope, and every question is asked.
-function riskLaunch({ brief, facts, changed = [] }) {
+// 2026-11-18 (audit finding 6): the list itself (files and trace questions) is one function, so the Claude agent line
+// and the Codex command line of a task ask the same questions.
+function riskBody({ facts, changed = [] }) {
   const signals = facts && facts.signals;
   const listed = riskFiles(signals, changed);
   const named = Object.keys(TRACE).filter(k => signals && signals[k]);
   const files = listed.length ? listed : changed.filter(f => !TEST_FILE.test(f.name)).map(f => ({ ...f, labels: [] }));
   const why = !signals ? 'the size check gave no signals' : 'the size check named no risk file';
   return [
-    '## Risk files (Claude) — Agent independent-reviewer, run_in_background', '',
-    `You are the independent reviewer — risk files pass (Pass A). Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. Review the risk files below with their callers and writers: answer each trace question for each file by following real inputs through the changed code. Read-only: no builds, no tests, no edits.`,
     listed.length ? 'Risk files (the size check names at most three per signal: another changed file on the same boundary is in scope too):'
       : `Risk files (${why}: every changed file that is not a test):`,
     ...(files.length ? files.map(f => `- ${f.name}${f.labels.length ? ' — ' + f.labels.join('; ') : ''}${f.untracked ? ' ' + NEW_FILE : ''}`) : ["- none yet: the files in the brief's Changed files section"]),
     named.length ? 'Trace list:' : `Trace list (${why}: answer each question that applies; n/a for the rest):`,
     ...[...(named.length ? named : Object.keys(TRACE)).map(k => TRACE[k]), CLOSING].map((q, i) => `${i + 1}. ${q}`),
-    '',
+  ];
+}
+function riskLaunch({ brief, facts, changed = [] }) {
+  return [
+    '## Risk files (Claude) — Agent independent-reviewer, run_in_background', '',
+    `You are the independent reviewer — risk files pass (Pass A). Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. Review the risk files below with their callers and writers: answer each trace question for each file by following real inputs through the changed code. Read-only: no builds, no tests, no edits.`,
+    ...riskBody({ facts, changed }), '',
   ];
 }
 
@@ -436,10 +444,55 @@ const DESIGNER_AGAIN = `(Launch it before code. After that, launch it only for a
 // risk files their signals; `changed` (the changed files, as the briefs list them) gives their repo paths and
 // the Test designer's area. `designerDone` (2026-11-17): the designer's saved report (its file name) or
 // '--designer-done'; a big launch then holds no designer line, and one line says why.
-export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '', facts = null, changed = [], designerDone = '' }) {
+// 2026-11-18 (audit finding 6): the plan follows the engine chosen for the task (engines.md). A Codex task's own
+// reviewers are Codex launches (codex exec, read-only, xhigh, the sanad-* roles) and, on a Big task, Claude is the one
+// other engine; a Claude task is the plan above, with its engine line.
+export const ENGINES = ['claude', 'codex'];
+// Text inside a double-quoted shell argument: a file name from the repo cannot end the quote or run a command.
+const shq = s => String(s).replace(/[\\"$`]/g, '\\$&');
+// Fresh eyes is the risk reviewer again (loop-rare-cases.md; the Claude seat is independent-reviewer), not the
+// whole-diff role, whose file tells it to follow the whole-diff scope and the author's Done means (2026-11-18, finding 2).
+const CODEX_ROLE = { designer: 'sanad-practical-expert', fresh: 'sanad-risk-reviewer', risk: 'sanad-risk-reviewer', whole: 'sanad-reviewer' };
+const roleSentence = role => `Your Codex role is ${role}: read ~/.codex/agents/${role}.toml first and follow it.`;
+function codexRun({ repo, out, log, prompt }) {
+  // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
+  return ['```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shq(out)}" "${shq(prompt)}" < /dev/null > "${shq(log)}" 2>&1`, '```', ''];
+}
+function buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone }) {
+  const one = ONE_REVIEW[size];
+  const dir = path.posix.dirname(String(brief).replace(/\\/g, '/'));
+  // The designer's report is saved under the name designerReport() accepts, so its line leaves after it ran (finding 5).
+  const run = (name, prompt) => codexRun({ repo, out: `${dir}/${name === 'designer' ? DESIGNER_REPORTS[0] : `codex-${name}.md`}`, log: `${dir}/codex-${name}.log`, prompt });
+  const tail = 'Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.';
+  return [
+    '# Launch lines (copy as they are)', '',
+    'Engine: Codex — the reviewers below are Codex launches (codex exec, read-only, xhigh)' + (one ? '.' : '; Claude is the one other engine.'), '',
+    ...(sizeNote ? [sizeNote, ''] : []),
+    ...(one ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Bash, run_in_background (Codex sanad-practical-expert)', '',
+      ...run('designer', `Seat: Test designer. ${roleSentence(CODEX_ROLE.designer)} Read your role guide too: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. ${areaLine(changed)} Deliver per your guide.`),
+      DESIGNER_AGAIN, '']),
+    '## Fresh eyes (Codex) — Bash, run_in_background', '',
+    ...run('fresh', `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.fresh)} ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}${tail}`),
+    ...(one ? [one, ''] : [
+      '## Risk files (Codex) — Bash, run_in_background', '',
+      ...run('risk', [`You are the independent reviewer — risk files pass (Pass A). Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.risk)} Review the risk files below with their callers and writers: answer each trace question for each file by following real inputs through the changed code. ${tail}`, ...riskBody({ facts, changed })].join('\n')),
+      '## Whole diff (Codex) — Bash, run_in_background', '',
+      ...run('whole', `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.whole)} ${WHOLE_DIFF_FULL} ${tail}`),
+      // The Agent tool is Claude Code's; a Codex host runs a shell line (finding 4). `claude -p` prints the report on
+      // stdout; plan mode keeps it read-only, and the independent-reviewer agent file bars Write and Edit.
+      '## Fresh eyes (Claude) — Bash, run_in_background (claude -p)', '',
+      '```bash', `cd "${shq(repo)}" && claude -p --agent independent-reviewer --permission-mode plan "${shq(`You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shq(`${dir}/claude-fresh.md`)}" 2> "${shq(`${dir}/claude-fresh.log`)}"`, '```', '',
+    ]),
+  ].join('\n');
+}
+
+export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '', facts = null, changed = [], designerDone = '', engine = 'claude' }) {
+  if (!ENGINES.includes(engine)) throw new Error('--engine must be one of ' + ENGINES.join(', '));
+  if (engine === 'codex') return buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone });
   const one = ONE_REVIEW[size];
   return [
     '# Launch lines (copy as they are)', '',
+    'Engine: Claude — the reviewers below are Claude agents' + (one ? '.' : '; Codex is the one other engine.'), '',
     ...(sizeNote ? [sizeNote, ''] : []),
     // The Test designer is a Big-task seat (loop-rare-cases.md, the expert panel); a tiny, small or medium change
     // listed it too, and the line looked like a step to run (2026-11-13).
@@ -458,19 +511,34 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
   ].join('\n');
 }
 
+// 2026-11-18 (finding 1): the task's engine is kept in the notes folder (engine.txt, the folder of --out). The tool runs
+// twice per task and the written command carries no --engine: a given value is saved, an absent one is read back
+// (default claude), and a given value that differs from the saved one is refused, never silently replaced.
+export function resolveEngine(notesDir, given) {
+  const file = path.join(notesDir, 'engine.txt');
+  let saved = '';
+  try { saved = fs.readFileSync(file, 'utf8').trim(); } catch { /* no saved engine yet */ }
+  if (saved && !ENGINES.includes(saved)) throw new Error(`${file} holds "${saved}"; it must be one of ${ENGINES.join(', ')}. Fix or delete the file.`);
+  if (given && saved && given !== saved) throw new Error(`this task's engine is ${saved} (saved in ${file}); --engine ${given} differs. Keep ${saved}, or delete the file to start a new task.`);
+  if (given && !saved) fs.writeFileSync(file, given + '\n');
+  return given || saved || 'claude';
+}
+
 function parse(argv) {
   const o = {};
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     // The one option with no value (2026-11-17).
     if (k === '--designer-done') { o['designer-done'] = true; continue; }
-    if (!['--out', '--ticket', '--lines', '--check', '--repo', '--base', '--outside', '--places', '--missed', '--size', '--proof-log'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
+    if (!['--out', '--ticket', '--lines', '--check', '--repo', '--base', '--outside', '--places', '--missed', '--size', '--proof-log', '--engine'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     // --proof-log may come more than once: a server proof and a page proof give two logs.
     if (k === '--proof-log') (o['proof-log'] ||= []).push(argv[++i]);
     else o[k.slice(2)] = argv[++i];
   }
   for (const need of ['out', 'ticket', 'lines', 'check']) if (!o[need]) throw new Error('--' + need + ' is required');
   if (o.size && !SIZES.includes(o.size)) throw new Error('--size must be one of ' + SIZES.join(', '));
+  // 2026-11-18: the task's engine; no saved file names it (engines.md keeps it in the task record), so absent means claude.
+  if (o.engine !== undefined && !ENGINES.includes(o.engine)) throw new Error('--engine must be one of ' + ENGINES.join(', '));
   return o;
 }
 
@@ -524,17 +592,18 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     const ticket = fs.readFileSync(o.ticket, 'utf8');
     const out = path.resolve(o.out), fresh = out.replace(/(\.md)?$/, '-fresh.md'), launch = path.join(path.dirname(out), 'launch.md');
     const chosen = chooseSize(facts, o.size);
+    const engine = resolveEngine(path.dirname(out), o.engine);
     fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: o.size, proof, changed: changedFiles, places }));
     fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size: o.size, changed: changedFiles, places, checks }));
     // 2026-11-17: the notes folder is the folder of --out; a saved report names itself, the flag only says so.
     const reqTime = Math.max(fs.statSync(o.lines).mtimeMs, fs.statSync(o.check).mtimeMs);
     const designerDone = designerReport(path.dirname(out), reqTime) || (o['designer-done'] ? '--designer-done' : '');
-    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, size: chosen.size, sizeNote: chosen.note, facts, changed: changedFiles, designerDone }));
-    process.stdout.write((chosen.note ? chosen.note + '\n' : '') + (facts.failed ? `SIZE CHECK FAILED: ${facts.failed}\n` : '') +
+    fs.writeFileSync(launch, buildLaunch({ brief: out.replace(/\\/g, '/'), fresh: fresh.replace(/\\/g, '/'), repo, branch, size: chosen.size, sizeNote: chosen.note, facts, changed: changedFiles, designerDone, engine }));
+    process.stdout.write((chosen.note ? chosen.note + '\n' : '') + (facts.failed ? `SIZE CHECK FAILED: ${facts.failed}\n` : '') + `ENGINE: ${engine}\n` +
       `BRIEF: ${out} · ${checks.length} check line(s) C1..C${checks.length} · ${outside.other.length + outside.touched.length} known item(s), ${outside.touched.length} in touched files, ${outside.decided.length} decided · callers: ${facts.failed ? 'SIZE CHECK FAILED' : facts.callers ? 'yes' : 'none yet'} · proof: ${proof.length ? 'yes' : 'none yet'} · ${changedFiles.length} changed file(s), ${changedFiles.length - tracked.length} new untracked · places: ${placesState ? `${placesState.count}, ${placesState.open.length} open` : 'none (text-only change)'}\n` +
       `FRESH: ${fresh}\nLAUNCH: ${launch}\n`);
   } catch (error) {
-    process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--places <file>] [--size <size>] [--proof-log <file>] [--designer-done]\n');
+    process.stderr.write('REVIEW-BRIEF: ' + error.message + '\nUsage: node review-brief.mjs --out <brief.md> --ticket <file> --lines <file> --check <file> [--repo <path>] [--base <ref>] [--outside <file>] [--places <file>] [--size <size>] [--proof-log <file>] [--designer-done] [--engine claude|codex]\n');
     process.exitCode = 2;
   }
 }

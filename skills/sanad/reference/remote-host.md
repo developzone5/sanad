@@ -10,7 +10,9 @@ Each part follows the **Fast test loop** and is re-checked as soon as it reports
 
 ## Start agents only through the launcher
 
-`bash ~/.claude/scripts/remote/orca-launch.sh --role <role> <environment> <remote-worktree> <remote-brief> ["one-line note"]`
+`bash ~/.claude/scripts/remote/orca-launch.sh --engine <claude|codex> --role <role> <environment> <remote-worktree> <remote-brief> ["one-line note"]`
+
+- Remote launches start Claude agents only (2026-11-18). Always pass the task's engine: for `codex` the launcher refuses in one line, so a Codex task never gets a Claude agent without the user knowing; run that part on this machine instead.
 
 - Every launch names its role, so the remote uses the same models as Sanad here (user rule 2026-10-29): `code` and `risk-review` (Pass A, fresh-eyes) → Opus (newest); `review` (Pass B), `recheck` (changed lines after a fix), `chore` (tests, logs, test data, design comparison) and `tests` (adds tests, changes no product code) → Sonnet (newest); `judge` → Fable (newest). All at xhigh. The launcher checks the terminal banner and prints `MODEL MISMATCH` when the model is wrong.
 - A `code` helper builds one part only: code, tests, checks, commit, report. It runs no reviewers of its own (user rule 2026-10-29: a helper's own review loop plus the central review doubled every fix's time). The main session reviews each part as it reports and runs the review round of the task's size (loop.md Step 3.5).

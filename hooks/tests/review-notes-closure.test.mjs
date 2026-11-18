@@ -162,7 +162,8 @@ test('B: more FAIL verdict shapes, a side line, a BOM, and one Blocker per repor
 test('C: an incremental scan equals a from-zero scan across the closure steps', () => {
   const steps = [
     run('rv1', 1, REVIEWER, GAP),
-    [...run('nc1', 4, CHECKER(), 'REFUTED 1 — ar.json:12 already holds upload.errorTooBig, so the text is translated'), ...edit(6), ...pass(7)],
+    // 2026-11-18: the edit and the check come before the checker launch: an edit after it cancels the refutation.
+    [...edit(3), ...pass(4), ...run('nc1', 5, CHECKER(), 'REFUTED 1 — ar.json:12 already holds upload.errorTooBig, so the text is translated')],
     [say('NOTE 1: refuted — ar.json:12 holds the key', 9)],
   ];
   const file = path.join(root, 'grow.jsonl');
@@ -254,10 +255,13 @@ test('S2: a later CONFIRMED or UNSURE for a note withdraws its refutation (same 
   assert.deepEqual(outcomes(take('REFUTED 1 — ' + ev + '\nCONFIRMED 3 files hold it')), ['refuted'], 'prose is no verdict');
 });
 
-test('S2: must not change: a note already closed as refuted stays closed after a later CONFIRMED', () => {
+// 2026-11-18 (user decision C4): this was "stays closed"; now a CONFIRMED of a newer checker launch reopens a note closed
+// as refuted. A note closed by the user's words or as fixed stays closed (review-notes-refutation-binding.test.mjs).
+test('S2: a note closed as refuted is reopened by a later CONFIRMED of a newer checker launch', () => {
   const ev = 'REFUTED 1 — ar.json:12 already holds upload.errorTooBig, so the text is translated';
   const r = scanOf([...run('rv1', 1, REVIEWER, GAP), ...run('nc1', 4, CHECKER(), ev), say(REFV, 8), ...run('nc2', 10, CHECKER(), 'CONFIRMED 1 — Upload.cs:9 real')]);
-  assert.deepEqual(outcomes(r), ['refuted']);
+  assert.deepEqual(outcomes(r), [null]);
+  assert.deepEqual(r.refutedNotes, []);
 });
 
 // 2026-11-17 (repair round): wider verdict spellings, the bare P tag, more tag spellings, label and count lines,

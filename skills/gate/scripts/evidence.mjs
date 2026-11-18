@@ -26,9 +26,9 @@ export function isSensitiveKey(key, value) {
   return words.includes('tokens') && value !== undefined && !/^-?\d+(?:\.\d+)?$/.test(String(value).replace(/^["']|["']$/g, ''));
 }
 
-function redactText(text, secrets = []) {
+function redactText(text, secrets = [], withEnv = true) {
   let value = String(text);
-  const fromEnv = Object.entries(process.env).filter(([key]) => /TOKEN|SECRET|PASSWORD|API_?KEY|CONNECTION_?STRING/i.test(key) && !/_TOKENS$/i.test(key)).map(([, v]) => v);
+  const fromEnv = !withEnv ? [] : Object.entries(process.env).filter(([key]) => /TOKEN|SECRET|PASSWORD|API_?KEY|CONNECTION_?STRING/i.test(key) && !/_TOKENS$/i.test(key)).map(([, v]) => v);
   const values = [...secrets, ...fromEnv.filter(v => typeof v === 'string' && !/^\d+$/.test(v.trim()))].filter(v => typeof v === 'string').flatMap(v => [v, ...v.split(/\r?\n/)]).filter(v => v.length >= 4).sort((a, b) => b.length - a.length);
   for (const secret of values) value = value.split(secret).join('[REDACTED]');
   return value
@@ -58,6 +58,12 @@ export function redact(text, secrets = []) {
   }
   return redactText(input, secrets);
 }
+
+// 2026-11-18: the receipt's own command words (executable and args) are masked with the spec's `secrets` and
+// the key=value patterns only, never with environment values: with DB_PASSWORD=test in the environment, the
+// word `test` of `npm-cli.js test` became [REDACTED], and the scanner read the passing receipt as another command.
+// The logs keep the environment masking.
+export function redactCommand(text, secrets = []) { return redactText(String(text), secrets, false); }
 
 // Buffer incomplete lines so a secret split across process chunks is masked
 // before reaching disk. Hitting the bound is a failure, never a clean truncation.
@@ -94,6 +100,12 @@ function sourceGit(cwd, args, extraEnv = {}, input) {
   return execFileSync('git', args, { cwd, env: { ...env, GIT_OPTIONAL_LOCKS: '0', ...extraEnv }, input, encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 }
 
+// Untracked, not ignored: git lists a folder that is its own repository as `dir/` (nested), every other one as a file.
+function untrackedInfo(toplevel) {
+  const all = sourceGit(toplevel, ['ls-files', '--others', '--exclude-standard', '-z']).split('\0').filter(Boolean);
+  return { nested: all.filter(p => p.endsWith('/')), files: all.filter(p => !p.endsWith('/')) };
+}
+
 function sourceTree(toplevel) {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-check-index-'));
   try {
@@ -103,8 +115,13 @@ function sourceTree(toplevel) {
     const entries = sourceGit(toplevel, ['ls-files', '--stage', '-z']);
     sourceGit(toplevel, ['read-tree', '--empty'], env);
     if (entries) sourceGit(toplevel, ['update-index', '-z', '--index-info'], env, entries);
-    sourceGit(toplevel, ['add', '-A', '--', '.'], env);
-    if (/^160000 /m.test(sourceGit(toplevel, ['ls-files', '--stage'], env))) throw new Error('Submodule source cannot be bound by this check.');
+    // 2026-11-18: an untracked folder that is its own Git repository (a scratch clone, a tool's fixture) cannot be
+    // pushed with this repository, and `git add` fails on it before the check judges anything. It is left out of the
+    // temp index. Only a tracked 160000 entry (a real submodule) still blocks, below.
+    const left = untrackedInfo(toplevel).nested.map(dir => ':(exclude,literal)' + dir.replace(/\/+$/, ''));
+    sourceGit(toplevel, ['add', '-A', '--', '.', ...left], env);
+    const gitlink = /^160000 \S+ \d\t(.+)$/m.exec(sourceGit(toplevel, ['ls-files', '--stage'], env));
+    if (gitlink) throw new Error(`Submodule source cannot be bound by this check (${gitlink[1]}).`);
     const tree = sourceGit(toplevel, ['write-tree'], env);
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) throw new Error('Invalid Git source tree.');
     return tree;
@@ -145,11 +162,65 @@ export function remoteTarget(executable, args, toplevel) {
   if (!/^ssh(?:\.exe)?$/i.test(path.basename(String(executable)))) return null;
   const host = configValue(toplevel, 'sanad.remoteHost'), repo = configValue(toplevel, 'sanad.remoteRepo');
   if (!host || !repo) return null;
-  const at = args.indexOf(host);
+  // 2026-11-18: the host is the same machine in any case and with a `user@` in front (DESKTOP-PC2, desktop-pc2,
+  // tester@DESKTOP-PC2); and the line must `cd /d` into the clone (or a folder inside it) as its LAST cd, not only
+  // mention its path: a sibling folder App-old beside App, or a later cd, is another folder's code.
+  const at = args.findIndex(a => hostName(a) === hostName(host));
   if (at < 0 || at === args.length - 1) return null;
-  const flat = text => String(text).replace(/\\/g, '/').toLowerCase();
-  if (!flat(args.slice(at + 1).join(' ')).includes(flat(repo).replace(/\/+$/, ''))) return null;
+  if (!lastCdInside(args.slice(at + 1).join(' '), repo)) return null;
   return { host, repo, sshArgs: args.slice(0, at + 1) };
+}
+const hostName = h => String(h).replace(/^.*@/, '').toLowerCase();
+const flatPath = text => String(text).replace(/\\/g, '/').toLowerCase();
+// True when the last cd / chdir / pushd of a remote line (cmd.exe) ends in `repo` or a folder inside it. A relative
+// cd is read from the folder before it; with no cd, or an unreadable one (a variable), the line is not in the clone.
+// 2026-11-18: a cd written without a space (`cd..\x`, `cd\x`, `cd/d x`) is read too; any cd-like command word the
+// reading below cannot parse (`popd`, `cd%X%`, a bare `cd`) makes the line "not in the clone".
+function lastCdInside(line, repo) {
+  const root = flatPath(repo).replace(/\/+$/, '');
+  let current = null;
+  const text = String(line);
+  const readable = [...text.matchAll(/(?:^|[&|;(])\s*@?(?:cd|chdir|pushd)(?=[\s.\\/"])(?:\s*\/d(?=\s))?\s*("[^"]*"|[^\s&|;)]+)/gi)];
+  const cdWords = [...text.matchAll(/(?:^|[&|;(])\s*@?(?:cd|chdir|pushd|popd)(?![\w-])/gi)];
+  if (readable.length !== cdWords.length) return false;
+  for (const found of readable) {
+    const target = flatPath(found[1].replace(/"/g, '')).replace(/\/+$/, '');
+    if (/[%$]/.test(target)) current = null;
+    else if (/^(?:[a-z]:)?\//.test(target)) current = path.posix.normalize(target);
+    else current = current ? path.posix.normalize(current + '/' + target) : null;
+  }
+  return current !== null && (current === root || current.startsWith(root + '/'));
+}
+// The words of a bound remote line (after the program word of each command) that name a place outside the clone,
+// each read from the folder of the last cd before it (2026-11-18). Options, node_modules and the workflow's tool
+// folders are not places; a word with a variable cannot be read and is left alone.
+function remoteStray(line, repo) {
+  const root = flatPath(repo).replace(/\/+$/, '');
+  const inside = p => p === root || p.startsWith(root + '/');
+  let current = null;
+  for (const words of commandSegments(String(line))) {
+    const cd = /^@?(?:cd|chdir|pushd|popd)(?![\w-])(.*)$/i.exec(words[0]);
+    if (cd) {
+      const rest = [cd[1], ...words.slice(1)].filter(Boolean).filter((w, i) => !(i === 0 && /^\/d$/i.test(w)));
+      const target = flatPath(rest[0] || '').replace(/\/+$/, '');
+      if (!target || /[%$]/.test(target) || /^popd/i.test(words[0])) current = null;
+      else if (/^(?:[a-z]:)?\//.test(target)) current = path.posix.normalize(target);
+      else current = current ? path.posix.normalize(current + '/' + target) : null;
+      continue;
+    }
+    for (let word of words.slice(1)) {
+      if (word.startsWith('-')) { if (!word.includes('=')) continue; word = word.slice(word.indexOf('=') + 1); }
+      const flat = flatPath(word).replace(/\/+$/, '');
+      if (!flat || /[%$<>]/.test(flat) || flat.includes('://') || /(^|\/)(?:node_modules|\.claude|\.agents|\.codex)(\/|$)/.test(flat)) continue;
+      if (/^\/[a-z][^/]*$/.test(flat) || /^\/[a-z][^/]*[:=]/.test(flat)) continue;   // a switch like /d, /nologo or /p:X=Y
+      let place;
+      if (/^(?:[a-z]:)?\//.test(flat)) place = path.posix.normalize(flat);
+      else if (current) place = path.posix.normalize(current + '/' + flat);
+      else continue;
+      if (!inside(place)) return word;
+    }
+  }
+  return null;
 }
 function probeRemote(remote, executable) {
   if (/["&|<>^%\r\n]/.test(remote.repo)) throw new Error('Unsafe sanad.remoteRepo.');
@@ -166,8 +237,163 @@ function changedPaths(dirty, most = 3) {
   return paths.slice(0, most).join(', ') + (paths.length > most ? ` and ${paths.length - most} more` : '');
 }
 
+// 2026-11-18 (audit of the receipt promise): the tool judged a run by its exit code alone, and never looked at the
+// shell line it ran. Four lines that pass for code the run did not check are refused BEFORE the command starts:
+//   1. a pipe, `||`, a single `&` or `;` in the shell line (the ssh remote line, the script of cmd /c, bash -c,
+//      sh -c): the exit code is the LAST command's, so `node run | findstr x` passed when the suite failed;
+//   2. an ssh run that is not bound to the test machine clone (see remoteTarget), and an ssh inside another shell line;
+//   3. `dotnet … --no-build` with no `dotnet build` of the same project earlier in the same line: build output is
+//      not part of the source tree, so the run may test an old build;
+//   4. a path argument inside another Git work tree than the one the receipt is bound to.
+const SHELLS = /^(?:bash|sh|zsh|dash|ksh)$/;
+// The script of a shell wrapper: { script, bash } (bash: single quotes and backslash quote too), or null.
+function wrapperScript(executable, args) {
+  const program = executableWord(executable);
+  if (program === 'cmd') {
+    const i = args.findIndex(a => /^\/[ck]$/i.test(a));
+    return i >= 0 ? { script: args.slice(i + 1).join(' '), bash: false } : null;
+  }
+  if (SHELLS.test(program)) {
+    const i = args.findIndex(a => /^-[a-z]*c[a-z]*$/.test(a));
+    return i >= 0 && i + 1 < args.length ? { script: args[i + 1], bash: true } : null;
+  }
+  // 2026-11-18: powershell / pwsh -Command (-c): the rest of the words are the script; its quotes are ' and ", its escape a backtick.
+  if (program === 'powershell' || program === 'pwsh') {
+    const i = args.findIndex(a => /^-c(?:ommand)?$/i.test(a));
+    return i >= 0 && i + 1 < args.length ? { script: args.slice(i + 1).join(' '), bash: false, ps: true } : null;
+  }
+  return null;
+}
+// The shell line a run hands to a shell: the ssh remote line (after the host), or a wrapper's script.
+function shellLine(executable, args, remote) {
+  if (executableWord(executable) === 'ssh') return { script: remote ? args.slice(remote.sshArgs.length).join(' ') : String(args[args.length - 1] || ''), bash: false };
+  return wrapperScript(executable, args);
+}
+// The first operator outside quotes that lets an earlier command fail while the line's exit code is another command's:
+// `|` `||` `;` a new line, and a single `&`. `&&` and a redirection (`2>&1`, `&>f`) are not.
+function hidingOperator(script, bash, ps) {
+  let quote = null;
+  for (let i = 0; i < script.length; i++) {
+    const ch = script[i];
+    if (quote) { if (ch === quote) quote = null; else if (bash && quote === '"' && ch === '\\') i++; else if (ps && quote === '"' && ch === '`') i++; continue; }
+    if (ch === '"' || ((bash || ps) && ch === "'")) { quote = ch; continue; }
+    if ((bash && ch === '\\') || (ps && ch === '`') || (!bash && !ps && ch === '^')) { i++; continue; }
+    // PowerShell's call operator: a leading `&` is not a background job.
+    if (ps && ch === '&' && script[i + 1] !== '&' && script.slice(0, i).trim() === '') continue;
+    if (ch === '\n') return 'a new line';
+    if (ch === ';') return '";"';
+    if (ch === '|') return script[i + 1] === '|' ? '"||"' : '"|"';
+    if (ch === '&') {
+      if (script[i + 1] === '&') { i++; continue; }
+      if (script[i - 1] === '>' || script[i - 1] === '<' || script[i + 1] === '>') continue;
+      return '"&"';
+    }
+  }
+  return null;
+}
+// The line as commands: split at every operator outside quotes, each part as words without their quotes.
+function commandSegments(script) {
+  const parts = []; let quote = null, now = '';
+  for (let i = 0; i < script.length; i++) {
+    const ch = script[i];
+    if (quote) { if (ch === quote) quote = null; now += ch; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; now += ch; continue; }
+    if (ch === '&' || ch === '|' || ch === ';' || ch === '\n') { parts.push(now); now = ''; continue; }
+    now += ch;
+  }
+  parts.push(now);
+  return parts.map(p => (p.match(/"[^"]*"|'[^']*'|\S+/g) || []).map(w => w.replace(/^["']|["']$/g, ''))).filter(w => w.length);
+}
+function noBuildProblem(executable, args, remote) {
+  const line = shellLine(executable, args, remote);
+  const segments = line ? commandSegments(line.script) : [[executable, ...args]];
+  const built = new Set();
+  const target = (words, from) => (words.slice(from + 1).find(w => !w.startsWith('-')) || '').toLowerCase();
+  for (const words of segments) {
+    const at = words.findIndex(w => executableWord(w) === 'dotnet');
+    if (at < 0) continue;
+    const verb = (words[at + 1] || '').toLowerCase();
+    if (verb === 'build' || verb === 'msbuild') { if (!words.includes('--no-build')) built.add(target(words, at + 1)); continue; }
+    if (words.includes('--no-build') && !built.has(target(words, at + 1))) {
+      return 'The command skips the build (--no-build) and no "dotnet build" of the same project runs before it in this line. Build output is not part of the source tree, so the run may test an old build. Run it without --no-build, or put the build first in the same line.';
+    }
+  }
+  return null;
+}
+// A path argument (or the value of --opt=path, or a word of a script) that lies in another Git work tree than `toplevel`.
+// Tool folders of the workflow itself and node_modules are not checkouts of the code under test.
+function otherCheckout(args, cwd, toplevel) {
+  const same = (a, b) => lowerPath(a) === lowerPath(b);
+  const tools = ['.claude', '.agents', '.codex'].map(d => lowerPath(path.join(os.homedir(), d)));
+  const words = new Set();
+  for (const a of args) {
+    words.add(a);
+    if (a.startsWith('-') && a.includes('=')) words.add(a.slice(a.indexOf('=') + 1));
+    // 2026-11-18: a script is split at & | ; ( ) too (`cd nested&&node x` holds the word `nested`).
+    if (/[\s&|;()]/.test(a)) for (const w of a.match(/"[^"]*"|[^\s&|;()]+/g) || []) words.add(w);
+  }
+  // 2026-11-18: a word with a glob sign is expanded from the command's folder and every match is judged like a path.
+  if (typeof fs.globSync === 'function') {
+    for (const raw of [...words]) {
+      const word = raw.replace(/^["']|["']$/g, '');
+      if (!word || word.startsWith('-') || word.includes('://') || !/[*?[{]/.test(word)) continue;
+      try {
+        let n = 0;
+        for (const match of fs.globSync(word.replace(/\\/g, '/'), { cwd, exclude: name => name === 'node_modules' || name === '.git' })) { words.add(path.resolve(cwd, match)); if (++n >= 2000) break; }
+      } catch { /* a pattern that is not a glob */ }
+    }
+  }
+  const looked = new Map();
+  for (const raw of words) {
+    const word = raw.replace(/^["']|["']$/g, '');
+    if (!word || word.includes('://')) continue;
+    let p;
+    // 2026-11-18: every path word is resolved against the command's folder, not only "../" ones, so a nested repository
+    // written as a plain relative path ("nested/unit.test.cjs") is judged like the absolute form. A flag is not a path.
+    if (word.startsWith('-')) continue;
+    p = path.resolve(cwd, word);
+    const flat = lowerPath(p);
+    if (flat.split('/').includes('node_modules') || tools.some(t => flat === t || flat.startsWith(t + '/'))) continue;
+    let dir = p;
+    try {
+      while (!fs.existsSync(dir)) { const up = path.dirname(dir); if (up === dir) break; dir = up; }
+      if (fs.statSync(dir).isFile()) dir = path.dirname(dir);
+    } catch { continue; }
+    if (!looked.has(dir)) {
+      let top = null;
+      try { top = fs.realpathSync.native(sourceGit(dir, ['rev-parse', '--show-toplevel'])); } catch { /* not in a work tree */ }
+      looked.set(dir, top);
+    }
+    const top = looked.get(dir);
+    if (top && !same(top, toplevel)) return { word, top };
+  }
+  return null;
+}
+// The refusal for this run, or null. `remote` is what remoteTarget found.
+export function lineProblem(executable, args, cwd, source, remote) {
+  const line = shellLine(executable, args, remote);
+  if (line) {
+    const hiding = hidingOperator(line.script, line.bash, line.ps);
+    if (hiding) return `The shell line has ${hiding} outside quotes: the exit code is the last command's, so an earlier failure would not fail this check. Run the check command alone (no pipe, "||", ";" or single "&").`;
+    if (executableWord(executable) !== 'ssh' && /(?:^|[\s&|;("'])ssh(?:\.exe)?(?=[\s"'])/i.test(line.script)) return 'An ssh inside another shell line is not bound to the test machine clone. Run ssh as the check command itself.';
+  }
+  if (executableWord(executable) === 'ssh' && source && !remote) return 'An ssh run is not bound to the test machine clone: sanad.remoteHost and sanad.remoteRepo must be set, the host must be that machine, and the remote line must "cd /d" into the clone (or a folder inside it) as its last cd. Otherwise the receipt would only describe this folder.';
+  // 2026-11-18: on the test machine a path that leaves the clone runs other code, and the receipt would be bound to the clone.
+  if (remote && line) {
+    const stray = remoteStray(line.script, remote.repo);
+    if (stray) return `The remote line points outside the test machine clone (${stray}); this receipt is bound to ${remote.repo}. Use a path inside the clone.`;
+  }
+  const build = noBuildProblem(executable, args, remote);
+  if (build) return build;
+  if (source && executableWord(executable) !== 'ssh') {
+    const other = otherCheckout(args, cwd, source.toplevel);
+    if (other) return `The command points at another Git work tree (${other.word}, in ${other.top}); this receipt is bound to ${source.toplevel}. Use a path inside this repository.`;
+  }
+  return null;
+}
+
 // `remoteProbe` (a function, so never from a JSON spec) stands in for the test machine in tests.
-export async function runCommand({ executable, args = [], cwd, outputRoot, timeoutMs = 300000, maxBytes, secrets = [], remoteProbe }) {
+export async function runCommand({ executable, args = [], cwd, outputRoot, timeoutMs = 300000, maxBytes, secrets = [], remoteProbe, note }) {
   if (typeof executable !== 'string' || !executable || !Array.isArray(args) || args.some(a => typeof a !== 'string') || !path.isAbsolute(cwd) || !path.isAbsolute(outputRoot)) throw new Error('Use an executable, argv array and absolute cwd/outputRoot.');
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000) throw new Error('Timeout must be 1..3600000 ms.');
   fs.mkdirSync(outputRoot, { recursive: true });
@@ -178,17 +404,48 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
     const relative = path.relative(toplevel, fs.realpathSync.native(outputRoot));
     if (relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))) throw new Error('Evidence output must be outside the source repository.');
     try { source = { toplevel, treeBefore: sourceTree(toplevel), treeAfter: null }; }
-    catch { sourceFailure = 'Cannot capture the Git source tree before verification.'; }
+    catch (error) {
+      // 2026-11-18: the reason names git's own first error line (and the submodule path), not only the step.
+      const detail = String((error && error.stderr) || (error && error.message) || '').split(/\r?\n/).map(l => l.trim()).find(Boolean) || '';
+      sourceFailure = 'Cannot capture the Git source tree before verification.' + (detail ? ' ' + redactCommand(detail, secrets).slice(0, 300) : '');
+    }
+    // 2026-11-18: the receipt covers untracked files too, but the push guard compares it with the COMMITTED tree, so
+    // one stray untracked file made it never match, with nothing saying why. Name them (count, first three) before the
+    // command starts; a folder that is its own repository is left out of the checked source and named too.
+    if (source) {
+      try {
+        const { nested, files } = untrackedInfo(toplevel);
+        const say = line => { if (typeof note === 'function') { try { note(redactCommand(line, secrets)); } catch { /* a note never fails the check */ } } };
+        if (files.length) {
+          source.untracked = { count: files.length, first: files.slice(0, 3) };
+          say(`NOTE: ${files.length} untracked file${files.length === 1 ? ' is' : 's are'} in the checked source (${files.slice(0, 3).join(', ')}${files.length > 3 ? ` and ${files.length - 3} more` : ''}). A commit that leaves ${files.length === 1 ? 'it' : 'them'} out will not match this receipt: commit ${files.length === 1 ? 'it' : 'them'} or move ${files.length === 1 ? 'it' : 'them'} out first.`);
+        }
+        if (nested.length) {
+          source.nestedRepos = nested;
+          say(`NOTE: left out of the checked source (each is its own Git repository): ${nested.join(', ')}`);
+        }
+      } catch { /* no note */ }
+    }
   }
   const runDir = fs.mkdtempSync(path.join(outputRoot, 'check-'));
   const stdout = evidenceLog(path.join(runDir, 'stdout.log'), { maxBytes, secrets });
   const stderr = evidenceLog(path.join(runDir, 'stderr.log'), { maxBytes, secrets });
-  const receipt = { runId: crypto.randomUUID(), executable: redact(executable, secrets), args: args.map(a => redact(a, secrets)), cwd: fs.realpathSync.native(cwd), source, startedAt: new Date().toISOString(), status: 'running' };
+  const receipt = { runId: crypto.randomUUID(), executable: redactCommand(executable, secrets), args: args.map(a => redactCommand(a, secrets)), cwd: fs.realpathSync.native(cwd), source, startedAt: new Date().toISOString(), status: 'running' };
   fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
   const lock = source ? takeLock(receipt, timeoutMs) : null;
   try {
     const remote = source && !sourceFailure ? remoteTarget(executable, args, source.toplevel) : null;
     const askRemote = async () => (typeof remoteProbe === 'function' ? remoteProbe : probeRemote)(remote, executable);
+    const refuse = reason => {
+      stdout.close(); stderr.close();
+      Object.assign(receipt, { completedAt: new Date().toISOString(), nativeExitCode: null, signal: null, reason, status: 'failed',
+        stdoutBytes: 0, stderrBytes: 0, stdout: path.join(runDir, 'stdout.log'), stderr: path.join(runDir, 'stderr.log') });
+      fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
+      return { ...receipt, runDir };
+    };
+    // A source that could not be bound already fails the receipt: only a bound run is read for these lines.
+    const problem = source && !sourceFailure ? lineProblem(executable, args, cwd, source, remote) : null;
+    if (problem) return refuse(redactCommand(problem, secrets));
     if (remote) {
       receipt.remote = { host: remote.host, repo: remote.repo, treeBefore: null, treeAfter: null };
       let refused = null;
@@ -198,13 +455,7 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
         if (there.dirty) refused = `The folder on the test machine (${remote.host}) has changed files that are not part of this code. Clean it there, then run remote-sync.sh and the check again.`;
         else if (there.tree !== source.treeBefore) refused = `The test machine holds other code (tree ${String(there.tree).slice(0, 12)}; this folder is ${source.treeBefore.slice(0, 12)}). Run remote-sync.sh, then the check again.`;
       } catch { refused = `Cannot read the code on the test machine (${remote.host}) before the check.`; }
-      if (refused) {
-        stdout.close(); stderr.close();
-        Object.assign(receipt, { completedAt: new Date().toISOString(), nativeExitCode: null, signal: null, reason: refused, status: 'failed',
-          stdoutBytes: 0, stderrBytes: 0, stdout: path.join(runDir, 'stdout.log'), stderr: path.join(runDir, 'stderr.log') });
-        fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
-        return { ...receipt, runDir };
-      }
+      if (refused) return refuse(refused);
     }
     const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let failure = null, fallback;
@@ -320,9 +571,16 @@ const lowerPath = p => String(p).replace(/\\/g, '/').toLowerCase();
 function sameFile(a, b) { a = lowerPath(a); b = lowerPath(b); return a === b || a.endsWith('/' + b) || b.endsWith('/' + a); }
 // Touched: the test file changed, or the file it is named after (a.test.ts → a.ts, a.tsx): code made slower
 // by this task would otherwise pass under the longer timeout.
+// 2026-11-18: a test in a `__tests__`, `tests` or `test` folder is named after its source file in the folder above
+// (src/api/__tests__/exams.test.ts → src/api/exams.ts): those folder parts are dropped before the names are compared.
+const withoutTestFolders = p => lowerPath(p).replace(/(^|\/)(?:__tests__|tests?)(?=\/)\/?/g, '$1');
 function touched(file, changed) {
   const own = file.replace(/\.(?:test|spec)\.[^./]+$/i, '');
-  return changed.some(c => sameFile(c, file) || (own !== file && sameFile(c.replace(/\.[^./]+$/, ''), own)));
+  const plain = withoutTestFolders(own);
+  // 2026-11-18: and a changed source file with the same base name, whatever its folder (tests/unit/api/exams.test.ts ↔ src/api/exams.ts).
+  const base = p => lowerPath(p).replace(/\.[^./]+$/, '').split('/').pop();
+  return changed.some(c => sameFile(c, file) || (own !== file && (sameFile(c.replace(/\.[^./]+$/, ''), own) || sameFile(withoutTestFolders(c.replace(/\.[^./]+$/, '')), plain)
+    || (!/\.(?:test|spec)\.[^./]+$/i.test(c) && base(c) === base(own)))));
 }
 
 const executableWord = w => String(w || '').split(/[\\/]/).pop().replace(/\.(?:exe|cmd|bat)$/i, '').toLowerCase();
@@ -427,7 +685,7 @@ if (isMain(import.meta.url)) {
     const spec = path.resolve(process.argv[3]);
     if (fs.statSync(spec).size > 64000) throw new Error('Verification specification exceeds 64 KB.');
     const input = JSON.parse(fs.readFileSync(spec, 'utf8'));
-    const result = await runCommand(input);
+    const result = await runCommand({ ...input, note: line => process.stdout.write(line + '\n') });
     // A failed check names its totals and failing tests here, read from its saved logs (run-summary.mjs,
     // 2026-11-13); the receipt line stays last and unchanged.
     const { summaryLines } = await import('./run-summary.mjs');

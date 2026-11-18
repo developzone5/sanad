@@ -36,6 +36,13 @@
 //       needs `reuse` (the design follows that pattern) or `not: <reason>` (at least 12 characters), and a list
 //       with no J line and no `SAME JOB: none` is open. Prints `OPEN: S<n>|J<n> · …` per open line and
 //       `SIBLINGS: <k> found, <m> open` plus `SAME JOB: <j> found, <o> open`.
+// 2026-11-18 (audit of the release): a P<n> closes a sibling only when it is the place of the function that holds the
+// sibling's line (or carries the function name the line gives), in the file the line names: the first `<file>:<line>`
+// anywhere in the line; a line with none is open until `none: <reason>`. --record reads a sibling line in any case,
+// with bold marks or a number, and refuses a line that starts with SIBLING and is not one. "none" may be followed by
+// more words ("SIBLINGS: none (searched …)", "SAME JOB: none - …"); "SIBLING: none" reads as "SIBLINGS: none".
+// --record stores `Sources: <hash>` of the ticket lines and check lines (and refuses when they changed after the
+// brief); --check with --lines <lines.md> --check-lines <check.md> fails when they differ from that hash.
 // Exit 0: written, or no open line. 1: an open line. 2: usage error, a missing file, a report with no answer.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -43,7 +50,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readLines } from './check-ticket-lines.mjs';
 import { checkLines } from './review-brief.mjs';
-import { parsePlaces, placeLine } from './places.mjs';
+import crypto from 'node:crypto';
+import { parsePlaces, placeLine, declarations, readLabel } from './places.mjs';
 import { isMain } from './is-main.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -123,10 +131,29 @@ export function writeBrief({ notes, repo }) {
 }
 
 // A report line without list marks, quotes or bold: "- `SIBLING: …`" and "**SIBLINGS: none**" read plainly.
-const bare = (line) => line.trim().replace(/^(?:[-*•]|\d+[.)])\s+/, '').replace(/^[`*_>"\s]+|[`*_"\s]+$/g, '').replace(/^(SIBLINGS?:)[*_]+\s*/, '$1 ').trim();
-const NONE = /^SIBLINGS:\s*none\.?$/i;
+// 2026-11-18 (repair round): a heading mark ("### SIBLING: …", "#### 2. SIBLING: …"), a table bar ("| SIBLING: … |"), a
+// bracket ("[SIBLING] …", "(SIBLING) …"), an arrow ("➜ SIBLING: …") and strike marks ("~~SIBLING~~: …") before or
+// after the line are no part of it: the line was dropped with no word. They are stripped here.
+const LEAD = /^(?:[#|>➜➔→»~*•[(]+|-\s|\d+[.)]\s+)\s*/;
+const bare = (line) => {
+  let s = line.trim();
+  for (let k = 0; k < 4; k++) { const n = s.replace(LEAD, ''); if (n === s) break; s = n; }
+  return s.replace(/^[`*_>"\s]+|[`*_"|\s]+$/g, '').replace(/^(SIBLINGS?:)[*_]+\s*/, '$1 ').trim();
+};
+// 2026-11-18 (audit): an honest answer with a few words after "none" ("SIBLINGS: none (searched the three other date
+// fields)", "SAME JOB: none - no outbox does this") was refused or became an open line "none - …". "none" may be
+// followed by a space, a comma, a bracket, a dash or a full stop; "none.ts:3" is a file, "nonexistent" is a word.
+// "SIBLING: none" reads as "SIBLINGS: none".
+const AFTER_NONE = '(?=$|[\\s,;(—–-]|\\.(?:\\s|$))';
+const NONE = new RegExp('^SIBLINGS?\\s*:\\s*none' + AFTER_NONE, 'i');
 const OUTSIDE = /^OUTSIDE PR:\s*(.*)$/i;
-const JOB_NONE = /^SAME JOB:\s*none\.?$/i;
+const JOB_NONE = new RegExp('^SAME JOB\\s*:\\s*none' + AFTER_NONE, 'i');
+// 2026-11-18 (audit): a sibling line in any case, with bold marks or a number ("**SIBLING**: …", "Sibling: …",
+// "SIBLING 4: …"). A line that starts with that word and is not one is a usage error, never skipped.
+const SIBLING_LINE = /^SIBLINGS?(?:\s*\d+)?\s*[*_`~]*\s*:[*_`~]*\s*(.*)$/i;
+// "[SIBLING] <file>:<line> · …" and "(SIBLING) …": the closing bracket stands where the colon would.
+const SIBLING_BRACKETED = /^SIBLINGS?\s*[\])]\s*:?\s*(.*)$/i;
+const SIBLING_WORD = /^SIBLINGS?\b/i;
 const JOB = /^SAME JOB:\s*(.*)$/i;
 // "<file>:<line> · <function or field> — <why>"; a line range (12-20) counts as a line.
 const SHAPED = /^(.+?):(\d+(?:[-–]\d+)?) · (.+?) — (.+)$/;
@@ -148,8 +175,13 @@ export function parseReport(text) {
     if (o) { const b = body(o[1]); if (b && !outside.includes(b)) outside.push(b); continue; }
     const j = JOB.exec(l);
     if (j) { const b = body(j[1]); if (b && !jobs.includes(shape(b))) jobs.push(shape(b)); continue; }
-    const m = /^SIBLING:\s*(.*)$/.exec(l);
-    if (!m) continue;
+    const m = SIBLING_LINE.exec(l) || SIBLING_BRACKETED.exec(l);
+    if (!m || !m[1].trim()) {
+      // A line that holds the word SIBLING and a <file>:<line> but starts with other words ("Possible SIBLING: …",
+      // "Second sibling: …") is refused, never dropped (2026-11-18).
+      if (SIBLING_WORD.test(l) || (/\bSIBLINGS?\b/i.test(l) && siblingSpot(l))) throw usage(`a report line starts with SIBLING but is not "SIBLING: <file>:<line> · <what> — <why>" (nor "SIBLINGS: none"): "${l.slice(0, 100)}". Rewrite it in that shape and record again.`);
+      continue;
+    }
     const b = body(m[1]);
     if (b && !siblings.includes(shape(b))) siblings.push(shape(b));
   }
@@ -160,8 +192,12 @@ export function parseReport(text) {
 // (open), never dropped.
 export function parseSiblings(text) {
   const rows = [], jobs = [];
-  let none = false, jobNone = false;
+  let none = false, jobNone = false, sources = '', holds = {};
   for (const line of String(text).split(/\r?\n/)) {
+    const hold = /^Holds: (\{.*\})\s*$/.exec(line);
+    if (hold) { try { holds = JSON.parse(hold[1]); } catch { /* an unreadable line holds nothing */ } continue; }
+    const src = /^Sources: ([0-9a-f]+)\s*$/.exec(line);
+    if (src) { sources = src[1]; continue; }
     if (NONE.test(line.trim())) { none = true; continue; }
     if (JOB_NONE.test(line.trim())) { jobNone = true; continue; }
     const m = /^([SJ])(\d+) · (.*)$/.exec(line);
@@ -169,7 +205,20 @@ export function parseSiblings(text) {
     const arrow = m[3].indexOf('→');
     (m[1] === 'S' ? rows : jobs).push({ n: Number(m[2]), body: (arrow < 0 ? m[3] : m[3].slice(0, arrow)).trim(), outcome: arrow < 0 ? '' : m[3].slice(arrow + 1).trim() });
   }
-  return { rows, none, jobs, jobNone: jobNone && !jobs.length };
+  for (const r of rows) if (holds && typeof holds[r.n] === 'string') r.holds = holds[r.n];
+  return { rows, none, jobs, jobNone: jobNone && !jobs.length, sources };
+}
+
+// 2026-11-18 (audit): the list stayed valid after the ticket lines and the check lines changed, so a line added
+// later was never searched for siblings or same-job work. --record stores a hash of the two sources (the ticket
+// lines and the check lines as the brief reads them, so spacing and header text do not count); --check fails when
+// a --lines / --check-lines given now hash differently. null when a source cannot be read.
+export function sourcesOf(linesText, checkText) {
+  try {
+    const ticket = readLines(linesText).map((l) => l.replace(/^T\d+:\s*/i, ''));
+    const checks = checkLines(checkText);
+    return { ticket, checks, hash: crypto.createHash('sha256').update(JSON.stringify({ ticket, checks })).digest('hex').slice(0, 12) };
+  } catch { return null; }
 }
 
 export const siblingLine = (r) => `S${r.n} · ${r.body} → ${r.outcome}`;
@@ -182,12 +231,15 @@ export function parseOutside(text) {
   return String(text).split(/\r?\n/).map((l) => /^- OUTSIDE PR:\s*(.*)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
 }
 
-export function renderSiblings({ brief, report, recorded, rows, outside = [], jobs = [], jobNone = false }) {
+export function renderSiblings({ brief, report, recorded, rows, outside = [], jobs = [], jobNone = false, sources = '' }) {
   return [
     '# Siblings — places with the same rule or defect that the places list missed', '',
     `Brief: ${slash(brief)}`,
     `Report: ${slash(report)}`,
-    `Recorded: ${recorded}`, '',
+    `Recorded: ${recorded}`,
+    ...(sources ? [`Sources: ${sources}`] : []),
+    // 2026-11-18 (repair round): the function that held each sibling's line when it was recorded, before the code moved it.
+    ...(rows.some((r) => r.holds) ? [`Holds: ${JSON.stringify(Object.fromEntries(rows.filter((r) => r.holds).map((r) => [r.n, r.holds])))}`] : []), '',
     "Write the outcome after each →: `P<n>` (add the sibling's name with places.mjs --names; n is the place it gets in the sibling's own file) or `none: <why it is not the same rule>`.",
     'siblings.mjs --record keeps every outcome when it records again; pre-review.mjs --siblings checks this file.', '',
     ...(rows.length ? rows.map(siblingLine) : ['SIBLINGS: none']), '',
@@ -209,16 +261,39 @@ export function recordSiblings({ report, notes, now = new Date() }) {
   if (!found.jobs.length && !found.jobNone && !old.jobs.length && !old.jobNone) {
     throw usage(`${report} has no SAME JOB line and no "SAME JOB: none" line: the same-job search did not run. Launch the brief's line again (it asks how the repo already does this kind of job), save its answer there and record again.`);
   }
+  // 2026-11-18 (audit): the brief was written for the ticket lines and check lines of that time. When the notes
+  // folder holds them and they are not the ones in the brief any more, the report answers an older question.
+  let sources = '';
+  const linesFile = path.join(notes, 'lines.md'), checkFile = path.join(notes, 'check.md');
+  if (fs.existsSync(linesFile) && fs.existsSync(checkFile)) {
+    const now = sourcesOf(readText(linesFile), readText(checkFile));
+    if (now) {
+      const briefText = readText(brief);
+      const inBrief = (letter) => String(briefText).split(/\r?\n/).map((l) => new RegExp(`^- ${letter}\\d+\\. (.*)$`).exec(l)).filter(Boolean).map((m) => m[1]);
+      const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+      if (!same(inBrief('T'), now.ticket) || !same(inBrief('C'), now.checks)) {
+        throw usage(`the ticket lines or check lines changed after the brief was written: run --brief again, launch its line, save the new answer as ${slash(path.join(notes, REPORT))} and record that.`);
+      }
+      sources = now.hash;
+    }
+  }
   const rows = old.rows;
   let next = rows.reduce((n, r) => Math.max(n, r.n), 0) + 1;
-  for (const b of found.siblings) if (!rows.some((r) => r.body === b)) rows.push({ n: next++, body: b, outcome: '' });
+  // The function that holds each new sibling's line is read now, before the code: line numbers move with the fix.
+  let repoOf = '';
+  try { const pl = parsePlaces(readText(path.join(notes, 'places.md'))); repoOf = pl ? pl.repo : ''; } catch { /* no places list: no stored function */ }
+  for (const b of found.siblings) {
+    if (rows.some((r) => r.body === b)) continue;
+    const spot = siblingSpot(b), at = spot && repoOf ? functionAt(repoOf, spot.file, spot.line) : null;
+    rows.push({ n: next++, body: b, outcome: '', ...(at ? { holds: at } : {}) });
+  }
   const jobs = old.jobs;
   let nextJob = jobs.reduce((n, r) => Math.max(n, r.n), 0) + 1;
   for (const b of found.jobs) if (!jobs.some((r) => r.body === b)) jobs.push({ n: nextJob++, body: b, outcome: '' });
   const jobNone = !jobs.length && (found.jobNone || old.jobNone);
   const outside = parseOutside(oldText);
   for (const b of found.outside) if (!outside.includes(b)) outside.push(b);
-  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside, jobs, jobNone });
+  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside, jobs, jobNone, sources: sources || old.sources });
   fs.writeFileSync(out, oldText.includes('\r\n') ? text.replace(/\n/g, '\r\n') : text);
   return { out, rows, outside, jobs, jobNone };
 }
@@ -240,10 +315,44 @@ export function jobOpenReason(row) {
 // The file an S line names: a leading "<file>:<line>" (the shape --record writes is "<file>:<line> · …", but a
 // line kept as written may continue with ":<col>", " - ", backticks or a leading "/"); '' when the line starts
 // with no file. The file has an extension or a folder, and no space.
-export const siblingFile = (body) => {
-  const m = /^[`'"(]*\/*([^\s`'"]*[./][^\s`'"]*?):\d+(?!\w)/.exec(String(body).trim());
-  return m ? m[1].trim() : '';
+// 2026-11-18 (audit): a line that does not start with its file ("DatePicker (src/components/DatePicker.tsx:1) — …")
+// had no file and any place closed it. The first `<path>:<line>` anywhere in the line is its file now; a line with
+// none is open when it has a P<n> outcome.
+const SPOT = /(?:^|[\s`'"(\[])\/*([^\s`'"()\[\]]*[./][^\s`'"()\[\]]*?):(\d+)(?!\w)/;
+export const siblingSpot = (body) => {
+  const m = SPOT.exec(String(body).trim());
+  return m ? { file: m[1].trim(), line: Number(m[2]) } : null;
 };
+export const siblingFile = (body) => { const s = siblingSpot(body); return s ? s.file : ''; };
+
+// The function part of "<file>:<line> · <function or field> — <why>", as a place of the list names it: no "()".
+const functionPart = (body) => { const m = /^.+?:\d+(?:[-–]\d+)? · (.+?) — /.exec(String(body).trim()); return m ? m[1].trim().replace(/\(\)$/, '') : ''; };
+
+// The place label of the declaration that holds `line` of `file` (the list's repo), as places.mjs names it; null when
+// the file cannot be read there.
+function functionAt(repo, file, line) {
+  if (!repo) return null;
+  let lines;
+  try { lines = fs.readFileSync(path.resolve(repo, file), 'utf8').split(/\r?\n/); } catch { return null; }
+  if (line < 1 || line > lines.length) return null;
+  const rows = declarations(slash(file), [line], lines);
+  return rows.length ? rows[0].fn : null;
+}
+
+// A function as a place label: "Type.name(int a)" → { scope, bare, sig }; words after the name are dropped
+// ("PublishNow method" is PublishNow); null when no name can be read.
+function asLabel(text) {
+  const m = /^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)(?:\(([^)]*)\))?/.exec(String(text).trim());
+  if (!m) return null;
+  const parts = m[1].split('.');
+  return { bare: parts[parts.length - 1], scope: parts.length > 1 ? parts[parts.length - 2] : '', sig: m[2] === undefined || /\(line \d+\)/.test(String(text)) && m[2] === '' ? undefined : m[2].trim() };
+}
+function sameFunction(a, b) {
+  const la = readLabel(a) || asLabel(a), lb = readLabel(b) || asLabel(b);
+  if (!la || !lb) return String(a) === String(b);
+  if (String(a).trim() === '(file)' || String(b).trim() === '(file)') return String(a).trim() === String(b).trim();
+  return la.bare === lb.bare && (!la.scope || !lb.scope || la.scope === lb.scope) && (la.sig === undefined || lb.sig === undefined || la.sig === lb.sig);
+}
 
 // One folder can have two names (Windows' short RUNNER~1 spelling of a temp folder, a junction): its real path.
 const real = (p) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
@@ -278,19 +387,36 @@ export function openReason(row, places, { ignoreCase } = {}) {
   if (missing.length) return `${names(missing)} not on the places list: add the sibling's name with places.mjs --names`;
   const gone = nums.filter((n) => places.places.some((p) => p.n === n && p.mark === 'gone'));
   if (gone.length) return `${names(gone)} gone from the places list`;
-  const file = siblingFile(row.body);
-  if (!file) return '';
+  const spot = siblingSpot(row.body);
+  if (!spot) return 'no file named: start the line with <file>:<line>, or write none: <reason>';
+  const file = spot.file;
   const at = (f) => listPath(f, places.repo, { ignoreCase });
   const found = nums.map((n) => places.places.find((p) => p.n === n));
-  if (found.some((p) => at(p.file) === at(file))) return '';
-  return `${names(nums)} in ${[...new Set(found.map((p) => p.file))].join(', ')}, not in ${slash(file)}: add the sibling's own name with places.mjs --names, or write none: <reason>`;
+  const same = found.filter((p) => at(p.file) === at(file));
+  if (!same.length) return `${names(nums)} in ${[...new Set(found.map((p) => p.file))].join(', ')}, not in ${slash(file)}: add the sibling's own name with places.mjs --names, or write none: <reason>`;
+  // 2026-11-18 (audit): a place of ANOTHER function of that file closed it too (a sibling in PublishNow, closed with the
+  // place of Schedule; PublishNow was never searched). The place must be the one of the function that holds the
+  // sibling's line, or carry the function name the line gives.
+  // 2026-11-18 (repair round): the line number was written before the code, and the fix moves it (four lines added
+  // inside Schedule put line 10 inside Schedule, and the place of Schedule closed the sibling in PublishNow). The
+  // function stored when the sibling was recorded (row.holds) is the one that counts; today's line is read only
+  // for a list with none. A function is the same by its name, and by its type and parameter list only when both
+  // name them ("Service.PublishNow", "PublishNow(Homework h)" and "PublishNow method" are the label PublishNow).
+  const want = row.holds || functionAt(places.repo, file, spot.line), part = functionPart(row.body);
+  if (same.some((p) => (want && sameFunction(p.fn, want)) || (part && sameFunction(p.fn, part)))) return '';
+  const mine = want !== null ? want : part || `the function at line ${spot.line}`;
+  const theirs = [...new Set(same.map((p) => p.fn || '(file)'))].join(', ');
+  return `${names(nums)} ${nums.length === 1 ? 'a place' : 'places'} of ${theirs}, not of ${mine} (${slash(file)}:${spot.line}): add the sibling's own name with places.mjs --names, or write none: <reason>`;
 }
 
 // `jobs` undefined: a caller that only checks S lines (siblings --record); a list read from a file always has it.
-export function checkSiblings({ rows, jobs, jobNone }, { places } = {}) {
+export function checkSiblings({ rows, jobs, jobNone, sources }, { places, sources: current } = {}) {
   const open = rows.map((r) => ({ r, why: openReason(r, places) })).filter((x) => x.why);
   const lines = open.map(({ r, why }) => `OPEN: S${r.n} · ${r.body.split(' — ')[0]}${why === 'no outcome' ? '' : ' — ' + why}`);
-  lines.push(`SIBLINGS: ${rows.length} found, ${open.length} open`);
+  // 2026-11-18 (audit): recorded for other ticket lines or check lines than the ones given now.
+  const stale = Boolean(sources && current && sources !== current);
+  if (stale) lines.push('OPEN: SIBLINGS — ticket lines changed: run --brief again, launch its line, and record the new report (the siblings and the same-job search were made for the earlier lines)');
+  lines.push(`SIBLINGS: ${rows.length} found, ${open.length + (stale ? 1 : 0)} open`);
   let jobsOpen = [], searchMissing = false;
   if (jobs) {
     jobsOpen = jobs.map((r) => ({ r, why: jobOpenReason(r) })).filter((x) => x.why);
@@ -299,7 +425,7 @@ export function checkSiblings({ rows, jobs, jobNone }, { places } = {}) {
     if (searchMissing) lines.push('OPEN: SAME JOB — the same-job search is missing: record a report from the current brief (SAME JOB lines or SAME JOB: none)');
     lines.push(`SAME JOB: ${jobs.length} found, ${jobsOpen.length + (searchMissing ? 1 : 0)} open`);
   }
-  return { ok: !open.length && !jobsOpen.length && !searchMissing, open, jobsOpen, count: rows.length, text: lines.join('\n') };
+  return { ok: !open.length && !jobsOpen.length && !searchMissing && !stale, open, jobsOpen, count: rows.length, stale, text: lines.join('\n') };
 }
 
 export function readSiblings(file) {
@@ -314,7 +440,7 @@ function parse(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--brief') { o.brief = true; continue; }
-    if (!['--notes', '--repo', '--record', '--check', '--places'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
+    if (!['--notes', '--repo', '--record', '--check', '--places', '--lines', '--check-lines'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
   if ([o.brief, o.record, o.check].filter(Boolean).length !== 1) throw usage('give one of --brief, --record <report> or --check <siblings.md>');
@@ -322,12 +448,14 @@ function parse(argv) {
   if (o.record && !o.notes) throw usage('--record needs --notes <dir>');
   if (o.repo && !o.brief) throw usage('--repo goes with --brief');
   if (o.places && !o.check) throw usage('--places goes with --check');
+  if ((o.lines || o['check-lines']) && !o.check) throw usage('--lines and --check-lines go with --check');
+  if (Boolean(o.lines) !== Boolean(o['check-lines'])) throw usage('--lines and --check-lines go together');
   return o;
 }
 
 const USAGE = 'Usage: node siblings.mjs --brief --notes <dir> --repo <repo>\n' +
   '       node siblings.mjs --record <report file> --notes <dir>\n' +
-  '       node siblings.mjs --check <siblings.md> [--places <places.md>]\n';
+  '       node siblings.mjs --check <siblings.md> [--places <places.md>] [--lines <lines.md> --check-lines <check.md>]\n';
 
 function main() {
   try {
@@ -353,7 +481,13 @@ function main() {
         places = parsePlaces(readText(o.places));
         if (!places) throw usage(`${o.places} is not a places list (no Repo: and Names: header)`);
       }
-      const r = checkSiblings(readSiblings(path.resolve(o.check)), { places });
+      let sources = '';
+      if (o.lines) {
+        for (const f of [o.lines, o['check-lines']]) if (!fs.existsSync(f)) throw usage('no such file: ' + f);
+        const now = sourcesOf(readText(o.lines), readText(o['check-lines']));
+        if (now) sources = now.hash;
+      }
+      const r = checkSiblings(readSiblings(path.resolve(o.check)), { places, sources });
       process.stdout.write(r.text + '\n');
       process.exitCode = r.ok ? 0 : 1;
     }

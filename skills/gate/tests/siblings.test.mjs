@@ -374,19 +374,23 @@ test('a P<n> closes a sibling only when that place is in the file the sibling na
   const checked = checkSiblings({ rows: [row], jobs: [], jobNone: true }, { places: onePlace });
   assert.equal(checked.ok, false);
   assert.equal(checked.text.split('\n')[0], 'OPEN: S1 · PublishNow.cs:8 · Publish — P1 is in Schedule.cs, not in PublishNow.cs' + how);
-  assert.equal(openReason({ ...row, body: 'Schedule.cs:20 · Reschedule — same date rule' }, onePlace), '', 'a place in the same file closes it');
+  // 2026-11-18 (audit finding 4): this line used "Reschedule" and a place of the function "Schedule" closed it; a place
+  // of another function of the same file no longer closes a sibling. The sibling's own function is "Schedule" here.
+  assert.equal(openReason({ ...row, body: 'Schedule.cs:20 · Schedule — same date rule' }, onePlace), '', 'a place of the same function in the same file closes it');
+  assert.match(openReason({ ...row, body: 'Schedule.cs:20 · Reschedule — same date rule' }, onePlace), /^P1 is a place of Schedule, not of Reschedule/, 'a place of another function of the file does not');
   assert.equal(openReason(row, undefined), '', 'without --places no P<n> is looked up, as before');
 
   const { repo, notes, places, report, list } = briefed(TWO + '\nSIBLING: the rich-text description editor - same focus defect on save\n');
   assert.equal(run(['--record', report, '--notes', notes]).status, 0);
   // P1 and P2 are in src/ChipGroup.tsx and P3 is in src/focus.ts: no sibling is in either file.
-  fillS(list, { S1: 'P1', S2: 'P2, P3', S3: 'P1' });
+  // 2026-11-18 (audit finding 6): S3 names no file, so no P<n> closes it (it was closed by any place before); it takes none:.
+  fillS(list, { S1: 'P1', S2: 'P2, P3', S3: 'none: a text editor, not a form field' });
   let r = run(['--check', list, '--places', places]);
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.deepEqual(openOf(r), [
     'OPEN: S1 · src/DatePicker.tsx:1 · DueDatePicker — P1 is in src/ChipGroup.tsx, not in src/DatePicker.tsx' + how,
     'OPEN: S2 · src/StudentList.tsx:1 · studentIds — P2, P3 are in src/ChipGroup.tsx, src/focus.ts, not in src/StudentList.tsx' + how,
-  ], 'S3 names no file: any place on the list closes it, as before');
+  ], 'S3 has its none: outcome');
   assert.match(r.stdout, /^SIBLINGS: 3 found, 2 open$/m);
   // The author adds the own name of each sibling: P4 is in src/DatePicker.tsx and P5 in src/StudentList.tsx.
   const added = addNames(repo, places, 'DueDatePicker,studentIds');
@@ -410,7 +414,9 @@ test('a P<n> closes a sibling only when that place is in the file the sibling na
 
 test('the file of a sibling is read as the places list names it: backslashes, "./", a whole path, and letter case where the file system ignores it', async () => {
   const { openReason } = await import(pathToFileURL(script).href);
-  const onePlace = { repo: 'C:/r', names: ['due'], places: [{ n: 1, mark: '', name: 'due', file: 'src/Forms/DatePicker.tsx', fn: '(file)', lines: '4', outcome: '' }] };
+  const onePlace = { repo: 'C:/r', names: ['due'], places: [{ n: 1, mark: '', name: 'due', file: 'src/Forms/DatePicker.tsx', fn: 'due', lines: '4', outcome: '' }] };
+  // 2026-11-18 (audit finding 4): the place is the one of the function the line names ("due"); with a place of another
+  // function of that file the line stays open, so this fixture's place carries that function (it was "(file)").
   const row = (file) => ({ n: 1, body: `${file}:4 · due — the same rule`, outcome: 'P1' });
   const elsewhere = /^P1 is in src\/Forms\/DatePicker\.tsx, not in /;
   assert.match(openReason(row('src/Forms/Other.tsx'), onePlace), elsewhere);
@@ -471,4 +477,222 @@ test('an S line that names its file in another shape still closes only with a pl
   fillS(list, { S1: 'P4', S2: 'P5' });
   r = run(['--check', list, '--places', f.places]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
+});
+
+// ---- 2026-11-18 (audit of the release): findings 4 to 7 and 10 ----
+
+const SERVICE = [
+  'public class Service {',          // 1
+  '    public void Schedule() {',    // 2
+  '        DateRule.Check(h);',      // 3
+  '    }',                           // 4
+  '    public void PublishNow() {',  // 5
+  '        Save(h);',                // 6
+  '    }',                           // 7
+  '}', '',
+].join('\n');
+const placeOf = (places, name) => Number(new RegExp('^P(\\d+)(?: \\(new\\))? · ' + name + ' ', 'm').exec(fs.readFileSync(places, 'utf8'))[1]);
+
+test('finding 4: a place of another function of the same file does not close a sibling; the place of its own function does', () => {
+  const f = fixture();
+  f.write('src/Service.cs', SERVICE);
+  assert.equal(addNames(f.repo, f.places, 'DateRule').status, 0);
+  const schedule = placeOf(f.places, 'DateRule');
+  const list = path.join(f.notes, 'siblings.md');
+  const write = (outcome) => fs.writeFileSync(list, `# Siblings\n\nS1 · src/Service.cs:5 · PublishNow — publishes with no date check, the same rule → ${outcome}\n\nSAME JOB: none\n`);
+  write('P' + schedule);
+  let r = run(['--check', list, '--places', f.places]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(openOf(r)[0], /^OPEN: S1 · src\/Service\.cs:5 · PublishNow — P\d+ is a place of Schedule, not of PublishNow \(src\/Service\.cs:5\)/);
+  assert.match(r.stdout, /^SIBLINGS: 1 found, 1 open$/m);
+  assert.equal(addNames(f.repo, f.places, 'PublishNow').status, 0);
+  write('P' + placeOf(f.places, 'PublishNow'));
+  r = run(['--check', list, '--places', f.places]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  // A line inside the function reads as that function, though its place was found on another line.
+  fs.writeFileSync(list, `# Siblings\n\nS1 · src/Service.cs:6 · Save — the same rule → P${placeOf(f.places, 'PublishNow')}\n\nSAME JOB: none\n`);
+  assert.equal(run(['--check', list, '--places', f.places]).status, 0, 'line 6 is inside PublishNow');
+});
+
+test('finding 5: a sibling line in a near shape is read, never dropped: any case, bold marks, a number; one that cannot be read is a usage error', () => {
+  const { report, notes, list } = briefed([
+    '**SIBLING**: src/DatePicker.tsx:1 · DueDatePicker — the picker lets the same wrong date through',
+    'Sibling: src/StudentList.tsx:1 · studentIds — the list has the same defect',
+    'SIBLING 4: src/focus.ts:1 · focusFirstError — the helper itself',
+    'OUTSIDE PR: src/Service.cs:13 — Save is called twice',
+    'SAME JOB: none', '',
+  ].join('\n'));
+  const r = run(['--record', report, '--notes', notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^SIBLINGS: 3 found, 3 open/m);
+  assert.deepEqual(sLines(list).map((l) => l.replace(/ — .*/, '')), [
+    'S1 · src/DatePicker.tsx:1 · DueDatePicker', 'S2 · src/StudentList.tsx:1 · studentIds', 'S3 · src/focus.ts:1 · focusFirstError']);
+  // A line that starts with SIBLING and is not a sibling line: the check did not run; nothing is recorded.
+  const bad = briefed('Siblings found in three files\nSAME JOB: none\n');
+  const e = run(['--record', bad.report, '--notes', bad.notes]);
+  assert.equal(e.status, 2, e.stdout);
+  assert.match(e.stderr, /starts with SIBLING but is not "SIBLING: <file>:<line> · <what> — <why>"/);
+  assert.equal(fs.existsSync(bad.list), false, 'nothing recorded on an error');
+});
+
+test('finding 6: a sibling line that does not start with its file is closed by a place of that file only; one with no file takes none:', () => {
+  const f = fixture();
+  fs.writeFileSync(path.join(f.notes, 'siblings.md'), [
+    '# Siblings', '',
+    'S1 · DatePicker (src/components/DatePicker.tsx:1) — the picker lets the same wrong date through → P1',
+    'S2 · the rich-text editor lets the same wrong date through → P1',
+    'S3 · see (src/ChipGroup.tsx:2) — the handler of the chip groups → P2', '',
+    'SAME JOB: none', '',
+  ].join('\n'));
+  const r = run(['--check', path.join(f.notes, 'siblings.md'), '--places', f.places]);
+  assert.equal(r.status, 1, r.stdout);
+  const open = openOf(r);
+  assert.match(open[0], /^OPEN: S1 .* — P1 is in src\/ChipGroup\.tsx, not in src\/components\/DatePicker\.tsx/);
+  assert.match(open[1], /^OPEN: S2 .* — no file named: start the line with <file>:<line>, or write none: <reason>/);
+  assert.equal(open.length, 2, 'S3 names line 2 of src/ChipGroup.tsx, the function onSaveFailed, which is P2: closed');
+});
+
+test('finding 7: the siblings list is stale after the ticket lines or the check lines change: the check fails until --brief and --record run again', () => {
+  const f = briefed('SIBLINGS: none\nSAME JOB: none\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  const lines = path.join(f.notes, 'lines.md'), check = path.join(f.notes, 'check.md');
+  assert.match(fs.readFileSync(f.list, 'utf8'), /^Sources: [0-9a-f]{12}$/m);
+  const ok = run(['--check', f.list, '--places', f.places, '--lines', lines, '--check-lines', check]);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  // A cosmetic change (header text, blank lines) is no change.
+  fs.writeFileSync(lines, fs.readFileSync(lines, 'utf8').replace('verbatim, 2026-11-14', 'verbatim').replace(/\n\n/, '\n\n\n'));
+  assert.equal(run(['--check', f.list, '--places', f.places, '--lines', lines, '--check-lines', check]).status, 0);
+  fs.appendFileSync(lines, 'T3. A late hand-in is marked late from the due minute itself.\n');
+  fs.appendFileSync(check, '- [T3] a hand-in at the due minute is late\n');
+  let r = run(['--check', f.list, '--places', f.places, '--lines', lines, '--check-lines', check]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /^OPEN: SIBLINGS — ticket lines changed: run --brief again/m);
+  // Recording the old report again is refused: the brief was written for the old lines.
+  const again = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(again.status, 2, again.stdout);
+  assert.match(again.stderr, /ticket lines or check lines changed after the brief was written: run --brief again/);
+  // The whole flow again: brief, a new report, record: the list is current.
+  assert.equal(run(['--brief', '--notes', f.notes, '--repo', f.repo]).status, 0);
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  r = run(['--check', f.list, '--places', f.places, '--lines', lines, '--check-lines', check]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+});
+
+test('finding 7, must not change: a list without a Sources line (older) and a check without --lines read as before', () => {
+  const f = briefed('SIBLINGS: none\nSAME JOB: none\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.equal(run(['--check', f.list, '--places', f.places]).status, 0, 'no --lines: no comparison');
+  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^Sources: .*\n/m, ''));
+  fs.appendFileSync(path.join(f.notes, 'lines.md'), 'T3. Another line.\n');
+  const r = run(['--check', f.list, '--places', f.places, '--lines', path.join(f.notes, 'lines.md'), '--check-lines', path.join(f.notes, 'check.md')]);
+  assert.equal(r.status, 0, 'a list from before the Sources line has nothing to compare');
+});
+
+test('finding 10: honest answers with a few extra words are read as none; "SIBLING: none" is "SIBLINGS: none"; a real file named none.ts is not none', () => {
+  for (const [sib, job] of [
+    ['SIBLINGS: none (searched the three other date fields)', 'SAME JOB: none'],
+    ['SIBLINGS: none', 'SAME JOB: none - no outbox or worker does this'],
+    ['SIBLING: none', 'SAME JOB: none'],
+    ['SIBLINGS: none.', 'SAME JOB: none (searched the workers)'],
+  ]) {
+    const f = briefed(sib + '\n' + job + '\n');
+    const r = run(['--record', f.report, '--notes', f.notes]);
+    assert.equal(r.status, 0, sib + ' / ' + job + '\n' + r.stdout + r.stderr);
+    const c = run(['--check', f.list, '--places', f.places]);
+    assert.equal(c.status, 0, sib + ' / ' + job + '\n' + c.stdout);
+    assert.match(c.stdout, /^SIBLINGS: 0 found, 0 open$/m);
+    assert.match(c.stdout, /^SAME JOB: 0 found, 0 open$/m);
+  }
+  const f = briefed('SIBLING: none.ts:3 · none — a file called none.ts has the same rule\nSAME JOB: none\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.equal(sLines(f.list).length, 1, 'a file named none.ts is a sibling');
+});
+
+// ---- 2026-11-18 (audit, repair round) ----
+// A repo with Schedule (lines 3-8) then PublishNow (from line 9), both with the date rule; places P1 (Schedule) and P2 (PublishNow).
+function service() {
+  const repo = fs.mkdtempSync(path.join(root, 'svc-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const write = (n, t) => { fs.mkdirSync(path.dirname(path.join(repo, n)), { recursive: true }); fs.writeFileSync(path.join(repo, n), t); };
+  git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid'); git('config', 'core.autocrlf', 'false');
+  const text = (extra = []) => ['class Service', '{', '    public void Schedule(Homework h)', '    {', ...extra, '        DateRule.Check(h);', '    }',
+    '    public void PublishNow(Homework h)', '    {', '        Publish(h);', '        DateRule.Check(h);', '    }', '}', ''].join('\n');
+  write('src/Service.cs', text());
+  git('add', '-A'); git('commit', '-qm', 'base');
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  fs.writeFileSync(path.join(notes, 'lines.md'), 'T1. Check the date.\n');
+  fs.writeFileSync(path.join(notes, 'check.md'), '- [T1] the date is checked\n');
+  const places = path.join(notes, 'places.md');
+  assert.equal(spawnSync(process.execPath, [path.join(scripts, 'places.mjs'), '--repo', repo, '--names', 'DateRule', '--out', places], { encoding: 'utf8', windowsHide: true }).status, 0);
+  return { repo, notes, places, write, text };
+}
+const refresh = (f) => assert.equal(spawnSync(process.execPath, [path.join(scripts, 'places.mjs'), '--refresh', f.places, '--repo', f.repo], { encoding: 'utf8', windowsHide: true }).status, 0);
+const recordFor = (f, body) => {
+  assert.equal(run(['--brief', '--notes', f.notes, '--repo', f.repo]).status, 0);
+  fs.writeFileSync(path.join(f.notes, 'siblings-report.md'), `SIBLING: ${body}\nSAME JOB: none\n`);
+  const r = run(['--record', path.join(f.notes, 'siblings-report.md'), '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  return path.join(f.notes, 'siblings.md');
+};
+const placeNo = (f, fn) => fs.readFileSync(f.places, 'utf8').split(/\r?\n/).map((l) => new RegExp(`^P(\\d+)(?: \\(\\w+\\))? · DateRule · src/Service\\.cs · ${fn} · `).exec(l)).filter(Boolean)[0][1];
+const closeWith = (list, p) => fs.writeFileSync(list, fs.readFileSync(list, 'utf8').replace(/(^S1 · .*→).*$/m, `$1 P${p}`));
+
+test('audit 2: a sibling closed with the place of ANOTHER function stays open after the fix moved the lines (the function is stored when the sibling is recorded)', () => {
+  const f = service();
+  const list = recordFor(f, 'src/Service.cs:10 · PublishNow — publishes with no date check, the same rule');
+  assert.match(fs.readFileSync(list, 'utf8'), /^Holds: /m);
+  closeWith(list, placeNo(f, 'Schedule'));
+  let r = run(['--check', list, '--places', f.places]);
+  assert.equal(r.status, 1, 'before code it is open: ' + r.stdout);
+  f.write('src/Service.cs', f.text(['        var a = 1;', '        var b = 2;', '        var c = 3;', '        var d = 4;']));
+  refresh(f);
+  r = run(['--check', list, '--places', f.places]);
+  assert.equal(r.status, 1, 'after the lines moved it is still open: ' + r.stdout);
+  assert.match(r.stdout, /OPEN: S1 .*not of PublishNow/);
+});
+
+test('audit 6: a sibling closed with its OWN place stays closed after lines moved, whatever the report wrote as the function', () => {
+  for (const part of ['Service.PublishNow', 'PublishNow(Homework h)', 'PublishNow method', 'the publish-now path']) {
+    const f = service();
+    const list = recordFor(f, `src/Service.cs:10 · ${part} — publishes with no date check, the same rule`);
+    closeWith(list, placeNo(f, 'PublishNow'));
+    assert.equal(run(['--check', list, '--places', f.places]).status, 0, part + ' before code');
+    f.write('src/Service.cs', f.text(['        var a = 1;', '        var b = 2;', '        var c = 3;', '        var d = 4;', '        var e = 5;', '        var g = 6;']));
+    refresh(f);
+    const r = run(['--check', list, '--places', f.places]);
+    assert.equal(r.status, 0, part + ' after lines moved: ' + r.stdout);
+  }
+});
+
+test('audit 7: a sibling line behind a heading mark, a table bar, a bracket, an arrow or strike marks is read; a lead word is refused; never dropped', () => {
+  const what = 'src/DatePicker.tsx:1 · DueDatePicker — the picker never gets the focus';
+  for (const [shape, read] of [
+    ['### SIBLING: ' + what, true],
+    ['#### 2. SIBLING: ' + what, true],
+    ['| SIBLING: ' + what + ' |', true],
+    ['[SIBLING] ' + what, true],
+    ['(SIBLING) ' + what, true],
+    ['➜ SIBLING: ' + what, true],
+    ['~~SIBLING~~: ' + what, true],
+    ['Possible SIBLING: ' + what, false],
+    ['Second sibling: ' + what, false],
+  ]) {
+    const f = briefed('SIBLING: src/StudentList.tsx:1 · studentIds — the list shows its error, but the focus stays on the save button\n' + shape + '\n');
+    const r = run(['--record', f.report, '--notes', f.notes]);
+    if (read) {
+      assert.equal(r.status, 0, shape + '\n' + r.stdout + r.stderr);
+      assert.equal(sLines(f.list).length, 2, shape + ' is read:\n' + fs.readFileSync(f.list, 'utf8'));
+      assert.match(sLines(f.list)[1], /^S2 · src\/DatePicker\.tsx:1 · DueDatePicker — the picker never gets the focus → $/, shape);
+    } else {
+      assert.equal(r.status, 2, shape + ' is refused:\n' + r.stdout);
+      assert.match(r.stderr, /SIBLING/i);
+    }
+  }
+});
+
+test('audit 7, must not change: prose with no file:line and the instruction quoted back are no sibling and no error', () => {
+  const f = briefed("I looked for a sibling in every form.\nAnswer only with lines 'SIBLING: <file>:<line> · <function or field> — <why>'.\nSIBLING: src/StudentList.tsx:1 · studentIds — the list shows its error\n");
+  const r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(sLines(f.list).length, 1);
 });

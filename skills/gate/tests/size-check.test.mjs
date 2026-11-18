@@ -35,7 +35,7 @@ const size = (repo, extra = {}) => sizeTask({ repo, base: 'base', ...extra });
 test('docs, tests, texts and styles only are tiny, with one review: the fresh eyes', () => {
   const r = size(change({}, { 'docs/a.md': 'x\n', 'src/a.test.ts': "it('x', () => {});\n", 'src/locales/en/a.json': '{"a":"b"}\n', 'src/a.css': '.a{}\n' }));
   assert.equal(r.size, 'tiny');
-  assert.equal(r.roles[0], 'one review: fresh eyes (Opus)');
+  assert.equal(r.roles[0], 'one review: fresh eyes');
 });
 
 test('a plain behavior change is small; its changed functions are listed with their callers', () => {
@@ -43,7 +43,7 @@ test('a plain behavior change is small; its changed functions are listed with th
   const repo = change({ 'src/Page.tsx': page }, { 'src/Page.tsx': page.replace('return next;', 'return next + 1;') });
   const r = size(repo);
   assert.equal(r.size, 'small');
-  assert.equal(r.roles[0], 'one review: fresh eyes (Opus)');
+  assert.equal(r.roles[0], 'one review: fresh eyes');
   assert.doesNotMatch(r.roles.join(' '), /whole-diff|Codex/, 'a small change gets one review, as launch.md starts');
   const pick = r.callers.find(c => c.name === 'pick');
   assert.ok(pick, JSON.stringify(r.callers));
@@ -244,7 +244,7 @@ test('a query change is medium with a database seat only where a database is use
   assert.equal(q.size, 'medium');
   // 2026-11-12 (three sizes, user-approved): Medium gets ONE review with the full brief; the boss and the
   // full round are for Big.
-  assert.equal(q.roles[0], 'one review: fresh eyes (Opus), full brief');
+  assert.equal(q.roles[0], 'one review: fresh eyes, full brief');
   assert.match(q.roles.join(' '), /Database expert/);
   assert.doesNotMatch(q.roles.join(' '), /boss|other engine|whole-diff/, 'the boss and the full round are for big');
   const mem = 'public class M {\n  public int Get(List<int> xs) { return xs.Count; }\n}\n';
@@ -997,4 +997,190 @@ test('signals still raise on real code: a campus filter, [Authorize], an upload,
   assert.ok(size(change({ 'Api/P.cs': price }, { 'Api/P.cs': price.replace('return a;', 'return a * (1 + taxRate);') })).signals.money, 'taxRate');
   const lock = 'public class Q\n{\n    public void Go() { }\n}\n';
   assert.ok(size(change({ 'Api/Q.cs': lock }, { 'Api/Q.cs': lock.replace('Go() { }', 'Go() { var r = Db.Raw("SELECT Id FROM Exams WHERE Id = 1 FOR UPDATE"); }') })).signals.concurrency, 'FOR UPDATE inside the SQL text');
+});
+
+// 2026-11-18 (repair round): the size rules for access written the project's way, background work, money,
+// upload/download field names, a git prefix setting, and engine-neutral role words.
+const csClass = (body) => `public class S\n{\n    public void Go(int userId)\n    {\n${body}\n    }\n}\n`;
+const lineIn = (before, after) => size(change({ 'Api/S.cs': csClass(before) }, { 'Api/S.cs': csClass(after) }));
+
+test('server access checks written the project way size big: _currentUser, Forbid, Forbidden, Unauthorized', () => {
+  const none = '        var n = 1;';
+  for (const line of [
+    'if (exam.TeacherId != _currentUser.UserId && exam.SchoolId != _tenantId) throw new ForbiddenException();',
+    'if (user.Role != UserRole.Admin) return Forbid();',
+    'if (exam.CreatedById != userId) throw new ForbiddenException();',
+    'if (!allowedSchoolIds.Contains(exam.SchoolId)) return Forbid();',
+    'if (x == null) throw new UnauthorizedAccessException();',
+  ]) {
+    const r = lineIn(none, none + '\n        ' + line);
+    assert.equal(r.size, 'big', line + ' ' + JSON.stringify(r.signals));
+    assert.ok(r.signals.access, line);
+  }
+});
+
+test('Must not change: a plain one-line condition and a field named like an owner stay small', () => {
+  const none = '        var n = 1;';
+  const r = lineIn(none, none + '\n        if (n > userId) n = 2;\n        var _ownerRepo = n;');
+  assert.equal(r.size, 'small', JSON.stringify(r.signals));
+});
+
+test('a changed line in a BackgroundService class, or between a transaction begin and commit, is big', () => {
+  const worker = (l) => `public sealed class RoleSyncWorker : BackgroundService\n{\n    protected override async Task ExecuteAsync(CancellationToken ct)\n    {\n        while (!ct.IsCancellationRequested)\n        {\n            ${l}\n        }\n    }\n}\n`;
+  const w = size(change({ 'Api/RoleSyncWorker.cs': worker('await _queue.MarkDoneAsync(item.Id, ct);') }, { 'Api/RoleSyncWorker.cs': worker('if (item.Tries < 3) await _queue.MarkDoneAsync(item.Id, ct);') }));
+  assert.ok(w.signals.concurrency, JSON.stringify(w.signals));
+  assert.equal(w.size, 'big');
+  const repo = change({ 'Api/RoleSyncWorker.cs': worker('x();') }, { 'Api/RoleSyncWorker.cs': worker('y();') });
+  const plan = sizeTask({ repo, files: ['Api/RoleSyncWorker.cs'], names: ['ExecuteAsync'] });
+  assert.equal(plan.size, 'big', 'plan mode: ' + JSON.stringify(plan.signals));
+  const tx = (s) => `public class T\n{\n    public async Task Run(CancellationToken ct)\n    {\n        await using var tx = await _db.Database.BeginTransactionAsync(ct);\n        var row = await Load(ct);\n        row.Status = ${s};\n        await _db.SaveChangesAsync(ct);\n        await tx.CommitAsync(ct);\n    }\n}\n`;
+  const t = size(change({ 'Api/T.cs': tx('Status.Sent') }, { 'Api/T.cs': tx('Status.Done') }));
+  assert.ok(t.signals.concurrency, 'a line between begin and commit: ' + JSON.stringify(t.signals));
+});
+
+test('Must not change: a change in a plain service method with no transaction or worker stays small', () => {
+  const svc = (s) => `public class T\n{\n    public int Run(int a)\n    {\n        var b = a + ${s};\n        return b;\n    }\n\n    public async Task Other(CancellationToken ct)\n    {\n        await using var tx = await _db.Database.BeginTransactionAsync(ct);\n        await tx.CommitAsync(ct);\n    }\n}\n`;
+  const r = size(change({ 'Api/T.cs': svc(1) }, { 'Api/T.cs': svc(2) }));
+  assert.equal(r.signals.concurrency, undefined, 'the transaction sits in another method: ' + JSON.stringify(r.signals));
+  assert.equal(r.size, 'small');
+});
+
+test('money words size big, as loop.md says', () => {
+  const p = (e) => `public class FeeService\n{\n    public decimal Total(decimal a, int qty)\n    {\n        ${e}\n    }\n}\n`;
+  const r = size(change({ 'Api/FeeService.cs': p('decimal price = item.Price * qty;') }, { 'Api/FeeService.cs': p('decimal price = item.Price * qty * 0.85m;') }));
+  assert.equal(r.size, 'big', JSON.stringify(r.signals));
+  assert.ok(r.signals.money);
+});
+
+test('an upload or download field name is no file handling; an upload or download call still is', () => {
+  const base = 'public class MatService\n{\n    public void Map(Material material, Dto dto)\n    {\n        dto.Id = material.Id;\n    }\n}\n';
+  for (const line of ['dto.UploadedAt = material.UploadedAt;', 'dto.AllowDownload = material.AllowDownload;', 'dto.Link = material.DownloadUrl;']) {
+    const r = size(change({ 'Api/M.cs': base }, { 'Api/M.cs': base.replace('dto.Id = material.Id;', 'dto.Id = material.Id;\n        ' + line) }));
+    assert.equal(r.size, 'small', line + ' ' + JSON.stringify(r.signals));
+  }
+  for (const line of ['await _files.UploadAsync(stream);', 'var x = DownloadFile(key);']) {
+    const r = size(change({ 'Api/M.cs': base }, { 'Api/M.cs': base.replace('dto.Id = material.Id;', 'dto.Id = material.Id;\n        ' + line) }));
+    assert.ok(r.signals.files, line + ' ' + JSON.stringify(r.signals));
+  }
+  const ui = 'export function Row({ f }) {\n  return f.name;\n}\n';
+  const call = size(change({ 'web/src/Row.tsx': ui }, { 'web/src/Row.tsx': ui.replace('return f.name;', 'uploadFile(f);\n  return f.name;') }));
+  assert.ok(call.signals.filesUi, 'a client upload call: ' + JSON.stringify(call.signals));
+  const prop = size(change({ 'web/src/Row.tsx': ui }, { 'web/src/Row.tsx': ui.replace('return f.name;', 'return f.uploadedAt;') }));
+  assert.equal(prop.signals.filesUi, undefined);
+});
+
+test('a git diff.mnemonicPrefix setting does not hide the content signals', () => {
+  const none = '        var n = 1;';
+  const repo = change({ 'Api/S.cs': csClass(none) }, { 'Api/S.cs': csClass(none + '\n        if (exam.TeacherId != currentUser.UserId && exam.SchoolId != _tenantId) throw new ForbiddenException();') }, { commit: false });
+  execFileSync('git', ['config', 'diff.mnemonicPrefix', 'true'], { cwd: repo, windowsHide: true });
+  const r = size(repo);
+  assert.equal(r.size, 'big', JSON.stringify(r));
+});
+
+test('the size line names no engine seat: fresh eyes and the other engine', () => {
+  const small = size(change({ 'Api/S.cs': csClass('        var n = 1;') }, { 'Api/S.cs': csClass('        var n = 2;') }));
+  assert.equal(small.roles[0], 'one review: fresh eyes');
+  const big = size(change({ 'Api/S.cs': csClass('        var n = 1;') }, { 'Api/S.cs': csClass('        var n = 1;\n        if (a != _currentUser.UserId) return Forbid();') }));
+  assert.ok(big.roles.some(r => /the other engine/.test(r)), JSON.stringify(big.roles));
+  assert.doesNotMatch(big.roles.join(' '), /Opus|Codex|Sonnet/);
+});
+
+// 2026-11-18: one rule of what is code, as the hooks (hooks/lib/code-paths.cjs) read it. A .mdx file is code; a .txt
+// file is prose only under a notes name (README, CHANGELOG, CHANGES, LICENSE, NOTICE, AUTHORS, NOTES, TODO); a
+// dependency manifest or lock file is code and never sizes tiny.
+test('requirements.txt and a .mdx page are code, so they are never tiny; a requirements change is a dependency change', () => {
+  const a = size(change({}, { 'requirements.txt': 'flask==3.0.0\n' }));
+  assert.notEqual(a.size, 'tiny');
+  assert.equal(a.size, 'big');
+  assert.ok(a.signals.dependency, 'requirements.txt is a dependency change');
+  const b = size(change({}, { 'requirements-dev.txt': 'pytest==8.0.0\n' }));
+  assert.equal(b.size, 'big');
+  const c = size(change({}, { 'src/Page.mdx': 'export const a = 1;\n\n# Title\n' }));
+  assert.equal(c.size, 'small');
+  assert.equal(c.codeFiles, 1);
+  const d = size(change({}, { 'robots.txt': 'x\n' }));
+  assert.notEqual(d.size, 'tiny', 'a .txt file with no notes name is code');
+});
+
+test('must not change: notes-named text files, docs, tests and a comment-only requirements change stay tiny or small as before', () => {
+  // 2026-11-18 (repair round 3): LICENSE-MIT left this list: the hooks call it code, and the size check now reads their rule.
+  for (const name of ['README.txt', 'docs/CHANGELOG.txt', 'CHANGES.txt', 'LICENSE', 'NOTICE.txt', 'AUTHORS', 'NOTES.txt', 'TODO.txt', 'docs/guide.md', 'docs/a.rst', 'docs/a.adoc']) {
+    assert.equal(size(change({}, { [name]: 'x\n' })).size, 'tiny', name);
+  }
+  // A comment or a blank line in requirements.txt is no dependency change, but the file is still code (not tiny).
+  const r = size(change({ 'requirements.txt': 'flask==3.0.0\n' }, { 'requirements.txt': '# pinned for the build\nflask==3.0.0\n' }));
+  assert.equal(r.size, 'small');
+  assert.ok(!r.signals.dependency);
+});
+
+test('plan mode: requirements.txt and package.json plan big; a README.txt plans tiny', () => {
+  const repo = change({ 'requirements.txt': 'a==1\n', 'README.txt': 'x\n' }, {});
+  assert.equal(size(repo, { base: undefined, files: ['requirements.txt'] }).size, 'big');
+  assert.equal(size(repo, { base: undefined, files: ['README.txt'] }).size, 'tiny');
+});
+
+test('the size check reads the same paths as code as the hooks (code-paths.cjs) on one list', async () => {
+  const { createRequire } = await import('node:module');
+  const { isCodePath } = createRequire(import.meta.url)('../../../hooks/lib/code-paths.cjs');
+  const { fileKind } = await import('../scripts/size-check.mjs');
+  // The hooks call every file that is not prose code; the size check also splits tests, locale text and styles out
+  // of "code". Those kinds are not code to the size check and are left out of this list. A named list: .mdx and
+  // the .txt cases (requirements.txt) are checked directly above, since the hooks rule for them is another part's.
+  const list = ['src/a.ts', 'src/a.py', 'index.html', 'nginx.conf', 'Makefile', 'data/seed.json', 'package.json', 'package-lock.json', 'App.csproj', 'Directory.Packages.props', 'poetry.lock', 'Cargo.lock', 'go.sum', 'Gemfile.lock', 'docs/a.md', 'docs/a.rst', 'docs/a.adoc', 'LICENSE', 'CHANGELOG', 'NOTICE', 'AUTHORS'];
+  for (const p of list) assert.equal(fileKind(p) === 'code', isCodePath(p), p);
+  // And the cases the hooks rule is to follow (code-paths.cjs): they are code to the size check.
+  for (const p of ['requirements.txt', 'requirements-dev.txt', 'src/Page.mdx', 'robots.txt']) assert.equal(fileKind(p), 'code', p);
+  // 2026-11-18 (repair round 3): LICENSE-MIT is code to the hooks (a notes name is prose only bare or as .txt), so it is no longer a doc here.
+  for (const p of ['README.txt', 'CHANGES.txt', 'NOTES', 'TODO.txt']) assert.equal(fileKind(p), 'doc', p);
+});
+
+// 2026-11-18 (repair round 3): prose is the hooks' own rule (isProsePath), so a code file with a notes-kind name is code.
+test('code files with a notes-kind name are code, never tiny (notes.html, todo.rs, notice.html, todo.bat, changelog.xml)', () => {
+  const cases = {
+    'src/app/notes/notes.component.html': ['<li></li>\n', '<li *ngFor="let n of notes" [innerHTML]="n.text"></li>\n'],
+    'src/todo.rs': ['fn ok(id: i32) -> bool { id > 0 }\n', 'fn ok(id: i32) -> bool { true }\n'],
+    'public/notice.html': ['<p>x</p>\n', '<p>x</p>\n<script src="https://x.example/a.js"></script>\n'],
+    'scripts/todo.bat': ['echo x\n', 'rmdir /s /q %TARGET%\n'],
+    'db/changelog.xml': ['<databaseChangeLog></databaseChangeLog>\n', '<databaseChangeLog><changeSet id="1"><dropColumn tableName="t" columnName="c"/></changeSet></databaseChangeLog>\n'],
+  };
+  for (const [name, [before, after]] of Object.entries(cases)) {
+    const r = size(change({ [name]: before }, { [name]: after }));
+    assert.notEqual(r.size, 'tiny', name);
+    assert.equal(r.codeFiles, 1, name);
+  }
+});
+
+test('Must not change: notes-kind prose stays tiny (README, README.txt, CHANGELOG, NOTES.md, TODO.txt, docs/notes.md)', () => {
+  for (const name of ['README', 'README.txt', 'CHANGELOG', 'NOTES.md', 'TODO.txt', 'docs/notes.md', 'docs/CHANGELOG.txt']) {
+    assert.equal(size(change({}, { [name]: 'x\n' })).size, 'tiny', name);
+  }
+});
+
+test('the parity list also holds the notes-kind code names', async () => {
+  const { createRequire } = await import('node:module');
+  const { isCodePath } = createRequire(import.meta.url)('../../../hooks/lib/code-paths.cjs');
+  const { fileKind } = await import('../scripts/size-check.mjs');
+  for (const p of ['todo.html', 'notes.html', 'notes.component.html', 'README.html', 'changelog.xml', 'todo.rs', 'notes.rs', 'todo.bat', 'notes.cmd', 'Notes.xaml', 'todo.swift', 'notes.c', 'todo.dart', 'notes.graphql', 'todo.proto', 'notes.tf', 'notes.env', 'notes.xml', 'Notes.config', 'db/changelog.xml']) {
+    assert.equal(isCodePath(p), true, p);
+    assert.equal(fileKind(p) === 'code', true, p);
+  }
+});
+
+// 2026-11-18 (repair round 3): an ownership check with a current-user call or service, with no fixed access word.
+test('an ownership compare with GetCurrentUserId( or a current-user service is access (big)', () => {
+  const none = '        var n = 1;';
+  for (const line of [
+    'if (exam.TeacherId != GetCurrentUserId()) return NotFound();',
+    'if (exam.TeacherId != _currentUserService.UserId) return NotFound();',
+  ]) {
+    const r = lineIn(none, none + '\n        ' + line);
+    assert.equal(r.size, 'big', line + ' ' + JSON.stringify(r.signals));
+    assert.ok(r.signals.access, line);
+  }
+});
+
+test('Must not change: a current-user value that is only read, not compared, stays small', () => {
+  const none = '        var n = 1;';
+  const r = lineIn(none, none + '\n        var who = GetCurrentUserId();\n        var name = _currentUserService.Name;');
+  assert.equal(r.size, 'small', JSON.stringify(r.signals));
 });

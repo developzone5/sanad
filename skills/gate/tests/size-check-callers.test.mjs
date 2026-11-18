@@ -192,3 +192,127 @@ test('the rows that raised the callers signal come first among the printed rows'
   const u = size(change({ 'src/rule.ts': rule(1), 'src/user.ts': "import { validate as check } from '~/rule';\ncheck(1);\n" }, { 'src/rule.ts': rule(2) }));
   assert.equal(u.callers[0].name, 'validate');
 });
+
+// 2026-11-18 (repair round): callers of a function exported at the bottom of its file, a method of an exported
+// object, a C# property and a base class method.
+const users12 = (imp, use) => Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`src/pages/P${i}.tsx`, `${imp}\nexport const p${i} = () => ${use(i)};\n`]));
+
+test('a function exported at the bottom of its file (export default X; / export { X }) has its callers counted', () => {
+  const field = (v) => `function Field(props) {\n  return props.a + ${v};\n}\nexport default Field;\n`;
+  const r1 = size(change({ 'src/components/Field.tsx': field(1), ...users12("import Field from '../components/Field';", () => 'Field(1)') }, { 'src/components/Field.tsx': field(2) }));
+  assert.equal(r1.size, 'big', JSON.stringify(r1.callers));
+  assert.equal(r1.callers.find(c => c.name === 'Field').count, 12);
+  const due = (v) => `function useDue(d) {\n  return d + ${v};\n}\nexport { useDue };\n`;
+  const r2 = size(change({ 'src/components/useDue.ts': due(1), ...users12("import { useDue } from '../components/useDue';", () => 'useDue(1)') }, { 'src/components/useDue.ts': due(2) }));
+  assert.equal(r2.size, 'big', JSON.stringify(r2.callers));
+});
+
+test('Must not change: a local function that is not exported keeps only its own file as callers', () => {
+  const field = (v) => `function Field(props) {\n  return props.a + ${v};\n}\nexport default Other;\nfunction Other() { return Field(1); }\n`;
+  const r = size(change({ 'src/components/Field.tsx': field(1), ...users12("import Other from '../components/Field';", () => 'Field(1)') }, { 'src/components/Field.tsx': field(2) }));
+  assert.equal(r.size, 'small', JSON.stringify(r.callers));
+});
+
+test('a method of an exported object counts its object.method uses', () => {
+  const api = (v) => `export const gradesApi = {\n  list: (classId) => client.get('/g', classId),\n  save: (id, value) => client.put('/g/' + id, { value: ${v} }),\n};\n`;
+  const files = users12("import { gradesApi } from '../lib/gradesApi';", () => 'gradesApi.save(1, 5)');
+  const r = size(change({ 'src/lib/gradesApi.ts': api('value'), ...files }, { 'src/lib/gradesApi.ts': api('Math.round(value)') }));
+  assert.equal(r.size, 'big', JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'gradesApi.save').count, 12);
+  const few = Object.fromEntries(Object.entries(files).slice(0, 2));
+  const s = size(change({ 'src/lib/gradesApi.ts': api('value'), ...few }, { 'src/lib/gradesApi.ts': api('Math.round(value)') }));
+  assert.equal(s.size, 'small', 'Must not change: two callers stay small ' + JSON.stringify(s.callers));
+  assert.equal(s.callers.find(c => c.name === 'gradesApi.save').count, 2);
+});
+
+test('a changed line in an exported object with no nameable member counts as unknown callers', () => {
+  const api = (v) => `export const gradesApi = {\n  ...base,\n  [dyn]: ${v},\n};\n`;
+  const r = size(change({ 'src/lib/gradesApi.ts': api('1') }, { 'src/lib/gradesApi.ts': api('2') }));
+  assert.equal(r.size, 'big', JSON.stringify(r.callers));
+});
+
+test('Must not change: a changed line in a local (not exported) object stays small', () => {
+  const page = (v) => `const styles = {\n  box: ${v},\n};\nexport function Box() {\n  return styles.box;\n}\n`;
+  const r = size(change({ 'src/Box.tsx': page(1) }, { 'src/Box.tsx': page(2) }));
+  assert.equal(r.size, 'small', JSON.stringify(r.callers));
+});
+
+test('a changed C# property is counted by its .Name uses; an auto-property line is not a function', () => {
+  const sub = (e) => `namespace D;\npublic class Submission\n{\n    public bool IsLate => ${e};\n}\n`;
+  const users = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Api/U${i}.cs`, `public class U${i}\n{\n    public bool Go(Submission s) { return s.IsLate; }\n}\n`]));
+  const r = size(change({ 'Domain/Submission.cs': sub('SubmittedAt > DueAt'), ...users }, { 'Domain/Submission.cs': sub('SubmittedAt > DueAt.AddMinutes(5)') }));
+  assert.equal(r.size, 'big', JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'IsLate').count, 12);
+  const dto = 'public class Row\n{\n    public int Id { get; set; }\n}\n';
+  const d = size(change({ 'Api/Row.cs': dto, ...users }, { 'Api/Row.cs': dto.replace('public int Id', 'public string Status { get; set; }\n    public int Id') }));
+  assert.equal(d.size, 'small', 'Must not change: ' + JSON.stringify(d.callers));
+});
+
+test('a base class method is counted through the types and interfaces that derive from it', () => {
+  const baseCs = (e) => `public abstract class RepositoryBase<T>\n{\n    public virtual T Load(int id)\n    {\n        return ${e};\n    }\n}\n`;
+  const derived = 'public class UserRepository : RepositoryBase<User>, IUserRepository\n{\n}\n';
+  const users = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Api/U${i}.cs`, `public class U${i}\n{\n    private readonly IUserRepository _users;\n    public User Go(int id) { return _users.Load(id); }\n}\n`]));
+  const r = size(change({ 'Domain/RepositoryBase.cs': baseCs('Find(id)'), 'Domain/UserRepository.cs': derived, ...users }, { 'Domain/RepositoryBase.cs': baseCs('Find(id + 0)') }));
+  assert.equal(r.size, 'big', JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'Load').count, 12);
+});
+
+// 2026-11-18 (repair round 3).
+test('a C# property is counted only in files that name its declaring type, not every same-named read', () => {
+  const badge = (e) => `namespace D;\npublic class Badge\n{\n    public bool IsActive => ${e};\n}\n`;
+  const user = 'namespace D;\npublic class User\n{\n    public bool IsActive { get; set; }\n}\n';
+  const users = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Api/U${i}.cs`, `public class U${i}\n{\n    public bool Ok(User user) { return user.IsActive; }\n}\n`]));
+  const r = size(change({ 'Domain/Badge.cs': badge('EndsAt == null'), 'Domain/User.cs': user, ...users }, { 'Domain/Badge.cs': badge('EndsAt == null || EndsAt > DateTime.UtcNow') }));
+  assert.equal(r.size, 'small', JSON.stringify(r.callers));
+  assert.ok(!r.signals.callersMany);
+  // Must not change: readers that do name the declaring type still count.
+  const badgeUsers = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Api/B${i}.cs`, `public class B${i}\n{\n    public bool Ok(Badge b) { return b.IsActive; }\n}\n`]));
+  const q = size(change({ 'Domain/Badge.cs': badge('EndsAt == null'), 'Domain/User.cs': user, ...badgeUsers }, { 'Domain/Badge.cs': badge('EndsAt == null || EndsAt > DateTime.UtcNow') }));
+  assert.equal(q.size, 'big', JSON.stringify(q.callers));
+  assert.equal(q.callers.find(c => c.name === 'IsActive').count, 12);
+});
+
+test('a hosted service whose base list is on a later line, or comes from a project base class, is background work', () => {
+  const loop = (l) => `    protected override async Task ExecuteAsync(CancellationToken ct)\n    {\n        while (!ct.IsCancellationRequested)\n        {\n            ${l}\n        }\n    }\n}\n`;
+  const a = (l) => 'public sealed class RoleSyncWorker(IRoleQueue queue, ILogger<RoleSyncWorker> logger)\n    : BackgroundService\n{\n' + loop(l);
+  const b = (l) => 'public sealed class RoleSyncWorker(\n    IRoleQueue queue,\n    ILogger<RoleSyncWorker> logger\n) : BackgroundService\n{\n' + loop(l);
+  const c = (l) => 'public sealed class RoleSyncWorker : QueueWorkerBase\n{\n' + loop(l);
+  const baseCs = 'public abstract class QueueWorkerBase : BackgroundService\n{\n}\n';
+  const x = 'await _queue.MarkDoneAsync(item.Id, ct);', y = 'if (item.Tries < 3) await _queue.MarkDoneAsync(item.Id, ct);';
+  for (const [name, mk, extra] of [['multi-line base list', a, {}], ['multi-line parameters', b, {}], ['project base class', c, { 'Api/QueueWorkerBase.cs': baseCs }]]) {
+    const r = size(change({ 'Api/RoleSyncWorker.cs': mk(x), ...extra }, { 'Api/RoleSyncWorker.cs': mk(y) }));
+    assert.ok(r.signals.concurrency, name + ' ' + JSON.stringify(r.signals));
+    assert.equal(r.size, 'big', name);
+  }
+  // Must not change: a plain class with a base class that is no hosted service stays small.
+  const plain = (l) => 'public sealed class Mapper : MapperBase\n{\n    public int Go(int a)\n    {\n        ' + l + '\n    }\n}\n';
+  const m = size(change({ 'Api/Mapper.cs': plain('return a;'), 'Api/MapperBase.cs': 'public abstract class MapperBase\n{\n}\n' }, { 'Api/Mapper.cs': plain('return a + 1;') }));
+  assert.equal(m.size, 'small', JSON.stringify(m.signals));
+});
+
+test('a default export through a wrapper call (memo, React.memo, forwardRef) is exported and has its callers counted', () => {
+  const field = (v, tail) => `const Field = (props) => {\n  return <input value={props.value}${v} />;\n};\n${tail}\n`;
+  const imp = "import Field from '../components/Field';";
+  for (const tail of ['export default memo(Field);', 'export default React.memo(Field);', 'export default forwardRef(Field);']) {
+    const r = size(change({ 'src/components/Field.tsx': field('', tail), ...users12(imp, () => '<Field />') }, { 'src/components/Field.tsx': field(' disabled', tail) }));
+    assert.equal(r.size, 'big', tail + ' ' + JSON.stringify(r.callers));
+    assert.equal(r.callers.find(c => c.name === 'Field').count, 12, tail);
+  }
+  // Must not change: a wrapper around another name leaves Field local.
+  const tail2 = 'export default memo(Other);\nconst Other = () => <Field />;';
+  const other = size(change({ 'src/components/Field.tsx': field('', tail2), ...users12(imp, () => '<Field />') }, { 'src/components/Field.tsx': field(' disabled', tail2) }));
+  assert.equal(other.size, 'small', JSON.stringify(other.callers));
+});
+
+test('a C# property whose accessor block starts on a later line has its readers counted', () => {
+  const sub = (e) => `namespace D;\npublic class Submission\n{\n    public bool IsLate\n    {\n        get { return SubmittedAt > ${e}; }\n    }\n}\n`;
+  const users = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Api/U${i}.cs`, `public class U${i}\n{\n    public bool Check(Submission s) { return s.IsLate; }\n}\n`]));
+  const r = size(change({ 'Domain/Submission.cs': sub('DueAt'), ...users }, { 'Domain/Submission.cs': sub('DueAt.AddMinutes(5)') }));
+  assert.equal(r.size, 'big', JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'IsLate').count, 12);
+  // Must not change: a multi-line auto-property (get; set; only) with the same readers stays small.
+  const dto = (x) => `public class Row\n{\n    public int Id { get; set; }\n    public string Note\n    {\n        get; ${x};\n    }\n}\n`;
+  const rowUsers = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Api/R${i}.cs`, `public class R${i}\n{\n    public string Check(Row s) { return s.Note; }\n}\n`]));
+  const d = size(change({ 'Api/Row.cs': dto('set'), ...rowUsers }, { 'Api/Row.cs': dto('init') }));
+  assert.equal(d.size, 'small', JSON.stringify(d.callers));
+});

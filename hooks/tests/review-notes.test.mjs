@@ -287,8 +287,11 @@ function invoke(hook, entries, options = {}) {
   vm.runInNewContext(source('lib/verification-target.cjs'), { require: (n) => n === 'fs' ? fakeFs : realRequire(n), module: verificationTarget }, { timeout: 2000 });
   const shellCommand = { exports: {} };
   vm.runInNewContext(source('lib/shell-command.cjs'), { require: (n) => n === 'path' ? path : n === './verification-target.cjs' ? verificationTarget.exports : assert.fail('Unexpected require: ' + n), module: shellCommand }, { timeout: 2000 });
+  // 2026-11-18: the scanner's file rule is its own module (lib/code-paths.cjs), loaded here with the same fake fs.
+  const codePaths = { exports: {} };
+  vm.runInNewContext(source('lib/code-paths.cjs'), { require: (n) => n === 'fs' ? fakeFs : realRequire(n), module: codePaths }, { timeout: 2000 });
   const scanModule = { exports: {} };
-  vm.runInNewContext(source('lib/transcript-scan.js'), { require: (n) => n === 'fs' ? fakeFs : n === './verification-target.cjs' ? verificationTarget.exports : n === './shell-command.cjs' ? shellCommand.exports : realRequire(n), module: scanModule, Buffer }, { timeout: 2000 });
+  vm.runInNewContext(source('lib/transcript-scan.js'), { require: (n) => n === 'fs' ? fakeFs : n === './verification-target.cjs' ? verificationTarget.exports : n === './shell-command.cjs' ? shellCommand.exports : n === './code-paths.cjs' ? codePaths.exports : realRequire(n), module: scanModule, Buffer }, { timeout: 2000 });
   let stdout = '';
   const halt = Symbol('exit');
   try {
@@ -300,6 +303,7 @@ function invoke(hook, entries, options = {}) {
         if (n === 'os') return { homedir: () => 'C:/Users/Asus', tmpdir: () => 'C:/Users/Asus/AppData/Local/Temp' };
         if (n.endsWith('verification-target.cjs')) return verificationTarget.exports;
         if (n.endsWith('shell-command.cjs')) return shellCommand.exports;
+        if (n.endsWith('code-paths.cjs')) return codePaths.exports;   // 2026-11-18: the push guard reads the shared file rule too
         if (n.endsWith('transcript-scan.js')) return scanModule.exports;
         if (n === 'child_process') return { execFileSync(exe, args) {
           assert.equal(exe, 'git');
@@ -357,7 +361,10 @@ test('the same stop with all notes closed is allowed', () => {
 
 test('a stop without a verdict line or push command is not blocked by open notes', () => {
   assert.equal(stop(report(), 'Here are the reviewer notes. Which do you want fixed?').decision, 'allow');
-  assert.equal(stop(report(), 'The push command is `git push` (not run).').decision, 'allow', 'a push named outside a code block hands nothing over');
+  // Changed 2026-11-18 (the other engine's review): a push command counts wherever it stands in the final text,
+  // inline backticks included; handing it over while a note is open is blocked. Before, only a fenced block counted.
+  assert.equal(stop(report(), 'The push command is `git push` (not run).').decision, 'block', 'a push command in inline backticks is handed over too');
+  assert.equal(stop(report(), 'Nothing was published yet; the notes come first.').decision, 'allow', 'a text with no push command hands nothing over');
   assert.equal(stop(report()).decision, 'allow');
 });
 

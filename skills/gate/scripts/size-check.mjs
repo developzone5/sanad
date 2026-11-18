@@ -21,7 +21,7 @@
 // Exit 0: sized (and not grown). 1: --was given and the change grew. 2: usage error.
 import fs from 'node:fs';
 import path from 'node:path';
-import { builtinModules } from 'node:module';
+import { builtinModules, createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { readStack } from './stack.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
@@ -29,7 +29,16 @@ import { isMain } from './is-main.mjs';
 
 export const SIZES = ['tiny', 'small', 'medium', 'big'];
 const CODE = /\.(?:cs|[cm]?[jt]sx?|py|go|java|kt|rb|php|sql|razor|cshtml|vue|svelte)$/i;
-const DOC = /\.(?:md|mdx|txt|rst|adoc)$|(?:^|\/)(?:LICENSE|CHANGELOG)[^/]*$/i;
+// 2026-11-18: prose is read by the very rule of the hooks (isProsePath of hooks/lib/code-paths.cjs, loaded as the other
+// gate scripts load hooks/lib), so the two never disagree: .md .rst .adoc, a notes name (README, CHANGELOG, CHANGES,
+// LICENSE, NOTICE, AUTHORS, NOTES, TODO) bare or as a .txt file. .mdx, every other .txt, notes.html, todo.rs, notes.bat,
+// changelog.xml and every manifest or lock file are code. A copy of the rule here drifted (28 code paths sized tiny);
+// if the hooks file cannot be loaded, only .md .rst .adoc are prose (more code, never less).
+let proseByHooks = null;
+try { proseByHooks = createRequire(import.meta.url)('../../../hooks/lib/code-paths.cjs').isProsePath; } catch { /* fallback below */ }
+const DOC = { test: name => proseByHooks ? proseByHooks(name) : /\.(?:md|rst|adoc)$/i.test(name) };
+// A change to one of these is a dependency change (plan and diff alike).
+const REQUIREMENTS = /(?:^|\/)requirements[^/]*\.txt$/i;
 // Text-only locale data: data files under a locale folder (EduQuest keeps its 277 locale bundles as
 // `export default {...}` .ts modules under locales/), JSON or YAML under i18n/, messages.<lang>.json and
 // .resx. Code in an i18n folder is code (2026-11-12: the i18next setup in i18n/index.ts sized "tiny").
@@ -53,7 +62,8 @@ export const SIGNALS = {
   query: { size: 'medium', seat: 'Database expert', label: 'database query shape' },
   contract: { size: 'medium', seat: 'contract check on both halves', label: 'the shared API contract' },
   serverEntry: { size: 'medium', seat: 'access check in every new server entry', label: 'a server action or route handler' },
-  money: { size: 'medium', seat: 'boss confirms money or not', label: 'money words' },
+  // 2026-11-18: money is Big, as loop.md and CLAUDE.md say (it was medium here while the rule text said Big).
+  money: { size: 'big', seat: 'boss confirms money or not', label: 'money words' },
   accessUi: { size: 'medium', seat: 'server check behind each UI gate', label: 'role gating in the UI' },
   filesUi: { size: 'medium', seat: 'server check of what the client sends', label: 'file or URL handling in the client' },
   concurrencyUi: { size: 'medium', seat: 'Skeptic', label: 'timers or cross-tab state in the client' },
@@ -80,17 +90,21 @@ const RE = {
   schemaPath: /(?:^|\/)(?:Migrations|migrations?|prisma\/migrations|drizzle|db\/migrate)\/.+|(?:^|\/)schema\.prisma$|\.sql$|ModelSnapshot\.cs$|(?:DbContext|EntityTypeConfiguration|Configuration)\.cs$/i,
   schemaLine: /\b(?:modelBuilder|HasIndex|HasKey|HasAlternateKey|ToTable|HasColumnType|HasMaxLength|IEntityTypeConfiguration|migrationBuilder|CREATE\s+(?:TABLE|INDEX)|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|COLUMN))\b/i,
   query: /\.(?:Where|Include|ThenInclude|OrderBy\w*|ThenBy\w*|GroupBy|Join|SelectMany|Select|Any|All|Count|LongCount|Sum|Max|Min|Average|First\w*|Single\w*|Last\w*|ToList\w*|ToArray\w*|ToDictionary\w*|AsNoTracking\w*|AsSplitQuery|Skip|Take|ExecuteUpdate\w*|ExecuteDelete\w*|findMany|findFirst|findUnique|groupBy|aggregate|upsert)\s*\(|\bFromSql\w*\(|\bSqlQuery\w*\(|\bExecuteSql\w*\(|\bsql`|\bSELECT\s.+\sFROM\s/i,
-  access: /\[(?:Authorize|AllowAnonymous)\b|RequireAuthorization|AuthorizeAsync|IAuthorizationHandler|AuthorizationPolicy|\bPolicy\s*=|\bRoles\s*=|ClaimTypes\.|User\.(?:FindFirst\w*|IsInRole|Identity|Claims)|HttpContext\.User|SignInAsync|SignOutAsync|getServerSession|\bauth\(\)|\bisAdmin\b|\bhasRole\b|\bcanManage\b/i,
+  access: /\[(?:Authorize|AllowAnonymous)\b|RequireAuthorization|AuthorizeAsync|IAuthorizationHandler|AuthorizationPolicy|\bPolicy\s*=|\bRoles\s*=|ClaimTypes\.|User\.(?:FindFirst\w*|IsInRole|Identity|Claims)|HttpContext\.User|SignInAsync|SignOutAsync|getServerSession|\bauth\(\)|\bisAdmin\b|\bhasRole\b|\bcanManage\b|\bForbid\w*\(|\bForbidden\w*|\bUnauthorized\w*\(/i,
   // A field that scopes data (campus, tenant, owner, the current user) is an access rule only on a line that
   // compares or filters with it; a DTO field, a projection or a parameter is not (2026-11-12, audit C18:
   // CampusId alone sits on 7,966 backend lines, so any edited line with it sized "big").
-  accessField: /\b(?:currentUser|tenant\w*|campusIds?|ownerId|owner)\b/i,
+  // 2026-11-18: a private field starts with an underscore (`_currentUser.UserId`, 827 product lines); `\b` is no
+  // boundary between `_` and a letter, so the name is read after an optional underscore.
+  // 2026-11-18 (repair round 3): a current-user service (`_currentUserService.UserId`) and the call `GetCurrentUserId(`
+  // are the current user too; a compare with a plain `userId` is left to the user's decision (it may size up honest filters).
+  accessField: /(?<![A-Za-z0-9])_?(?:currentUser\w*|tenant\w*|campusIds?|ownerId|owner)\b|(?<![A-Za-z0-9])GetCurrentUserId\s*\(/i,
   compare: /\.(?:Where|Any|All|Contains)\s*\(|\.(?:First|Single)\w*\s*\(|\bif\s*\(|[!=]==?|&&|\|\||\s\?\s|\?\?|\[Authorize|\bRoles\b|\bClaims\b/,
   accessUi: /\bRoleGuard\b|\bProtectedRoute\b|\ballowedRoles\b|\bhasRole\b|\bisAdmin\b|\bcanManage\b|\brole\s*===?\s*['"]/i,
   // Stored-file code counts by its calls (a file storage service, S3 object calls and keys, file name and
   // extension handling), not by words: with comments no longer read, commit ff3b3b0405, which copies a stored
   // file across schools, had no "files" word left in its code (2026-11-12).
-  files: /IFormFile|\bFormData\b|multipart|Content-Disposition|PresignedUrl|GetPreSignedURL|presign\w*|\bupload\w*|\bdownload\w*|\bRedirect\w*\(|\bredirect\(|new URL\(|HttpClient|\bReturnUrl\b|\breturnUrl\b|Path\.(?:Combine|GetExtension|GetFileName\w*)|File\.(?:Open|Read|Write)\w*|FileStream|ZipArchive|\bcreateReadStream\b|\bwriteFile\w*\(|FileStorage|\b(?:Put|Get|Copy|Delete)Objects?(?:Async|Request)?\b|\w*StorageKey\b|\bObjectKey\b/i,
+  files: /IFormFile|\bFormData\b|multipart|Content-Disposition|PresignedUrl|GetPreSignedURL|presign\w*|\b(?:up|down)load\w*\s*[(<]|\b(?:up|down)load\w*(?:Request|Result|Response|Stream|Options)\b|\bRedirect\w*\(|\bredirect\(|new URL\(|HttpClient|\bReturnUrl\b|\breturnUrl\b|Path\.(?:Combine|GetExtension|GetFileName\w*)|File\.(?:Open|Read|Write)\w*|FileStream|ZipArchive|\bcreateReadStream\b|\bwriteFile\w*\(|FileStorage|\b(?:Put|Get|Copy|Delete)Objects?(?:Async|Request)?\b|\w*StorageKey\b|\bObjectKey\b/i,
   money: /\b(?:price|amount|payment|invoice|refund|wallet|currency|billing|payout|subtotal|discount)\w*\b/i,
   // "tax" as its own word or a camelCase part (taxRate, TotalTax), never inside taxonomy or syntax.
   tax: /(?:\b[Tt]ax|[a-z0-9_]Tax)(?:es)?(?![a-z])/,
@@ -101,7 +115,7 @@ const RE = {
   contractLine: /\[Http(?:Get|Post|Put|Delete|Patch)\b|\[Route\(|\bMap(?:Get|Post|Put|Delete|Patch|Group)\(|ProducesResponseType/,
   contractClient: /(?:^|\/)src\/(?:types|api)\/.+\.[jt]sx?$/i,
   infra: /(?:^|\/)(?:Dockerfile[^/]*|[^/]*compose[^/]*\.ya?ml|nginx[^/]*\.conf|appsettings[^/]*\.json|\.env[^/]*|vite\.config\.[cm]?[jt]s|next\.config\.[cm]?[jt]s|Program\.cs|Startup\.cs|web\.config)$|(?:^|\/)\.github\/workflows\//i,
-  lockfile: /(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|packages\.lock\.json|Directory\.Packages\.props)$/i,
+  lockfile: /(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|packages\.lock\.json|Directory\.Packages\.props|Pipfile\.lock|poetry\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|composer\.lock)$/i,
   depLine: /^\s*"(?:@[\w.-]+\/)?[\w.-]+"\s*:\s*"[~^<>=]*[\dx*]|<PackageReference\b|<PackageVersion\b/,
 };
 // Signals are read in code only (codeOnly below): a word in a comment, an i18n key or a log text is no
@@ -159,7 +173,7 @@ export function readDiff(repo, base, extra = {}) {
     if (block.binary) extra.binary.push(block.name);
     else if (block.renameFrom && block.renameTo) extra.renamed.push(`${block.renameFrom} → ${block.renameTo}`);
   };
-  for (const line of git(repo, ['diff', '-U0', '--no-color', '--no-ext-diff', '--find-renames', from]).split(/\r?\n/)) {
+  for (const line of git(repo, ['diff', '-U0', '--no-color', '--no-ext-diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', from]).split(/\r?\n/)) {
     if (line.startsWith('diff --git ')) {
       endBlock();
       const m = /^diff --git "?a\/(.+?)"? "?b\/(.+?)"?$/.exec(line);
@@ -204,7 +218,10 @@ export function readDiff(repo, base, extra = {}) {
   return [...files.values()].filter(f => f.added.length || f.removed.length);
 }
 
-const KIND = name => TEST_FILE.test(name) ? 'test' : DOC.test(name) ? 'doc' : LOCALE.test(name) ? 'locale' : STYLE.test(name) ? 'style' : 'code';
+const isDoc = name => DOC.test(name);
+const KIND = name => TEST_FILE.test(name) ? 'test' : isDoc(name) ? 'doc' : LOCALE.test(name) ? 'locale' : STYLE.test(name) ? 'style' : 'code';
+
+export const fileKind = KIND;
 
 // Signal → list of "file:hint" pieces of evidence.
 // Page code: what runs in the browser. Server TypeScript (route handlers, "use server") is the server side.
@@ -224,6 +241,8 @@ export function signals(files, { plan = false, repo } = {}) {
     const lines = plan ? [] : [...f.added, ...f.removed];
     const server = /\.cs$|\.py$|\.go$|\.java$|\.kt$|\.rb$|\.php$|\.sql$/i.test(f.name) || SERVER_TS.test(f.name) || (!plan && f.added.some(l => /^\s*['"]use server['"]/.test(l))) || (repo && /\.[cm]?[jt]sx?$/.test(f.name) && fileText(repo, f.name).slice(0, 200).includes('use server'));
     if (RE.lockfile.test(f.name) || ((/package\.json$|\.csproj$/i.test(f.name)) && (plan || lines.some(l => RE.depLine.test(l))))) add('dependency', base);
+    // 2026-11-18: requirements*.txt is a dependency manifest; a comment or blank line in it is no dependency change.
+    if (REQUIREMENTS.test(f.name) && (plan || lines.some(l => /^\s*[^#\s]/.test(l)))) add('dependency', base);
     if (RE.infra.test(f.name)) add('infra', base);
     if (kind !== 'code') continue;
     if (server) sides.server ||= base;
@@ -246,6 +265,12 @@ export function signals(files, { plan = false, repo } = {}) {
     const policyOnly = !plan && repo && !AUTH_NAME.test(f.name) && !/authoriz|ClaimsPrincipal|\[Authorize|\bIdentity\b|\bRoles?\b/i.test(fileText(repo, f.name));
     if (AUTH_FILE.test(f.name) && !policyOnly) add(server ? 'access' : 'accessUi', base);
     for (const key of ['access', 'accessUi', 'files', 'filesUi', 'concurrency', 'concurrencyUi', 'clientState', 'money']) content(key);
+    // 2026-11-18: background work and transactions are read by the file and the whole function, not only by the
+    // changed line (a worker's loop line, or a line between BeginTransactionAsync and CommitAsync, holds no keyword).
+    if (server && repo) {
+      if (isBackgroundFile(repo, f.name)) add('concurrency', base);
+      else if (!plan && enclosingCode(repo, f).some(code => code.some(l => RE.concurrency.test(l)))) add('concurrency', base);
+    }
   }
   if (sides.server && sides.page) found.set('bothSides', [sides.server, sides.page]);
   return found;
@@ -274,6 +299,24 @@ function contentSignals(code, raw, { server, db = false }) {
   return keys;
 }
 
+// A class that is a hosted service: any code change in its file is background work (2026-11-18).
+// 2026-11-18 (repair round 3): the header runs to its first `{`, so a base list or parameters on later lines count; and a
+// class that derives from a project base class that is a hosted service counts (hostedTypeNames, one search per run).
+const BACKGROUND_FILE = /\b(?:class|record)\s+\w+[^{]*[:,]\s*(?:BackgroundService|IHostedService|IHostedLifecycleService)\b/;
+const hostedCache = new Map();
+function hostedTypeNames(repo) {
+  if (!hostedCache.has(repo)) hostedCache.set(repo, new Set(derivedTypeNames(repo, ['BackgroundService', 'IHostedService', 'IHostedLifecycleService'])));
+  return hostedCache.get(repo);
+}
+function isBackgroundFile(repo, name) {
+  const text = fileText(repo, name);
+  if (BACKGROUND_FILE.test(text)) return true;
+  if (!CS.test(name)) return false;
+  const hosted = hostedTypeNames(repo);
+  for (const m of text.matchAll(/\b(?:class|record)\s+([A-Za-z_]\w*)/g)) if (hosted.has(m[1])) return true;
+  return false;
+}
+
 const texts = new Map();
 function fileText(repo, name) {
   if (!texts.has(name)) { let t = ''; try { t = fs.readFileSync(path.join(repo, name), 'utf8'); } catch { /* deleted */ } texts.set(name, t); }
@@ -287,12 +330,32 @@ const DEFS = [
   /^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:React\.)?(?:useCallback|useMemo|memo|forwardRef)\(/,
   /^\s*(?:(?:public|private|protected|internal|static|virtual|override|async|sealed|abstract|partial|new|extern|unsafe)\s+)+[\w<>[\],.?() ]+?\s+([A-Za-z_]\w*)\s*(?:<[^>()]*>)?\s*\(/,
   /^\s*(?:(?:public|private|protected|static|async|readonly)\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[^{=]+)?\{\s*$/,
+  // 2026-11-18: a C# property with logic, expression-bodied (`public bool IsLate => …;`) or with a bodied accessor
+  // (`{ get { … } }`, `{ get => …; }`). An auto-property (`{ get; set; }`) holds no logic and is no definition.
+  /^\s*(?:(?:public|private|protected|internal|static|virtual|override|abstract|sealed|new|required)\s+)+[\w<>[\],.?]+(?:\s+[\w<>[\],.?]+)*?\s+([A-Za-z_]\w*)\s*(?:=>|\{\s*(?:get|set|init)\s*(?:\{|=>))/,
 ];
 const NOT_NAMES = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'constructor', 'render', 'function', 'get', 'set', 'then', 'map', 'filter', 'main', 'Main', 'Dispose', 'ToString', 'Equals', 'GetHashCode', 'default', 'new', 'using', 'lock', 'foreach', 'it', 'test', 'describe']);
 function defName(line) {
   for (const re of DEFS) { const m = re.exec(line); if (m && !NOT_NAMES.has(m[1]) && m[1].length >= 3) return m[1]; }
   return '';
 }
+// 2026-11-18 (repair round 3): a C# property written over several lines, its header alone on a line, then `{` and an
+// accessor with a body (`get { … }`, `get => …;`, or `get` and `{` on their own lines). `get; set;` only is no logic.
+const PROP_HEADER = /^\s*(?:(?:public|private|protected|internal|static|virtual|override|abstract|sealed|new|required)\s+)+[\w<>[\],.?]+(?:\s+[\w<>[\],.?]+)*?\s+([A-Za-z_]\w*)\s*$/;
+const NOT_PROP = /\b(?:class|record|struct|interface|enum|namespace|delegate|event)\b/;
+const BODIED_ACCESSOR = /^\s*(?:(?:private|protected|internal)\s+)?(?:get|set|init)\s*(?:\{|=>|$)/;
+function propHeaderName(lines, at) {
+  const m = PROP_HEADER.exec(lines[at] || '');
+  if (!m || NOT_PROP.test(lines[at]) || NOT_NAMES.has(m[1]) || m[1].length < 3) return '';
+  if (String(lines[at + 1] || '').trim() !== '{') return '';
+  for (let k = at + 2; k < Math.min(lines.length, at + 9); k++) {
+    if (String(lines[k] || '').trim() === '}') break;
+    if (BODIED_ACCESSOR.test(lines[k])) return m[1];
+  }
+  return '';
+}
+// defName that also reads the lines under a property header.
+const defNameAt = (lines, at) => defName(lines[at]) || propHeaderName(lines, at);
 const indent = line => /^\s*/.exec(line || '')[0].replace(/\t/g, '    ').length;
 // Opened minus closed brackets on one line, strings and line comments left out.
 function bracketBalance(line) {
@@ -435,8 +498,16 @@ function allChangedSymbols(repo, files, moved = []) {
     // are two functions, each with its own callers (2026-11-17, audit 5: they were merged by bare name).
     const id = f.name + ':' + n + (CS.test(f.name) ? ':' + declaringType(lines, at).name : '');
     const had = names.get(id);
-    if (!had) names.set(id, { name: n, file: f.name, shared: SHARED.test(line), at });
-    else if (SHARED.test(line)) had.shared = true;
+    // 2026-11-18: a function exported below its definition (`export default X;`, `export { X }`,
+    // `module.exports = { X }`) is as shared as one exported on its own line.
+    const shared = SHARED.test(line) || (JS.test(f.name) && exportedByName(repo, f.name, n));
+    if (!had) names.set(id, { name: n, file: f.name, shared, at });
+    else if (shared) had.shared = true;
+  };
+  // A method of an exported object (`export const api = { save: (id) => … }`) is reached as `api.save(…)`.
+  const keepMember = (m, f) => {
+    const id = f.name + ':' + m.object + '.' + (m.member || '?');
+    if (!names.has(id)) names.set(id, { name: m.object + '.' + (m.member || '(member)'), object: m.object, member: m.member, file: f.name, shared: true, at: m.at });
   };
   for (const f of files) {
     if (KIND(f.name) !== 'code' || !CODE.test(f.name)) continue;
@@ -448,12 +519,16 @@ function allChangedSymbols(repo, files, moved = []) {
       if (commentOnlyHunk(repo, f, h)) continue;
       const from = Math.max(0, h.start - 1), to = Math.min(lines.length, from + Math.max(h.count, 1));
       for (let i = from; i < to; i++) {
-        keep(defName(lines[i]), f, lines[i], i, lines);
+        keep(defNameAt(lines, i), f, lines[i], i, lines);
         const under = cs ? attributeTarget(lines, i) : -1;
-        if (under >= 0) keep(defName(lines[under]), f, lines[under], under, lines);
+        if (under >= 0) keep(defNameAt(lines, under), f, lines[under], under, lines);
       }
       const around = enclosingDef(lines, from, to, { wide: cs });
       if (around.name) keep(around.name, f, lines[around.at], around.at, lines);
+      if (JS.test(f.name)) for (let i = from; i < to && i < from + 400; i++) {
+        const m = memberAt(lines, i);
+        if (m && (m.exported || exportedByName(repo, f.name, m.object))) keepMember(m, f);
+      }
     }
   }
   return [...names.values()];
@@ -481,7 +556,7 @@ function enclosingDef(lines, from, to, { wide = false } = {}) {
     sum += bracketBalance(lines[i]);
     s.set(i, sum);
     best = Math.max(best, sum);
-    const n = defName(lines[i]);
+    const n = defNameAt(lines, i);
     if (!n || depth <= indent(lines[i])) continue;
     // A lone `{` one or two lines down is this definition's body (a brace on its own line).
     const opener = [i, i + 1, i + 2].filter(j => j === i || String(lines[j] || '').trim() === '{');
@@ -572,10 +647,19 @@ function namedDefinitions(repo, file, names) {
   for (let at = 0; at < lines.length; at++) {
     if (!isCode[at]) continue;
     const name = defName(lines[at]);
-    if (!name || !wanted.has(name)) continue;
+    if (!name) {
+      // A method of an exported object (2026-11-18): `save: (id) => …` inside `export const api = { … }`.
+      const m = !cs && wanted.size ? memberAt(lines, at) : null;
+      if (m && m.at === at && m.member && wanted.has(m.member) && (m.exported || exportedByName(repo, file, m.object))) {
+        const raw = lines.slice(at, memberEnd(lines, at) + 1);
+        out.push({ name: m.member, object: m.object, line: at + 1, shared: true, raw, code: raw.filter((_, k) => isCode[at + k]).map(codeOnly) });
+      }
+      continue;
+    }
+    if (!wanted.has(name)) continue;
     const from = attributesAbove(lines, at, cs), to = definitionEnd(lines, at, isCode);
     const raw = lines.slice(from, to + 1);
-    out.push({ name, line: at + 1, shared: SHARED.test(lines[at]), raw, code: raw.filter((_, k) => isCode[from + k]).map(codeOnly) });
+    out.push({ name, line: at + 1, shared: SHARED.test(lines[at]) || (!cs && exportedByName(repo, file, name)), raw, code: raw.filter((_, k) => isCode[from + k]).map(codeOnly) });
   }
   return out;
 }
@@ -605,6 +689,77 @@ function definitionEnd(lines, at, isCode) {
   }
   return at;
 }
+// 2026-11-18: `export default X;`, `export { X }` / `export { Y as X }`-less lists and `module.exports = X | { X }`
+// name a function or object that its own line does not export. A re-export `export { X } from '…'` is another file's.
+function exportedByName(repo, file, name) {
+  const n = escapeRe(name), code = jsCodeText(repo, file);
+  // `export default memo(X);`, `React.memo(X)`, `forwardRef(X)`, `observer(X)`: a wrapper whose first argument is the name.
+  return new RegExp(`^\\s*export\\s+default\\s+${n}\\s*;?\\s*$|^\\s*export\\s+default\\s+[\\w$.]+\\s*\\(\\s*${n}\\s*[,)]|export\\s*\\{[^}]*\\b${n}\\b[^}]*\\}(?!\\s*from)|module\\.exports\\s*=\\s*(?:${n}\\b|\\{[^}]*\\b${n}\\b)|\\bexports\\.[\\w$]+\\s*=\\s*${n}\\b`, 'm').test(code);
+}
+// An object literal declared on one line, `const api = {` (also `Object.freeze({` and `({`).
+const OBJ_DECL = /^\s*(export\s+)?(?:default\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:Object\.freeze\(\s*|\(\s*)?\{\s*$/;
+// The object declaration whose braces are still open at line i (0-based): `{ at, name, exported }` or null.
+function objectAt(lines, i) {
+  for (let d = i - 1; d >= 0 && d >= i - 800; d--) {
+    const m = OBJ_DECL.exec(lines[d]);
+    if (!m) continue;
+    let bal = 0, open = true;
+    for (let j = d; j < i; j++) { bal += bracketBalance(lines[j]); if (bal <= 0) { open = false; break; } }
+    if (open) return { at: d, name: m[2], exported: !!m[1] };
+  }
+  return null;
+}
+// The member of an object literal that holds line i: `{ object, member, at, exported }` (member '' when its key is
+// no plain name: a spread, a computed key), or null outside an object or on its closing line.
+function memberAt(lines, i) {
+  if (!String(lines[i] || '').trim()) return null;
+  const o = objectAt(lines, i);
+  if (!o) return null;
+  let first = o.at + 1;
+  while (first < lines.length && !String(lines[first]).trim()) first++;
+  const mi = indent(lines[first]);
+  if (indent(lines[i]) < mi) return null;
+  for (let k = i; k > o.at; k--) {
+    if (!String(lines[k]).trim() || indent(lines[k]) !== mi || /^\s*[\])}]/.test(lines[k])) continue;
+    const key = /^\s*(?:async\s+)?\*?\s*([A-Za-z_$][\w$]*)\s*(?::|\(|,|$)/.exec(lines[k]);
+    return { object: o.name, member: key ? key[1] : '', at: k, exported: o.exported };
+  }
+  return null;
+}
+// The last line of the object member that starts on line `at`: the lines under it that are indented deeper.
+function memberEnd(lines, at) {
+  const mi = indent(lines[at]);
+  let end = at;
+  for (let k = at + 1; k < lines.length; k++) {
+    if (!String(lines[k]).trim()) continue;
+    if (indent(lines[k]) <= mi) break;
+    end = k;
+  }
+  return end;
+}
+/**
+ * Diff mode (2026-11-18): the code lines (codeOnly) of each whole function a change sits in or defines, one array per
+ * function, so a content rule can read a changed line with the statements around it, as plan mode reads a named
+ * function whole. [] for a language it cannot read or a hunk at the top level.
+ */
+function enclosingCode(repo, f) {
+  if (!repo || !C_STYLE.test(f.name)) return [];
+  const lines = fileText(repo, f.name).split(/\r?\n/), isCode = codeLines(lines.join('\n')), cs = CS.test(f.name);
+  const seen = new Set(), out = [];
+  const take = (at) => {
+    if (at < 0 || seen.has(at)) return;
+    seen.add(at);
+    const to = definitionEnd(lines, at, isCode);
+    out.push(lines.slice(at, to + 1).filter((_, k) => isCode[at + k]).map(codeOnly));
+  };
+  for (const h of f.hunks) {
+    if (commentOnlyHunk(repo, f, h)) continue;
+    const from = Math.max(0, h.start - 1), to = Math.min(lines.length, from + Math.max(h.count, 1));
+    for (let i = from; i < to; i++) if (defNameAt(lines, i)) take(i);
+    take(enclosingDef(lines, from, to, { wide: cs }).at);
+  }
+  return out;
+}
 /**
  * Plan mode with --names (2026-11-17): the functions whose callers are counted before code, in the shape
  * allChangedSymbols gives for a diff (`at`: the definition line, 0-based), so callers() counts both by one rule set.
@@ -618,8 +773,8 @@ function plannedSymbols(files) {
   for (const f of files) {
     const file = path.posix.normalize(f.name);
     for (const d of f.named || []) {
-      const key = file + ':' + d.name, had = rows.get(key);
-      if (!had || (d.shared && !had.shared)) rows.set(key, { name: d.name, file, shared: d.shared, at: d.line - 1 });
+      const key = file + ':' + (d.object ? d.object + '.' : '') + d.name, had = rows.get(key);
+      if (!had || (d.shared && !had.shared)) rows.set(key, { name: d.object ? d.object + '.' + d.name : d.name, ...(d.object ? { object: d.object, member: d.name } : {}), file, shared: d.shared, at: d.line - 1 });
     }
   }
   return [...rows.values()];
@@ -780,7 +935,7 @@ function movedTo(repo, f, at, added) {
 // The function line `at` (0-based) belongs to: the one it defines, else the one it sits in; '' at the top
 // level (a module line, a class field, an attribute). For places.mjs (2026-11-12).
 export function enclosingFunction(lines, at) {
-  return defName(lines[at]) || enclosingDef(lines, at, at + 1, { wide: true }).name;
+  return defNameAt(lines, at) || enclosingDef(lines, at, at + 1, { wide: true }).name;
 }
 
 // A JavaScript or TypeScript export is reached only through an import of its own file. A same-named
@@ -911,7 +1066,7 @@ function importIndex(repo) {
 }
 function hasDefaultExport(repo, file, name) {
   const n = escapeRe(name);
-  return new RegExp(`export\\s+default\\s+(?:async\\s+)?(?:function\\s*\\*?\\s*|class\\s+)${n}\\b|export\\s+default\\s+${n}\\s*;?\\s*$|export\\s*\\{[^}]*\\b${n}\\s+as\\s+default\\b`, 'm').test(jsCodeText(repo, file));
+  return new RegExp(`export\\s+default\\s+(?:async\\s+)?(?:function\\s*\\*?\\s*|class\\s+)${n}\\b|export\\s+default\\s+${n}\\s*;?\\s*$|export\\s+default\\s+[\\w$.]+\\s*\\(\\s*${n}\\s*[,)]|export\\s*\\{[^}]*\\b${n}\\s+as\\s+default\\b`, 'm').test(jsCodeText(repo, file));
 }
 /**
  * The files that reach `name` of `file` by an import PATH, through any chain of barrels:
@@ -972,6 +1127,8 @@ function jsSkipLines(repo, file) {
     const lines = fileText(repo, file).split(/\r?\n/), skip = new Set();
     for (let i = 0; i < lines.length; i++) {
       if (/^\s*export\s+default\s+[A-Za-z_$][\w$.]*\s*;?\s*$/.test(lines[i])) { skip.add(i + 1); continue; }
+      // 2026-11-18: `export default memo(Field);` names the component without using it.
+      if (/^\s*export\s+default\s+[A-Za-z_$][\w$.]*\s*\(\s*[A-Za-z_$][\w$]*\s*\)\s*;?\s*$/.test(lines[i])) { skip.add(i + 1); continue; }
       if (!/^\s*(?:import\b(?!\s*\()|export\s+(?:type\s+)?(?:\*|\{))/.test(lines[i])) continue;
       // The statement runs to its closing brace, its `from '…'`, its `;` or, for `import './x'`, its path.
       for (let j = i; j < lines.length && j < i + 80; j++) {
@@ -1004,6 +1161,29 @@ function declaringType(lines, at) {
   }
   return { name: '', names: [] };
 }
+// The C# types that derive from the given ones (a class or interface whose base list names one of them, generic
+// arguments left out), with the interfaces each lists, through up to three levels (2026-11-18).
+function derivedTypeNames(repo, names) {
+  const out = new Set(), known = new Set(names);
+  let level = [...names];
+  for (let pass = 0; pass < 3 && level.length; pass++) {
+    const args = ['grep', '--untracked', '-n', '-w', '-I', '--no-color'];
+    for (const n of level) args.push('-e', n);
+    args.push('--', '*.cs');
+    const next = new Set();
+    for (const l of git(repo, args, { allowFail: true }).split(/\r?\n/)) {
+      const m = /^.+?:\d+:(.*)$/.exec(l);
+      const decl = m && TYPE_DECL.exec(m[1]);
+      if (!decl) continue;
+      const bases = (/:\s*([^{]+)/.exec(m[1].slice(decl[0].length)) || ['', ''])[1].replace(/<[^<>]*>/g, '').split(/[\s,]+/).filter(Boolean);
+      if (!bases.some(b => level.includes(b))) continue;
+      for (const t of [decl[1], ...bases.filter(b => /^I[A-Z]\w*$/.test(b))]) if (!known.has(t)) { known.add(t); out.add(t); }
+      next.add(decl[1]);
+    }
+    level = [...next];
+  }
+  return [...out];
+}
 // An interface member's own declaration (`Task SaveAsync(int id);`) names the method without calling it.
 const memberDecl = name => new RegExp(`^\\s*(?!(?:return|await|throw|yield|new|else|case|using|var|in|is|not|select|let|where|from|orderby|group|join|on|into)\\b)[A-Za-z_][\\w<>\\[\\],.? ]*?\\s${escapeRe(name)}\\s*(?:<[^>()]*>)?\\s*\\(`);
 
@@ -1018,9 +1198,10 @@ export function callers(repo, symbols) {
       .filter(r => r && CODE.test(r.file) && !SKIP_PATH.test(r.file)));
     return searched.get(name);
   };
-  return symbols.map(({ name, file, shared = true, at }) => {
+  return symbols.map(({ name, file, shared = true, at, object, member }) => {
+    if (object) return memberCallers(repo, { name, file, object, member });
     const all = search(name);
-    let rows = all.filter(r => (shared || r.file === file) && defName(r.text) !== name && !/^\s*(?:\/\/|\*|#)/.test(r.text));
+    let rows = all.filter(r => (shared || r.file === file) && defName(r.text) !== name && !(at != null && r.file === file && r.line - 1 === at) && !/^\s*(?:\/\/|\*|#)/.test(r.text));
     let follow = null;
     if (shared && JS.test(file)) {
       follow = followExport(repo, file, name);
@@ -1039,9 +1220,16 @@ export function callers(repo, symbols) {
     const defLines = CS.test(file) ? fileText(repo, file).split(/\r?\n/) : [];
     const type = shared ? declaringType(defLines, at) : { name: '', names: [] };
     const extension = type.name && /\(\s*this\s|^\s*this\s/.test(defLines[at] + '\n' + (defLines[at + 1] || ''));
+    // A C# property with logic is read as `.Name`: its uses carry a value that need not name the declaring type
+    // (`var s = list.First(); s.IsLate`), so the type-name filter is not applied to it (2026-11-18).
+    const prop = !!type.name && (new RegExp('\\b' + escapeRe(name) + '\\s*(?:=>|\\{)').test(defLines[at] || '') || propHeaderName(defLines, at) === name);
+    // A method of a base class is reached through the types that derive from it and their interfaces (2026-11-18).
+    if (type.name && !extension) type.names = [...new Set([...type.names, ...derivedTypeNames(repo, type.names)])];
     if (type.name && !extension) {
       const names = new RegExp(`\\b(?:${type.names.map(escapeRe).join('|')})\\b`);
       const decl = memberDecl(name);
+      // 2026-11-18 (repair round 3): a property read counts in a file that names the declaring type (or a type derived
+      // from it, or its interface), as a method does; a same-named read of another type (User.IsActive) is not a caller.
       rows = rows.filter(r => r.file === file || (names.test(fileText(repo, r.file))
         && !(CS.test(r.file) && /\binterface\s+[A-Za-z_]/.test(fileText(repo, r.file)) && decl.test(r.text))));
       const otherTypes = new Set();
@@ -1063,6 +1251,7 @@ export function callers(repo, symbols) {
       for (const m of text.matchAll(word)) {
         const before = text.slice(0, m.index);
         if (before.endsWith('</') || (others && others.test(before))) continue;
+        if (prop && r.file !== file && !/\??\.\s*$/.test(before)) continue;
         if (r.file !== file && ownFiles.has(r.file) && (!/\.\s*$/.test(before) || /\b(?:this|base)\s*\.\s*$/.test(before))) continue;
         n++;
       }
@@ -1119,6 +1308,38 @@ export function callers(repo, symbols) {
     return row;
   });
 }
+// The uses of `object.member` (2026-11-18): in the object's own file and in every file that reaches the object by an
+// import path, under the name the file binds it to (an alias, a default import, a namespace import). A member with no
+// plain name (a spread, a computed key) has unknown callers: the row is unresolved, so it counts as more than 10.
+function memberCallers(repo, { name, file, object, member }) {
+  const row = { name, file, count: 0, tests: 0, where: [] };
+  if (!member) { row.unresolved = [file]; return row; }
+  const follow = followExport(repo, file, object), found = [];
+  const use = (local, ns) => new RegExp(String.raw`(?<![\w$.])` + (ns ? escapeRe(ns) + String.raw`\s*\??\.\s*` + escapeRe(local) : escapeRe(local)) + String.raw`\s*\??\.\s*` + escapeRe(member) + String.raw`(?![\w$])`, 'g');
+  const scan = (f, matchers) => {
+    const skip = jsSkipLines(repo, f);
+    fileText(repo, f).split(/\r?\n/).forEach((text, i) => {
+      if (skip.has(i + 1)) return;
+      const code = codeOnly(text);
+      let n = 0;
+      for (const re of matchers) n += [...code.matchAll(re)].length;
+      if (n) found.push({ file: f, line: i + 1, n });
+    });
+  };
+  scan(file, [use(object)]);
+  for (const f of follow.files) {
+    if (f === file || SKIP_PATH.test(f)) continue;
+    const matchers = [...(follow.local.get(f) || [])].map(a => use(a));
+    for (const { ns, exported } of follow.ns.get(f) || []) matchers.push(use(exported, ns));
+    if (matchers.length) scan(f, matchers);
+  }
+  const sum = list => list.reduce((n, r) => n + r.n, 0);
+  const code = found.filter(r => !TEST_FILE.test(r.file));
+  row.count = sum(code);
+  row.tests = sum(found) - row.count;
+  row.where = code.slice(0, 6).map(r => (r.file === file ? path.basename(r.file) : r.file) + ':' + r.line);
+  return row;
+}
 const SKIP_PATH = /(?:^|\/)(?:node_modules|dist|build|bin|obj|\.claude|\.agents|docs\/db)\//i;
 
 // `plan`: the callers signal names its hit file:Function, as the other hits of a plan do (signals); a diff names
@@ -1141,10 +1362,11 @@ export function decide(found, callerRows, files, { plan = false } = {}) {
 // gets one review, with the full brief; the boss, the panel and the full round are for Big.
 export function roles(size, found) {
   const seats = [...new Set([...found.keys()].map(k => SIGNALS[k].seat))];
-  const reviewers = 'reviewers: whole-diff (Sonnet), fresh eyes (Opus), other engine (Codex)';
-  if (size === 'tiny' || size === 'small') return ['one review: fresh eyes (Opus)', ...seats.map(s => '+ ' + s)];
-  if (size === 'medium') return ['one review: fresh eyes (Opus), full brief', ...seats.map(s => '+ ' + s)];
-  return ['boss + expert panel before code (Pragmatist + a seat per open question)', ...seats.map(s => '+ ' + s), 'risk reviewer (Opus) on the risk files', reviewers];
+  // 2026-11-18: no engine seat is named (a task runs on Claude or on Codex): "fresh eyes", "the other engine".
+  const reviewers = 'reviewers: whole-diff, fresh eyes, the other engine';
+  if (size === 'tiny' || size === 'small') return ['one review: fresh eyes', ...seats.map(s => '+ ' + s)];
+  if (size === 'medium') return ['one review: fresh eyes, full brief', ...seats.map(s => '+ ' + s)];
+  return ['boss + expert panel before code (Pragmatist + a seat per open question)', ...seats.map(s => '+ ' + s), 'risk reviewer on the risk files', reviewers];
 }
 
 // A planned path as git spells it: Windows reads `src/Lib.ts` from `src/lib.ts`, but a caller's file is compared as
@@ -1162,7 +1384,7 @@ export function sizeTask({ repo, base, files: planned, names = null }) {
   oldTexts.clear();
   importsCache.clear();
   skipCache.clear();
-  jsListCache.clear(); stmtCache.clear(); indexCache.clear(); depsCache.clear();
+  jsListCache.clear(); stmtCache.clear(); indexCache.clear(); depsCache.clear(); hostedCache.clear();
   const plan = !base;
   const named = plan && names && names.length ? names : null;
   const extra = { renamed: [], binary: [] };

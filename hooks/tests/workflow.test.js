@@ -56,8 +56,11 @@ function invoke(hook, entries, options = {}) {
   if (fs.existsSync(path.join(root, 'lib/verification-target.cjs'))) vm.runInNewContext(source('lib/verification-target.cjs'), { require: n => n === 'fs' ? fakeFs : require(n), module: verificationTarget }, { timeout: 1000 });
   const shellCommand = { exports: {} };
   vm.runInNewContext(source('lib/shell-command.cjs'), { require: n => n === 'path' ? path : n === './verification-target.cjs' ? verificationTarget.exports : assert.fail('Unexpected shell-command require: ' + n), module: shellCommand }, { timeout: 1000 });
+  // 2026-11-18: the one file rule (lib/code-paths.cjs) is shared by the scanner and the push guard; loaded with the same fake fs.
+  const codePaths = { exports: {} };
+  vm.runInNewContext(source('lib/code-paths.cjs'), { require: n => n === 'fs' ? fakeFs : require(n), module: codePaths }, { timeout: 1000 });
   const module = { exports: {} };
-  vm.runInNewContext(source('lib/transcript-scan.js'), { require: n => n === 'fs' ? fakeFs : n === './verification-target.cjs' ? verificationTarget.exports : n === './shell-command.cjs' ? shellCommand.exports : require(n), module, Buffer }, { timeout: 1000 });
+  vm.runInNewContext(source('lib/transcript-scan.js'), { require: n => n === 'fs' ? fakeFs : n === './verification-target.cjs' ? verificationTarget.exports : n === './shell-command.cjs' ? shellCommand.exports : n === './code-paths.cjs' ? codePaths.exports : require(n), module, Buffer }, { timeout: 1000 });
   let stdout = '';
   const halt = Symbol('exit');
   const gitReads = [];
@@ -71,6 +74,7 @@ function invoke(hook, entries, options = {}) {
         if (n.endsWith('verification-target.cjs')) return verificationTarget.exports;
         if (n.endsWith('shell-command.cjs')) return shellCommand.exports;
         if (n.endsWith('transcript-scan.js')) return module.exports;
+        if (n.endsWith('code-paths.cjs')) return codePaths.exports;
         if (n === 'child_process') return { execFileSync(exe, args, opts) {
           assert.equal(exe, 'git'); gitReads.push({ args, cwd: opts.cwd });
           if (args[0] === 'rev-parse' && args.includes('--show-toplevel')) return repo;

@@ -80,12 +80,12 @@ Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
 1. **Checks before review**, one command, all green:
    `node <gate>/pre-review.mjs --was <size> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --siblings <notes>/siblings.md`
 2. **The brief**, always from the tool, never typed or copied:
-   `node <gate>/review-brief.mjs --out <notes>/brief.md --ticket <ticket text file> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --proof-log <notes>/proof.log`
+   `node <gate>/review-brief.mjs --out <notes>/brief.md --ticket <ticket text file> --lines <notes>/lines.md --check <notes>/check.md --places <notes>/places.md --proof-log <notes>/proof.log --engine <claude|codex>`
 3. **Launch** every line of `<notes>/launch.md` in one message. Small and Medium: one fresh-eyes review (only the user's words, the ticket, the diff and the places list). Big: the risk files with their trace list, the whole diff, fresh eyes and the other engine, together. Never type a reviewer prompt by hand. No source edit while they read.
 4. **Notes (rule 5).** A report line that starts with `Blocker`, `Bug`, `Gap`, `Question` or `EXTRA TEST`, or that leaves a choice to the user ("you decide"), is a note; the guards number it. Each gets one answer, on its own line, in a message with no tool call:
    `NOTE <n>: fixed — <what changed and the test that proves it>`
    `NOTE <n>: user — "<the user's exact words>"`
-   `NOTE <n>: refuted — <the note check's evidence>` (never a Blocker)
+   `NOTE <n>: refuted — <the note check's evidence>` (never a Blocker or a Question)
    There is no other answer. Before fixing, the note check ([loop-rare-cases.md](loop-rare-cases.md)) tries to disprove each note; only a note it refuted may take the third line, and the ship brief lists those. A bug related to the ticket is fixed with a test, on every sibling path, without asking. Ask the open notes together, in one message.
 5. **Outside lines.** Each `OUTSIDE PR` line goes to the user at the end of the task, in one list: fix here, separate PR, or leave. The answer goes in the project's outside list.
 6. **Fix round.** All fixes in one batch, test first. A changed test repeats the proof (`--changed-since`; the full proof in the last round). The proof and a fresh reviewer (a new agent) start in the same message; it re-checks the changed lines and their callers, plus the risk reviewer for a fix on a sensitive boundary. The full suite starts with the last re-check (Step 3, item 6). **Stop rule:** from round 3, a new rare case (no ticket line, no blocker, no security hole) goes to the user in one list: fix now, or a known limit in the PR text. The step ends when the latest report has no open note.
