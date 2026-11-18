@@ -189,7 +189,20 @@ export function recordNotes(top, record = readRecord(top)) {
 function regexAllowedAt(text, i) {
   let k = i - 1;
   while (k >= 0 && (text[k] === ' ' || text[k] === '\t')) k--;
-  return k < 0 || text[k] === '\n' || '(,=:!&|?{;['.includes(text[k]) || (text[k] === '>' && text[k - 1] === '=');
+  // A regex also follows a keyword that ends an expression slot (2026-11-18, audit: `return /`/.test(c)` was read as
+  // a division, and its backtick opened a template that swallowed the rest of the file).
+  if (k >= 0 && /\w/.test(text[k]) && /(?<![\w$.])(?:return|typeof|case|throw|yield|await|void|in|of|do|else)$/.test(text.slice(Math.max(0, k - 8), k + 1))) return true;
+  // 2026-11-18 (audit): `if (true) /name(rows)/.test(x)`: a `/` after the `)` that closes an if, while, for or with head
+  // starts a regex, not a division, so its text is no code.
+  if (k >= 0 && text[k] === ')') {
+    // The scan runs on the text with its quoted strings blanked, so a `)` inside a string does not end the head.
+    const base = Math.max(0, k - 700), seg = text.slice(base, k + 1).replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`]*`/g, s => s[0] + ' '.repeat(s.length - 2) + s[s.length - 1]);
+    let depth = 0, o = seg.length - 1;
+    for (; o >= 0 && seg.length - 1 - o < 600; o--) { if (seg[o] === ')') depth++; else if (seg[o] === '(' && --depth === 0) break; }
+    if (o >= 0 && depth === 0 && /(?<![\w$.])(?:if|while|for|with)\s*$/.test(seg.slice(Math.max(0, o - 12), o))) return true;
+  }
+  // 2026-11-18 (audit): a regex also follows an operator (`'a' + /x/.source`, `1 < /x/.lastIndex`) and a `}` (`if (a) {} /x/.test(y)`).
+  return k < 0 || text[k] === '\n' || '(,=:!&|?{;[+-*%<>^~}'.includes(text[k]) || (text[k] === '>' && text[k - 1] === '=');
 }
 export function closeOf(text, open) {
   const want = { '(': ')', '{': '}', '[': ']' };
@@ -223,7 +236,159 @@ export function closeOf(text, open) {
 
 const lineAt = (text, index) => text.slice(0, index).split('\n').length;
 const isCs = (file) => /\.cs$/i.test(file);
+
+// The text with comments and the text of string, template and regex literals replaced by spaces (2026-11-18, audit
+// finding 4: a helper call written in a comment or a string counted as a call, so a helper check that no test ran
+// read as proven). Same length and same line breaks, so every index and line still fits the original. Code inside a
+// `${}` hole of a JS template or a `{}` hole of a C# interpolated string stays: it runs. JavaScript/TypeScript and C#
+// (// and /* */ comments; ' " ` strings, regex literals; C# @"verbatim", $"interpolated", """raw""" and 'c' chars).
+export function executableText(text, file = '') {
+  const src = String(text), cs = isCs(file), out = src.split('');
+  const blank = (a, b) => { for (let k = a; k < b && k < out.length; k++) if (out[k] !== '\n' && out[k] !== '\r') out[k] = ' '; };
+  const holes = [];
+  let depth = 0;
+  // Scan string content from j; returns the index just past the closing quote, or { hole } at an interpolation hole.
+  const scan = (j, s) => {
+    const from = j;
+    for (; j < src.length; j++) {
+      const c = src[j];
+      if (s.raw) { if (src.startsWith(s.q.repeat(s.raw), j)) { blank(from, j); return { end: j + s.raw }; } continue; }
+      if (c === '\n' && !s.multi) { blank(from, j); return { end: j }; }
+      if (c === '\\' && !s.verbatim) { j++; continue; }
+      if (s.q === '`' && c === '$' && src[j + 1] === '{') { blank(from, j); return { hole: j + 2 }; }
+      if (s.interp && c === '{') { if (src[j + 1] === '{') { j++; continue; } blank(from, j); return { hole: j + 1 }; }
+      if (c === s.q) { if (s.verbatim && src[j + 1] === s.q) { j++; continue; } blank(from, j); return { end: j + 1 }; }
+    }
+    blank(from, src.length);
+    return { end: src.length, eof: true };
+  };
+  let i = 0;
+  // `start` is where the literal opened. A literal that has no end before the end of the file means the scan lost its
+  // way (2026-11-18, audit: a misread quote blanked every later test): the text from there on is kept as written, so
+  // tests cannot vanish silently.
+  let lostAt = -1;
+  const lose = (start) => { if (lostAt < 0 || start < lostAt) lostAt = start; };
+  const resume = (j, s, start) => {
+    const r = scan(j, s);
+    if (r.hole !== undefined) { holes.push({ s, depth, start }); depth++; return r.hole; }
+    if (r.eof && (s.multi || s.raw)) lose(start);
+    return r.end;
+  };
+  while (i < src.length) {
+    const c = src[i], n = src[i + 1];
+    if (c === '/' && n === '/') { const e = src.indexOf('\n', i); const to = e < 0 ? src.length : e; blank(i, to); i = to; continue; }
+    if (c === '/' && n === '*') { const e = src.indexOf('*/', i + 2); const to = e < 0 ? src.length : e + 2; blank(i, to); i = to; continue; }
+    if (!cs && c === '/' && regexAllowedAt(src, i)) {
+      let j = i + 1, cls = false, closed = false;
+      for (; j < src.length && src[j] !== '\n'; j++) {
+        if (src[j] === '\\') j++;
+        else if (src[j] === '[') cls = true;
+        else if (src[j] === ']') cls = false;
+        else if (src[j] === '/' && !cls) { closed = true; break; }
+      }
+      if (closed) { blank(i + 1, j); i = j + 1; continue; }
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      if (cs && c === '"') {
+        // The prefix: $, @ or both, right before the quote. With an @ the string is verbatim whatever follows: `@"""x"" y"`
+        // is one verbatim string that starts with a doubled quote, not a raw string (2026-11-18, audit).
+        let k = i - 1, interp = false, verbatim = false;
+        while (k >= 0 && (src[k] === '$' || src[k] === '@')) { if (src[k] === '$') interp = true; else verbatim = true; k--; }
+        let q = 1;
+        while (src[i + q] === '"') q++;
+        if (q >= 3 && !verbatim) { i = resume(i + q, { q: '"', raw: q }, i); continue; }
+        i = resume(i + 1, { q: '"', interp, verbatim, multi: verbatim }, i);
+        continue;
+      }
+      i = resume(i + 1, { q: c, multi: c === '`' }, i);
+      continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      const top = holes[holes.length - 1];
+      if (top && depth === top.depth) { holes.pop(); i = resume(i + 1, top.s, top.start); continue; }
+    }
+    i++;
+  }
+  if (holes.length) lose(holes[0].start);
+  if (lostAt >= 0) for (let k = lostAt; k < src.length; k++) out[k] = src[k];
+  // C# `#if false` ... `#else`/`#elif`/`#endif`: code that never compiles is no code, like a comment (2026-11-18, audit
+  // finding 7). Any other `#if` condition is not decided here (see the limit at helperCallers).
+  if (cs) {
+    const rows = out.join('').split('\n');
+    let dead = 0, nest = 0;
+    for (let r = 0; r < rows.length; r++) {
+      const t = rows[r].trim();
+      if (dead) {
+        if (/^#\s*if\b/.test(t)) nest++;
+        else if (/^#\s*endif\b/.test(t)) { if (nest) nest--; else dead = 0; }
+        else if (!nest && /^#\s*(?:else|elif)\b/.test(t)) dead = 0;
+        else rows[r] = rows[r].replace(/[^\r]/g, ' ');
+      } else if (/^#\s*if\s+\(?\s*false\s*\)?\s*$/.test(t)) { dead = 1; nest = 0; }
+    }
+    return rows.join('\n');
+  }
+  return out.join('');
+}
+
+// A declaration match is live when it sits in executable code, not in a comment or a string (2026-11-18).
+// Only the first two characters are compared: a title string inside the match is blank in `exec`.
+const liveAt = (exec, m) => exec.slice(m.index, m.index + 2) === m[0].slice(0, 2);
+
+// The class whose braces hold the character at `index` (2026-11-18, audit finding 5: the last `class X` written above a
+// test named a closed nested class). `exec` is executableText, so a brace or the word class in a comment or a string
+// is not counted. The innermost class, record or struct wins; undefined when the index is in none.
+function csClasses(exec) {
+  const found = [];
+  for (const m of exec.matchAll(/\b(?:class|record|struct|interface)\s+(\w+)/g)) {
+    if (m[1] === 'where') continue;
+    // `where T : class Foo`-style constraints and `: class` are not declarations.
+    if (/[:,]\s*$/.test(exec.slice(Math.max(0, m.index - 4), m.index))) continue;
+    const from = m.index + m[0].length;
+    const b = exec.slice(from).search(/[{;]/);
+    if (b < 0 || exec[from + b] === ';') continue;
+    const open = from + b;
+    let d = 0, close = -1;
+    for (let k = open; k < exec.length; k++) {
+      if (exec[k] === '{') d++;
+      else if (exec[k] === '}' && --d === 0) { close = k; break; }
+    }
+    if (close < 0) close = exec.length;
+    // The base list (`class X<T>(int a) : Base<T>, IFoo where T : class`) and the `abstract` modifier (2026-11-18, audit:
+    // the runner prints an inherited test with the derived class).
+    // 2026-11-18 (audit): brackets inside the base call (`: BaseTests(db, new Options())`) are stripped from the inside out.
+    let head = exec.slice(from, open).replace(/\bwhere\b[\s\S]*$/, '');
+    for (let prev = ''; prev !== head;) { prev = head; head = head.replace(/\([^()]*\)/g, ''); }
+    const colon = head.indexOf(':');
+    const bases = colon < 0 ? [] : head.slice(colon + 1).replace(/<[^<>]*>/g, '').replace(/<[^<>]*>/g, '').split(',').map(s => s.trim().split('.').pop()).filter(Boolean);
+    const abstract = /\babstract\b/.test(exec.slice(exec.lastIndexOf('\n', m.index) + 1, m.index));
+    found.push({ name: m[1], open, close, bases, abstract });
+  }
+  return found;
+}
+const csClassAt = (classes, index) => classes.filter(c => c.open < index && index < c.close).sort((a, b) => b.open - a.open)[0];
+// The class of a C# test, for a test item: `klass`, and `inherited` when the runner may print another class for it:
+// the class is abstract, or another class in the file names it as a base (a base declared in another file and not
+// abstract cannot be seen from here).
+const csIdentity = (classes, index) => {
+  const c = csClassAt(classes, index);
+  if (!c) return {};
+  const inherited = c.abstract || classes.some(o => o !== c && o.bases.includes(c.name));
+  return { klass: c.name, ...(inherited ? { inherited: true } : {}) };
+};
+// The classes of a C# file with their base lists, for the cross-file base map of red-proof (2026-11-18, audit: an
+// inherited test was credited by any class's failure; only a class known to derive from the declaring class may
+// credit it, and that needs the classes of every test file the run reads, not of one file).
+export function csClassList(text, file = 'A.cs') {
+  return csClasses(executableText(String(text), file)).map(c => ({ name: c.name, bases: c.bases }));
+}
+// The file's classes ride on a test item without showing in its fields (a deep compare of items is unchanged).
+const withClasses = (item, classes) => Object.defineProperty(item, 'classes', { value: classes.map(c => ({ name: c.name, bases: c.bases })), enumerable: false });
 const CS_METHOD = /\b(?:void|Task|ValueTask)(?:<[^>]*>)?\s+(\w+)\s*\(/g;
+// A test attribute: [Fact] and [Theory], and any attribute named ...Fact or ...Theory ([SkippableFact], [MySqlFact(...)],
+// [Xunit.Fact]); 2026-11-18, audit: a test under a custom fact attribute was no test.
+const CS_TEST_ATTR = /\[\s*[\w.]*(?:Fact|Theory)\b/g;
 
 // The lines (1-based) that belong to a skipped test (2026-11-12: a [Cn] tag or a ticket quote on
 // it.skip, it.todo, describe.skip, xit or [Fact(Skip = ...)] counted as a tested check line, though the
@@ -240,12 +405,14 @@ export function skippedLines(text, file = '') {
       if (/^(?:\/\/|\/\*|\*)/.test(t) || (isCs(file) && /^\[/.test(t))) skipped.add(l); else break;
     }
   };
+  const exec = executableText(src, file);
   if (isCs(file)) {
-    for (const m of src.matchAll(/\[\s*(?:Fact|Theory)\b/g)) {
+    for (const m of src.matchAll(CS_TEST_ATTR)) {
+      if (!liveAt(exec, m)) continue;
       const end = closeOf(src, m.index);
       if (end < 0 || !/\bSkip\s*=/.test(src.slice(m.index, end))) continue;
       CS_METHOD.lastIndex = end;
-      const method = CS_METHOD.exec(src);
+      const method = CS_METHOD.exec(exec);
       let last = end;
       if (method) {
         const params = closeOf(src, method.index + method[0].length - 1);
@@ -261,6 +428,7 @@ export function skippedLines(text, file = '') {
     return skipped;
   }
   for (const m of src.matchAll(/(?<![\w$.])(?:(?:describe|it|test|suite)\.(?:skip|todo)\b|x(?:describe|it|test)\b)/g)) {
+    if (!liveAt(exec, m)) continue;
     const open = src.indexOf('(', m.index + m[0].length);
     if (open < 0 || src.slice(m.index + m[0].length, open).trim()) continue;
     const end = closeOf(src, open);
@@ -276,24 +444,29 @@ export function declaredTests(text, file = '') {
   const src = String(text);
   const skip = skippedLines(src, file);
   const tests = [];
+  const exec = executableText(src, file);
   if (isCs(file)) {
-    for (const m of src.matchAll(/\[\s*(?:Fact|Theory)\b/g)) {
+    const classes = csClasses(exec);
+    for (const m of src.matchAll(CS_TEST_ATTR)) {
+      if (!liveAt(exec, m)) continue;
       const end = closeOf(src, m.index);
       if (end < 0) continue;
       const attr = src.slice(m.index, end + 1);
       if (/\bSkip\s*=/.test(attr) || skip.has(lineAt(src, m.index))) continue;
       CS_METHOD.lastIndex = end;
-      const method = CS_METHOD.exec(src);
+      const method = CS_METHOD.exec(exec);
       if (!method) continue;
       const display = /DisplayName\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(attr);
-      tests.push({ line: lineAt(src, m.index), titles: [method[1], ...(display ? [display[1].replace(/\\(.)/g, '$1')] : [])] });
+      // file and class (2026-11-18): the shown result (survivors) takes the same identity as the saved record (caughtTests).
+      tests.push(withClasses({ file, line: lineAt(src, m.index), titles: [method[1], ...(display ? [display[1].replace(/\\(.)/g, '$1')] : [])], ...csIdentity(classes, m.index) }, classes));
     }
     return tests;
   }
   for (const m of src.matchAll(/(?<![\w$.])(x?)(?:it|test)((?:\.(?:only|concurrent|sequential|fails|skip|todo))*)\s*\(\s*(['"`])((?:\\.|(?!\3)[^\\])*)\3/g)) {
+    if (!liveAt(exec, m)) continue;
     const line = lineAt(src, m.index);
     if (m[1] || /skip|todo/.test(m[2]) || skip.has(line)) continue;
-    tests.push({ line, titles: [m[4].replace(/\\(.)/g, '$1')] });
+    tests.push({ file, line, titles: [m[4].replace(/\\(.)/g, '$1')] });
   }
   return tests;
 }
@@ -310,13 +483,16 @@ export function testSpans(text, file = '') {
   const src = String(text);
   const skip = skippedLines(src, file);
   const spans = [];
+  const exec = executableText(src, file);
   if (isCs(file)) {
-    for (const m of src.matchAll(/\[\s*(?:Fact|Theory)\b/g)) {
+    const classes = csClasses(exec);
+    for (const m of src.matchAll(CS_TEST_ATTR)) {
+      if (!liveAt(exec, m)) continue;
       const end = closeOf(src, m.index);
       if (end < 0) continue;
       const attr = src.slice(m.index, end + 1);
       CS_METHOD.lastIndex = end;
-      const method = CS_METHOD.exec(src);
+      const method = CS_METHOD.exec(exec);
       if (!method) continue;
       // The method's body: its block, or an expression body up to its `;` (as skippedLines reads it).
       const params = closeOf(src, method.index + method[0].length - 1);
@@ -327,14 +503,15 @@ export function testSpans(text, file = '') {
       if (last < 0) continue;
       const display = /DisplayName\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(attr);
       const line = lineAt(src, m.index);
-      // The class that holds the method: the last `class X` above it (caughtTests matches a printed class to it).
-      const klass = [...src.slice(0, m.index).matchAll(/\bclass\s+(\w+)/g)].pop()?.[1];
-      spans.push({ file, line, end: lineAt(src, last), titles: [method[1], ...(display ? [display[1].replace(/\\(.)/g, '$1')] : [])],
-        skipped: /\bSkip\s*=/.test(attr) || skip.has(line), ...(klass ? { klass } : {}) });
+      // The class whose braces hold the method (2026-11-18, audit: the last `class X` written above it named a closed
+      // nested class); caughtTests and survivors match a printed class to it.
+      spans.push(withClasses({ file, line, end: lineAt(src, last), titles: [method[1], ...(display ? [display[1].replace(/\\(.)/g, '$1')] : [])],
+        skipped: /\bSkip\s*=/.test(attr) || skip.has(line), ...csIdentity(classes, m.index) }, classes));
     }
     return spans;
   }
   for (const m of src.matchAll(/(?<![\w$.])(x?)(?:it|test)((?:\.(?:only|concurrent|sequential|fails|skip|todo|each|for|skipIf|runIf))*)\s*(?=[(`])/g)) {
+    if (!liveAt(exec, m)) continue;
     let at = m.index + m[0].length;
     // it.each(table)(title, fn), it.each`table`(title, fn), it.skipIf(when)(title, fn): the first bracket is not the test's.
     if (/\.(?:each|for|skipIf|runIf)$/.test(m[2])) {
@@ -351,7 +528,7 @@ export function testSpans(text, file = '') {
     if (close < 0) {
       const next = /(?<![\w$.])x?(?:it|test)(?:\.\w+)*\s*[(`]/g;
       next.lastIndex = at + 1;
-      const n = next.exec(src);
+      const n = next.exec(exec);
       close = n ? n.index - 1 : src.length - 1;
     }
     const title = /^\s*(['"`])((?:\\.|(?!\1)[^\\])*)\1/.exec(src.slice(at + 1, close));
@@ -374,25 +551,135 @@ export function enclosingTest(spans, line) {
 // test and could never be proven). The helper is the nearest function declaration that encloses the line (a hook,
 // a describe or a test on the way up means no helper); a test calls it when its name appears in the test's lines
 // as a call. Skipped tests are left out. [] when the line is in no helper or no test calls it.
+// 2026-11-18 (audit finding 4): a call counts only in executable code (executableText): the text of a comment, a
+// string, a template or a regex is not a call, and a declaration `function name(` is not one either. THE LIMIT that
+// stays: a static check cannot prove that a conditional assertion ran; a call behind `if (false)`, in a branch that
+// never runs, or after an early return still counts here, and only a break that makes the test fail proves it. C#
+// `#if false` blocks are left out like comments; a call under any other `#if` condition (DEBUG, a symbol) counts, as
+// the compiler's symbols are not known here.
 const NOT_A_METHOD = /^(?:if|for|foreach|while|switch|using|lock|catch|return|new|await|else|do|throw|var)$/;
 export function helperCallers(text, spans, line) {
-  const rows = String(text).split('\n');
+  const rows = executableText(String(text), spans[0]?.file || '').split('\n');
   const indent = (s) => /^\s*/.exec(s)[0].replace(/\t/g, '    ').length;
   let cur = indent(rows[line - 1] || '');
-  let name = null;
+  let name = null, declRow = -1;
   for (let i = line - 2; i >= 0 && !name; i--) {
     const r = rows[i];
-    if (!r.trim() || indent(r) >= cur) continue;
+    // A lone `{` (Allman style) sits at the signature's indent: it must not hide the signature above it (2026-11-18).
+    if (!r.trim() || r.trim() === '{' || indent(r) >= cur) continue;
     if (/^\s*(?:beforeEach|afterEach|beforeAll|afterAll|describe|it|test|suite)\b/.test(r)) return [];
     const js = /^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*(\w+)/.exec(r)
       || /^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|\w+\s*=>)/.exec(r);
-    const cs = /^\s*(?:(?:public|private|protected|internal|static|async|override|virtual|sealed)\s+)*[\w<>\[\],.?]+(?:<[^>]*>)?\s+(\w+)\s*\(/.exec(r);
-    const found = (js || cs || [])[1];
-    if (found && !NOT_A_METHOD.test(found)) name = found; else cur = indent(r);
+    // Only a declaration names the helper (2026-11-18, audit: `await waitFor(() => {` or `await WithDbAsync(async db =>`
+    // was taken for one, so any test that called the wrapper certified the check inside it). The C# shape is for .cs
+    // files only, and the word before the name must be a type, not a statement keyword.
+    const cs = isCs(spans[0]?.file || '') && /^\s*(?:(?:public|private|protected|internal|static|async|override|virtual|sealed)\s+)*([\w<>\[\],.?]+(?:<[^>]*>)?)\s+(\w+)\s*\(/.exec(r);
+    const csName = cs && !/^(?:await|return|new|throw|yield|else|case|using|lock|goto)$/.test(cs[1]) ? cs[2] : undefined;
+    const found = js ? js[1] : csName;
+    if (found && !NOT_A_METHOD.test(found)) { name = found; declRow = i; } else cur = indent(r);
   }
   if (!name) return [];
-  const call = new RegExp('\\b' + name.replace(/[$]/g, '\\$') + '\\s*(?:<[^>()]*>)?\\s*\\(');
-  return spans.filter(s => !s.skipped && call.test(rows.slice(s.line - 1, s.end).join('\n')));
+  // 2026-11-18 (audit): the function that holds a nested helper (a factory such as `function setup() { const name = ...;
+  // return { name }; }`). A test that calls that function reaches the helper through its result, so a member call or a
+  // same-name local in that test is the helper itself. JavaScript only; a helper at file or describe level has none.
+  let factory = '';
+  if (!isCs(spans[0]?.file || '')) {
+    let c2 = indent(rows[declRow]);
+    for (let i = declRow - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (!r.trim() || r.trim() === '{' || indent(r) >= c2) continue;
+      if (/^\s*(?:beforeEach|afterEach|beforeAll|afterAll|describe|it|test|suite)\b/.test(r)) break;
+      const f = /^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*(\w+)/.exec(r)
+        || /^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|\w+\s*=>)/.exec(r);
+      if (f && !NOT_A_METHOD.test(f[1])) { factory = f[1]; break; }
+      c2 = indent(r);
+    }
+  }
+  // 2026-11-18 (audit): a matching NAME is not yet a call of THE helper. A call counts only when it can be the helper
+  // itself: not a member call on another object (`other.name(`), unless the object is `this` or, in C#, the class that
+  // declares the helper; not in a test whose own body declares a function, const, let, var or local of the same name
+  // (it shadows the helper); and never inside a regex literal (executableText blanks it). THE LIMIT that stays: a
+  // static check cannot follow every alias (`const f = expectNoRows; f(rows)` is not seen as a call, a parameter named
+  // like the helper is not seen as a shadow, and a call that is never reached still counts).
+  const nm = name.replace(/[$]/g, '\\$');
+  const call = new RegExp('(?<!\\bfunction\\s*\\*?\\s*)\\b' + nm + '\\s*(?:<[^>()]*>)?\\s*\\(', 'g');
+  const cs = isCs(spans[0]?.file || '');
+  // 2026-11-18 (audit, round 2): a declaration of the same name in the test body shadows the helper in any form: a
+  // destructuring pattern, a later declarator, a class, a method or type member declared in the body (a fake object),
+  // and in C# a local function or delegate of any type (built-in, nested generic).
+  const JS_SHADOW = '(?<![\\w$.])(?:function\\s*\\*?\\s*' + nm + '(?![\\w$])|class\\s+' + nm + '(?![\\w$])|(?:const|let|var)\\s+' + nm + '(?![\\w$])'
+    + '|(?:const|let|var)\\s*[{\\[][^}\\]]*?(?<![\\w$.])' + nm + '(?![\\w$])(?!\\s*:)|(?:const|let|var)\\s+[^;\\n]*?,\\s*' + nm + '\\s*=(?![=>]))';
+  const csShadow = (body) => {
+    if (new RegExp('(?<![\\w$.])(?:void|var|Task(?:<[^>]*>)?|ValueTask(?:<[^>]*>)?)[ \\t]+' + nm + '\\s*(?:=(?!=)|<[^>()]*>\\s*\\(|\\()').test(body)) return true;
+    const re = new RegExp('(?<![\\w$.])([A-Za-z_][\\w.]*(?:<[^;(){}=]*>)?(?:\\[\\])*\\??)[ \\t]+' + nm + '\\s*(=(?!=)|<[^>()]*>\\s*\\(|\\()', 'g');
+    for (let m; (m = re.exec(body));) {
+      if (/^(?:await|return|new|throw|yield|else|case|using|lock|goto|in|is|as|not|and|or|out|ref|when)$/.test(m[1])) continue;
+      if (m[2] === '=') return true;
+      const open = m.index + m[0].length - 1, close = closeOf(body, open);
+      if (close >= 0 && /^\s*(?:\{|=>)/.test(body.slice(close + 1))) return true;
+    }
+    return false;
+  };
+  const jsShadow = new RegExp(JS_SHADOW);
+  let owner = '', extension = false;
+  if (cs) {
+    const at = rows.slice(0, line - 1).join('\n').length + 1;
+    owner = csClassAt(csClasses(rows.join('\n')), at)?.name || '';
+    extension = /\(\s*(?:in\s+|ref\s+)?this\s/.test(rows[declRow]);
+  }
+  // A same-name declaration in a scope that holds the test (a describe-level const over a file-level helper), other
+  // than the helper's own declaration. JavaScript only.
+  const full = rows.join('\n'), starts = [];
+  for (let a = 0, r = 0; r <= rows.length; r++) { starts.push(a); a += (rows[r] || '').length + 1; }
+  let pairs = null;
+  const scopeShadow = (s) => {
+    if (cs) return false;
+    if (!pairs) {
+      pairs = [];
+      const stack = [];
+      for (let k = 0; k < full.length; k++) { if (full[k] === '{') stack.push(k); else if (full[k] === '}' && stack.length) pairs.push([stack.pop(), k]); }
+    }
+    const t = starts[s.line - 1];
+    const re = new RegExp(JS_SHADOW, 'g');
+    for (let m; (m = re.exec(full));) {
+      if (m.index >= starts[declRow] && m.index < starts[declRow + 1]) continue;
+      if (m.index >= t) break;
+      if (pairs.some(([o, c]) => o < m.index && c > t)) return true;
+    }
+    return false;
+  };
+  const own = (body, s) => {
+    const viaFactory = Boolean(factory) && new RegExp('(?<![\\w$.])' + factory.replace(/[$]/g, '\\$') + '\\s*\\(').test(body);
+    if (!viaFactory && ((cs ? csShadow(body) : jsShadow.test(body)) || scopeShadow(s))) return false;
+    call.lastIndex = 0;
+    const found = [];
+    for (let m; (m = call.exec(body));) {
+      const open = m.index + m[0].length - 1, close = closeOf(body, open);
+      const before = body.slice(0, m.index);
+      // A method or type member written in the body (`name(x) {`, `{ name(x: T): void }`) is a declaration, not a call.
+      if (close >= 0 && !viaFactory) {
+        const after = body.slice(close + 1);
+        if (/^[ \t]*\{/.test(after) || (/^\s*:/.test(after) && /(?:^|[{,;])\s*$/.test(before))) return false;
+      }
+      found.push([m, before]);
+    }
+    for (const [, before] of found) {
+      const dot = /(?:([\w$]+)|[)\]'"`}])\s*[?!]?\.\s*$/.exec(before);
+      if (!dot) return true;
+      if (viaFactory) return true;
+      const who = dot[1], head = before.slice(0, dot.index);
+      if (who === 'this' && !/[\w$)\]]\s*[?!]?\.\s*$/.test(head)) return true;
+      if (cs) {
+        if (who === 'base' && !/[\w$)\]]\s*[?!]?\.\s*$/.test(head)) return true;
+        if (who && owner && who === owner) return true;
+        // A call through a member counts when C# can only reach the helper that way: an extension method, or a helper of
+        // another class than the test's own (a fixture, a base class).
+        if (extension || (owner && s.klass && s.klass !== owner)) return true;
+      }
+    }
+    return false;
+  };
+  return spans.filter(s => !s.skipped && own(rows.slice(s.line - 1, s.end).join('\n'), s));
 }
 
 // Whether a mustFail part names a test: the part, in lower case, inside one of the test's titles, as red-proof's

@@ -137,7 +137,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { canonicalTop, changedTestFiles, codeFingerprint, declaredTests, defaultBase, enclosingTest, helperCallers, namedBy, proofHint, provenHas, provenTests, readRecord, recordKey, testFileHashes, testSpans, writeEntry } from './proof-record.mjs';
+import { canonicalTop, changedTestFiles, codeFingerprint, csClassList, declaredTests, defaultBase, enclosingTest, helperCallers, namedBy, proofHint, provenHas, provenTests, readRecord, recordKey, testFileHashes, testSpans, writeEntry } from './proof-record.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { newLines, nothingChecks } from './new-lines.mjs';
 import { codeLines, codeOnly } from './size-check.mjs';
@@ -205,13 +205,19 @@ export function failureReasons(text) {
 // arguments. xUnit prints a test's DisplayName, not its method, in its Failed line (2026-11-10: four
 // breaks read "not seen failing" although their tests had failed: mustFail named the methods), so `pairs`
 // ({display, method}, from displayNames) add the other name.
+// A dotnet printed name without its arguments (2026-11-18, audit: an argument text with a parenthesis, `Refuses(role: "a (b)")`,
+// was never cut): the arguments start at the first `(` after a dotted name; any other name loses a last `(...)` group.
+function dotnetBare(name) {
+  const m = /^([\w.`+]+)\s*\(.*\)\s*$/s.exec(String(name));
+  return m ? m[1] : String(name).replace(/\s*\([^()]*\)\s*$/, '');
+}
 export function ownNames(reason, pairs = []) {
   const name = String(reason.name).toLowerCase();
   const names = new Set();
   const vitest = reason.runner ? reason.runner === 'vitest' : name.includes(' > ');
   if (vitest) { if (!/\s\[\s.*\s\]$/.test(name)) names.add(name.split(' > ').pop()); }
   else {
-    const bare = name.replace(/\s*\([^()]*\)\s*$/, '');
+    const bare = dotnetBare(name);
     if (/^[\w.`+]+$/.test(bare)) names.add(bare.split('.').pop());
     else { names.add(name); names.add(bare); }
   }
@@ -233,26 +239,90 @@ function titleMatches(title, own) {
   return [...own].some(n => re.test(n));
 }
 
+// The failing tests a runner printed, each with its own names, its full printed name and the test file it printed
+// (a vitest "file > ... > test" head), for failingFor.
+function printedIn(r) {
+  const head = String(r.name).split(' > ')[0].trim().split(/\s+/).pop().replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').toLowerCase();
+  return String(r.name).includes(' > ') && /\.\w+$/.test(head) ? head : '';
+}
+function failingTests(reasons, pairs = []) {
+  return reasons.filter(r => r.kind !== 'env').map(r => ({ name: String(r.name), own: ownNames(r, pairs), file: printedIn(r) }));
+}
+// A dotnet name printed as Namespace.Class.Method (nested: Outer+Inner): its class must be the class of the test.
+// A test the class has by inheritance is printed with the derived class. It is credited only by a failing test whose
+// class is the declaring class or is known to derive from it, directly or through other classes, in the test files
+// read for this run (2026-11-18, audit: any class was accepted for a test marked inherited, so an unrelated class's
+// failure credited an abstract base's test). `derived` is a Set of lower-case class names that derive from d.klass
+// (derivedOf). THE LIMIT that stays: a derived class in a file this run does not read, or two classes of the same
+// name in different namespaces, cannot be told apart here.
+function classFits(name, d, derived = new Set()) {
+  const bare = dotnetBare(name);
+  if (!d.klass) return true;
+  // 2026-11-18 (audit): a failure that prints no class (xUnit prints a DisplayName only) can come from any class, so it
+  // cannot credit a test that is inherited while no derived class is known; a plain test is still credited by it.
+  if (!/^[\w.`+]+$/.test(bare) || !bare.includes('.')) return !(d.inherited && !derived.size);
+  const parts = bare.split('.');
+  const printed = parts[parts.length - 2].split('+').pop().toLowerCase();
+  return printed === d.klass.toLowerCase() || derived.has(printed);
+}
+// The base map across all the test files read: for each declared test, the names of the classes that derive from its
+// class (transitively). `items` are declaredTests / testSpans items (each carries its file's classes); `extra` are
+// further class lists ({ name, bases }) from files read that hold no test.
+function derivedOf(items, extra = []) {
+  const all = [...extra];
+  for (const it of items) if (it && it.classes) all.push(...it.classes);
+  const bases = new Map();
+  for (const c of all) {
+    const set = bases.get(c.name.toLowerCase()) || new Set();
+    for (const b of c.bases) set.add(b.toLowerCase());
+    bases.set(c.name.toLowerCase(), set);
+  }
+  return (klass) => {
+    const want = String(klass || '').toLowerCase(), out = new Set();
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const [n, bs] of bases) if (!out.has(n) && n !== want && (bs.has(want) || [...bs].some(b => out.has(b)))) { out.add(n); grew = true; }
+    }
+    return out;
+  };
+}
+// THE ONE IDENTITY MATCHER (2026-11-18, audit finding 5: the result that is shown and the record that is saved must
+// take the same failing test for a declared test). The index of the failing test that is test `d`, or -1: its title
+// matches; a failure printed with a test file is that file's test, never another file's; a failure printed with no
+// file may stand for it only when a dotnet name that holds its class names the class that really holds the test. A
+// failure printed with the test's own file is taken first. `d` comes from declaredTests or testSpans (file, klass).
+function failingFor(failing, used, d, derivedFor = () => new Set()) {
+  const is = (f, i) => !used.has(i) && d.titles.some(t => titleMatches(t, f.own));
+  let k = failing.findIndex((f, i) => is(f, i) && f.file && (!d.file || ('/' + String(d.file).toLowerCase()).endsWith('/' + f.file)));
+  if (k < 0) { const derived = derivedFor(d.klass); k = failing.findIndex((f, i) => is(f, i) && !f.file && classFits(f.name, d, derived)); }
+  return k;
+}
+
 // The mustFail parts a break run did not see failing. Under a break, any failure of a named test
 // catches it, an error as well as an assertion (2026-11-07: a test that crashed because the break
 // removed its element was called a broken test, and the whole proof ran again, twice), except an
 // environment failure. A part is matched against each failing test's own names (ownNames). When the
 // changed test files declare tests whose title holds the part (`declared`, from declaredTests), each
 // of them must fail; when they declare none, one failing test whose own name holds the part is enough.
-export function survivors(mustFail, reasons, pairs = [], declared = []) {
-  const failing = reasons.filter(r => r.kind !== 'env').map(r => ownNames(r, pairs));
-  const seen = (p) => failing.some(f => [...f].some(n => n.includes(p)));
+export function survivors(mustFail, reasons, pairs = [], declared = [], classes = []) {
+  const failing = failingTests(reasons, pairs);
+  const derivedFor = derivedOf(declared, classes);
+  const seen = (p) => failing.some(f => [...f.own].some(n => n.includes(p)));
   const left = [];
   for (const part of mustFail) {
     const p = String(part).toLowerCase();
     const wanted = declared.filter(d => d.titles.some(t => String(t).toLowerCase().includes(p)));
     if (!wanted.length) { if (!seen(p)) left.push(String(part)); continue; }
-    const used = new Set(), missing = [];
+    const used = new Set(), missing = [], orphan = [];
     for (const d of wanted) {
-      const k = failing.findIndex((f, i) => !used.has(i) && d.titles.some(t => titleMatches(t, f)));
+      const k = failingFor(failing, used, d, derivedFor);
       if (k < 0) missing.push(d.titles[d.titles.length - 1]); else used.add(k);
+      // An inherited test with no derived class known cannot be matched to any failure: say so and name the base class.
+      if (k < 0 && d.inherited && !derivedFor(d.klass).size) orphan.push(d.klass);
     }
-    if (missing.length) left.push(seen(p) ? `${part} (not failing: ${missing.map(t => `"${t}"`).join(', ')})` : String(part));
+    const note = orphan.length ? ` (cannot be matched: the test is inherited from ${[...new Set(orphan)].join(', ')} and no class that derives from it is in the test files read, so no failing test can be tied to it)` : '';
+    if (missing.length) left.push(seen(p) ? `${part} (not failing: ${missing.map(t => `"${t}"`).join(', ')})${note}` : String(part) + note);
   }
   return left;
 }
@@ -364,31 +434,19 @@ export function caughtTestFiles(files, parts, textOf) {
 // title, ran }: the test file, the test's line and title there, and the full name as the runner printed it. One
 // failing test stands for one declared test; a failing test printed with the same file is taken first, and a
 // title written out before a title with placeholders, so a row is not taken for a test it only resembles.
-export function caughtTests(mustFail, reasons, pairs = [], spans = []) {
-  // A dotnet name printed as Namespace.Class.Method (nested: Outer+Inner): its class must be the class of the span.
-  const classFits = (name, d) => {
-    const bare = String(name).replace(/\s*\([^()]*\)\s*$/, '');
-    if (!d.klass || !/^[\w.`+]+$/.test(bare) || !bare.includes('.')) return true;
-    const parts = bare.split('.');
-    return parts[parts.length - 2].split('+').pop().toLowerCase() === d.klass.toLowerCase();
-  };
-  const printedIn = (r) => {
-    const head = String(r.name).split(' > ')[0].trim().split(/\s+/).pop().replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').toLowerCase();
-    return String(r.name).includes(' > ') && /\.\w+$/.test(head) ? head : '';
-  };
-  const failing = reasons.filter(r => r.kind !== 'env').map(r => ({ name: String(r.name), own: ownNames(r, pairs), file: printedIn(r) }));
+export function caughtTests(mustFail, reasons, pairs = [], spans = [], classes = []) {
+  const failing = failingTests(reasons, pairs);
+  const derivedFor = derivedOf(spans, classes);
   const open = (d) => d.titles.some(t => /\$\{|%[sdifjoc#]|\$\w/.test(String(t)));
   const found = new Map();
   for (const part of mustFail) {
     const used = new Set();
     const wanted = spans.filter(d => namedBy([part], d)).sort((a, b) => Number(open(a)) - Number(open(b)));
     for (const d of wanted) {
-      const is = (f, i) => !used.has(i) && d.titles.some(t => titleMatches(t, f.own));
-      let k = failing.findIndex((f, i) => is(f, i) && f.file && ('/' + String(d.file).toLowerCase()).endsWith('/' + f.file));
       // A failure printed with another test file is that file's test, never this one's (2026-11-17, audit: an older
-      // test with the same title in an unchanged file certified a new vacuous test). Only a failure printed with no
-      // file may stand for it, and a dotnet name that holds its class must name this test's class.
-      if (k < 0) k = failing.findIndex((f, i) => is(f, i) && !f.file && classFits(f.name, d));
+      // test with the same title in an unchanged file certified a new vacuous test); a dotnet name must name the class
+      // that holds this test. The same matcher the shown result uses (failingFor, 2026-11-18).
+      const k = failingFor(failing, used, d, derivedFor);
       if (k < 0) continue;
       used.add(k);
       found.set(d.file + '\n' + d.line, { file: d.file, line: d.line, title: d.titles[d.titles.length - 1], ran: failing[k].name });
@@ -1596,6 +1654,8 @@ async function main() {
   // test machine each caught break says the failing tests as its runner named them (caughtLine; an env value in a
   // name is hidden first), and the machine that asked matches them to its own test files.
   const spans = plan ? [] : titleFiles.flatMap(f => { try { return testSpans(textAt(f), f); } catch { return []; } });
+  // The classes of every C# test file read, also one with no test of its own (a derived class), for the base map.
+  const fileClasses = titleFiles.filter(f => /\.cs$/i.test(f)).flatMap(f => { try { return csClassList(textAt(f), f); } catch { return []; } });
   const caught = [];
   for (let i = 0; i < breaks.length; i++) {
     const b = breaks[i];
@@ -1628,10 +1688,10 @@ async function main() {
       else { say(`RED-PROOF: NOT RED ✗ — the test passes with ${b.file} broken, so it does not check that code; files restored.`); ok = false; }
       continue;
     }
-    const left = survivors(b.mustFail, r.why, pairs, declared);
+    const left = survivors(b.mustFail, r.why, pairs, declared, fileClasses);
     if (r.code !== 0 && !left.length) {
       say(`  BREAK ✓ ${b.name}: all ${b.mustFail.length} named test(s) fail`);
-      if (!plan) caught.push(...caughtTests(b.mustFail, r.why, pairs, spans).map(t => ({ ...t, by: String(b.name) })));
+      if (!plan) caught.push(...caughtTests(b.mustFail, r.why, pairs, spans, fileClasses).map(t => ({ ...t, by: String(b.name) })));
       // The names go unhidden (2026-11-17, audit: a test named with an env value came back as *** and matched no
       // test) and straight to stdout, not through say(): the line is base64, read by the machine that asked and
       // never shown or logged here.

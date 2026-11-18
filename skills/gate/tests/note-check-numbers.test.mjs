@@ -21,7 +21,9 @@ fs.writeFileSync(path.join(stateDir, 'review-notes-since'), '2026-01-01T00:00:00
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 const run = (args, env = {}) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', windowsHide: true, env: { ...process.env, ...env } });
 const kLines = (file, re = /^(?:K|NOTE )\d/) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => re.test(l));
-const idOf = (brief) => (/^Brief id: ([0-9a-f]{8})$/m.exec(fs.readFileSync(brief, 'utf8')) || [])[1] || 'no-id';
+// 2026-11-18 (repair 4): the answer names the run, as the brief asks: '<id> g<N>' (idBare: the id alone).
+const idBare = (brief) => (/^Brief id: ([0-9a-f]{8})$/m.exec(fs.readFileSync(brief, 'utf8')) || [])[1] || 'no-id';
+const idOf = (brief) => idBare(brief) + ((g) => (g ? ' g' + g[1] : ''))(/^Generation: (\d+)\s*$/m.exec(fs.readFileSync(brief, 'utf8')));
 const slash = (p) => p.replace(/\\/g, '/');
 
 const at = (n) => new Date(Date.UTC(2026, 10, 12, 6, 0, 0) + n * 1000).toISOString();
@@ -293,4 +295,57 @@ test('the wider CONFIRMED and UNSURE spellings withdraw the author line, as the 
     assert.equal(guardEvidence(`${ref}\n${l}`, 2), '', l);
   }
   assert.equal(guardEvidence(`${ref}\nCONFIRMED 22 — src/save.ts:12 other note`, 2), EVIDENCE);
+});
+
+// ---- 2026-11-18 (user decision): a Question note is never refutable; the checker's view goes to the user ----
+test('a Question with a guard number: asked of the user with the checker view, no author line, and the guards hold nothing refutable', () => {
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  const report = path.join(notes, 'review-q.md');
+  const Q = 'Question — src/limits.ts:5 should the limit be 50 or 100?';
+  fs.writeFileSync(report, `RECOMMEND: PASS\n\n${Q}\n`);
+  const before = reviewerRun('rev1', `RECOMMEND: PASS\n\n${Q}`, 1);
+  const transcript = write(before);
+  assert.equal(run(['--brief', '--notes', notes, '--reports', report, '--transcript', transcript]).status, 0);
+  const brief = path.join(notes, 'note-check-brief.md');
+  assert.match(fs.readFileSync(brief, 'utf8'), /^NOTE 1 · Question · /m);
+  const answer = `BRIEF ${idOf(brief)}\nREFUTED 1 — src/limits.ts:5 holds the limit at 50; recommend: keep 50\n`;
+  fs.writeFileSync(path.join(notes, 'note-check-report.md'), answer);
+  const rec = run(['--record', path.join(notes, 'note-check-report.md'), '--notes', notes]);
+  assert.equal(rec.status, 0, rec.stdout + rec.stderr);
+  assert.ok(rec.stdout.split(/\r?\n/).some((l) => l.startsWith('ASK THE USER: NOTE 1 · ') && l.includes('src/limits.ts:5 holds the limit at 50; recommend: keep 50')), rec.stdout);
+  assert.doesNotMatch(rec.stdout, /THE AUTHOR MAY NOW WRITE|the guards cannot read/);
+  const r = scan.scanTranscript(write([...before, ...checkerRun('chk', answer, 20), say('NOTE 1: refuted — src/limits.ts:5 holds the limit at 50', 30)]));
+  assert.deepEqual(r.reviewRefutable, []);
+  assert.equal(r.reviewNotes[0].outcome, null);
+});
+
+// 2026-11-18 (audit 3 repair): a CONFIRMED or UNSURE inside a code block withdraws a refutation in the guards and here alike.
+test('a CONFIRMED or UNSURE line inside a code block withdraws the refutation, in the script and in the guards', async () => {
+  const { guardEvidence } = await import('../scripts/note-check.mjs');
+  const before = [...reviewerRun('rev1', REPORT_1, 1), userSays('leave the empty list as it is, it never happens', 5), say('NOTE 1: user — "leave the empty list as it is"', 6), ...reviewerRun('rev2', REPORT_2, 8)];
+  const ref = `REFUTED 2 — ${EVIDENCE}`;
+  for (const answer of [`${ref}\n\`\`\`\nCONFIRMED 2 — src/save.ts:12 still real\n\`\`\``, `${ref}\n\`\`\`\nUNSURE 2 — file not readable\n\`\`\``]) {
+    assert.equal(guardEvidence(answer, 2), '', answer);
+    const held = scan.scanTranscript(write([...before, ...checkerRun('chk', answer, 20)])).reviewRefutable.some((r) => r.n === 2);
+    assert.equal(held, false, answer);
+  }
+  assert.equal(guardEvidence('```\nCONFIRMED 2 — src/save.ts:12 real\n```\n' + ref, 2), EVIDENCE, 'an older fenced line does not block a later refutation');
+});
+
+test('a Gap that asks the user to decide, with a guard number: asked of the user with the checker view, no author line', () => {
+  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
+  const report = path.join(notes, 'review.md');
+  const body = 'RECOMMEND: FAIL\n- Gap — src/limit.ts:9 the limit is 50 here and 100 in the ticket: you decide which one.';
+  fs.writeFileSync(report, body + '\n');
+  const session = path.join(root, 'asks-' + path.basename(notes) + '.jsonl');
+  fs.writeFileSync(session, lines(reviewerRun('rev1', body, 1)));
+  assert.equal(run(['--brief', '--notes', notes, '--reports', report, '--transcript', session]).status, 0);
+  const brief = path.join(notes, 'note-check-brief.md');
+  assert.match(fs.readFileSync(brief, 'utf8'), /^NOTE 1 · Gap \(asks the user\) · /m);
+  const answer = path.join(notes, 'note-check-report.md');
+  fs.writeFileSync(answer, `BRIEF ${idOf(brief)}\nREFUTED 1 — src/limit.ts:9 holds 50, recommend 50\n`);
+  const rec = run(['--record', answer, '--notes', notes]);
+  assert.equal(rec.status, 0, rec.stdout + rec.stderr);
+  assert.match(rec.stdout, /^ASK THE USER: NOTE 1 · .*src\/limit\.ts:9 holds 50, recommend 50/m);
+  assert.doesNotMatch(rec.stdout, /THE AUTHOR MAY NOW WRITE|the guards cannot read/);
 });

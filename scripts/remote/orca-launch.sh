@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # orca-launch.sh — start one Claude agent on a remote Orca host that reads a brief file.
 #
-# Usage: bash ~/.claude/scripts/remote/orca-launch.sh [--role <role>] <environment> <remote-worktree> <remote-brief> ["one-line note"]
+# Usage: bash ~/.claude/scripts/remote/orca-launch.sh [--engine claude] [--role <role>] <environment> <remote-worktree> <remote-brief> ["one-line note"]
+#   --engine           the task's engine (default claude). codex is refused in one line: remote launches start Claude
+#                      agents only, and a Codex task never gets one without the user knowing.
 #   --role             picks the model the same way Sanad does on the local machine (default: code). Each is a
 #                      Claude alias — always the newest model of that family, so no version is ever pinned here
 #                      (2026-11-10: this file still launched Fable 5.1 after the boss had moved on).
@@ -15,13 +17,25 @@
 #   <environment>      saved Orca environment name (also the SSH alias unless ORCA_SSH_HOST is set)
 #   <remote-worktree>  workspace path on the remote, e.g. C:/Users/me/source/repos/App
 #   <remote-brief>     brief file path on the remote; it must already exist there
-# Prints LAUNCHED <handle> (<model banner>), STUCK <handle> (the agent shows a question),
+# Options go before the positional arguments; one after them is refused (2026-11-18).
+# Prints LAUNCHED <handle> (engine <engine>, <role>: <model banner>), STUCK <handle> (the agent shows a question),
 # MODEL MISMATCH <handle> or NOT SEEN <handle>.
 # The remote shell is assumed to be Windows cmd (the existence check uses `if exist`).
 set -euo pipefail
 
 ROLE=code
-if [ "${1:-}" = "--role" ]; then ROLE="${2:?role}"; shift 2; fi
+ENGINE=claude
+# 2026-11-18 (audit finding 6): --engine and --role may come in either order. The prompt and the agent below are Claude's;
+# a Codex task is refused, never started as a Claude agent (no tested Codex path exists here).
+while [ "${1:-}" = "--role" ] || [ "${1:-}" = "--engine" ]; do
+  if [ "$1" = "--role" ]; then ROLE="${2:?role}"; else ENGINE="${2:?engine}"; fi
+  shift 2
+done
+case "$ENGINE" in
+  claude) ;;
+  codex) echo "REFUSED: remote launches support Claude tasks only; this task's engine is Codex, so nothing was started"; exit 2 ;;
+  *) echo "REFUSED: unknown engine '$ENGINE' (claude)"; exit 2 ;;
+esac
 case "$ROLE" in
   code | risk-review) MODEL_ID=opus; MODEL_NAME='Opus' ;;
   review | recheck | chore | tests) MODEL_ID=sonnet; MODEL_NAME='Sonnet' ;;
@@ -29,6 +43,12 @@ case "$ROLE" in
   *) echo "REFUSED: unknown role '$ROLE' (code, risk-review, review, recheck, chore, tests, judge)"; exit 2 ;;
 esac
 
+# 2026-11-18 (audit finding 3): options are read only before the positional arguments. One after them (or --engine=codex)
+# used to be ignored and a Claude agent started for a Codex task, or the word landed in the prompt as the note.
+[ "$#" -le 4 ] || { echo "REFUSED: too many arguments; the options (--engine, --role) go before <environment>, and the note is one quoted argument"; exit 2; }
+for a in "$@"; do
+  case "$a" in --*) echo "REFUSED: '$a' is read as an option but comes in the wrong place or form; use '--engine <name>' and '--role <name>' before <environment>"; exit 2 ;; esac
+done
 ENV="${1:?environment}"; WT="${2:?remote worktree}"; BRIEF="${3:?remote brief path}"; NOTE="${4:-}"
 SSH_HOST="${ORCA_SSH_HOST:-$ENV}"
 
@@ -73,8 +93,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     BANNER="$(echo "$SCREEN" | grep -o -m1 '[A-Z][a-z]* [0-9.]* with [a-z]* effort' || true)"
     # Any version of the role's family is right (the alias picks the newest); only the family and effort are checked.
     case "$BANNER" in
-      "$MODEL_NAME "[0-9]*" with xhigh effort") echo "LAUNCHED $HANDLE ($ROLE: $BANNER)"; exit 0 ;;
-      "") echo "LAUNCHED $HANDLE ($ROLE: banner not seen; expected $MODEL_NAME xhigh)"; exit 0 ;;
+      "$MODEL_NAME "[0-9]*" with xhigh effort") echo "LAUNCHED $HANDLE (engine $ENGINE, $ROLE: $BANNER)"; exit 0 ;;
+      "") echo "LAUNCHED $HANDLE (engine $ENGINE, $ROLE: banner not seen; expected $MODEL_NAME xhigh)"; exit 0 ;;
       *) echo "MODEL MISMATCH $HANDLE (role $ROLE wants $MODEL_NAME xhigh, banner says: $BANNER)"; exit 5 ;;
     esac
   fi

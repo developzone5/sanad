@@ -319,7 +319,10 @@ test('F4: an unreadable remote or an oversized outgoing set denies within the de
   const started = Date.now();
   const d = await decide('precommit-guard.js', 'git push origin staging', { cwd: unreachable, realBudget: true });
   assert.equal(d.decision, 'deny'); assert.match(d.reason, /Nothing was verified/);
-  assert.ok(Date.now() - started < 13000, 'decision arrives before the hook timeout');
+  // 2026-11-18: the bound was 13 s, and the run takes 12.5 to 12.8 s on a quiet machine (the 10 s scan limit
+  // plus process start), so it failed under load and rolled an install back. The hook's real timeout in
+  // settings.json is 25 s: 20 s keeps the promise ("before the hook timeout") with room for a busy machine.
+  assert.ok(Date.now() - started < 20000, 'decision arrives before the hook timeout');
 
   const big = pushFixture('f4-big');
   const line = 'x'.repeat(99) + '\n';

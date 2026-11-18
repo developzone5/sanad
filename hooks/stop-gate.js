@@ -21,6 +21,10 @@
  *    note is fixed or the user decided it (see transcript-scan.js "Reviewer notes").
  *    With the host's final text this holds on repeated stops too (5 in a row at most).
  *
+ *  - a claim lock (2026-11-18): a final text that claims a pass or hands over a push command is blocked while the
+ *    code is unverified, failed or pending, also on a second stop, while a helper or a background check runs, and
+ *    after a declared probe (5 in a row at most; see claimBlock). A text that claims nothing keeps the old exits.
+ *
  * Deterministic, no LLM. Fail-OPEN: any error → allow silently.
  *
  * Author: Eng. Mohammed Almutairi - Developzone.net
@@ -33,10 +37,13 @@ const path = require('path');
 // A stop that goes through starts the task timer's idle wait (lib/timer-idle.cjs); a blocked stop does not.
 // A GATE: PASS after the last code edit ends the task timer first (lib/timer-idle.cjs autoEnd, 2026-11-11).
 var lastScan = null, stopBusy = false; // stopBusy: a check or helper of this work still runs (not idle time)
+var claimHeld = false; // this stop was held by the claim lock (see claimBlock)
 // Open reviewer notes (2026-11-12, rule 5): notesBlock turns this stop into a block (joined to any other
 // block reason); notesWarn is only a warning (the runaway guard, or an older host's repeated stop).
 var notesBlock = '', notesWarn = '';
 function markIdle() {
+  // A stop the claim lock did not hold ends its 5-in-a-row count.
+  if (!claimHeld) { try { notesBlockCount(() => 0, '#claim'); } catch (e) { /* no count to clear */ } }
   try { if (lastScan) require('./lib/timer-idle.cjs').sideReviews(input, lastScan); } catch (e) { /* the timer never blocks a stop */ }
   try { if (lastScan) require('./lib/timer-idle.cjs').autoEnd(input, lastScan); } catch (e) { /* the timer never blocks a stop */ }
   // Busy: a check or helper of the work still runs, whichever verdict this stop gets (lastScan.workRunning).
@@ -87,13 +94,17 @@ lastScan = r;
 //    again; any stop that passes this check clears the count. A count that cannot be kept (no state
 //    folder for this transcript) falls back to the older rule below.
 //  - Without the final text (an older host), this turn's own verdict lines decide: block once, then warn.
+// Why the limit stays at 5 (2026-11-18): a push command now counts anywhere in the final text, even in plain words
+// or a quote, so a false alarm is possible (a text that only talks about `git push`). A stop hook that can never
+// end would lock the session on such a false alarm, so the 6th stop in a row only warns and the count restarts.
 const NOTES_BLOCKS_FILE = 'review-notes-blocks.json', NOTES_BLOCKS_MAX = 5;
 // update(count) gives the new count; returns the count read, or null when it cannot be kept.
-function notesBlockCount(update) {
+// suffix: another count in the same file, for the same session (the claim lock below uses '#claim').
+function notesBlockCount(update, suffix = '') {
   try {
     if (!scan.stateAllowed(transcriptPath)) return null;
     const file = path.join(scan.stateFolder(), NOTES_BLOCKS_FILE);
-    const key = String(input.session_id || transcriptPath).toLowerCase();
+    const key = String(input.session_id || transcriptPath).toLowerCase() + suffix;
     let counts = {};
     try { counts = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { counts = {}; }
     if (!counts || typeof counts !== 'object' || Array.isArray(counts)) counts = {};
@@ -124,6 +135,34 @@ try {
   }
 } catch (e) { notesBlock = ''; notesWarn = ''; }
 
+// The claim lock (2026-11-18, stop gate promise, finding 3). The notes lock above holds a final text that claims a
+// pass while a reviewer note is open. The same final text, claiming a pass (`REVIEW: PASS` / `GATE: PASS`) or handing
+// over a push command, is also held while the code is unverified: failed, pending, or a helper or background check
+// still running. Before, such a text passed on the second stop, while a helper ran, or after a declared probe, and the
+// user pushes by hand from the command. It uses the same 5-in-a-row count as the notes lock (a second count, key
+// '#claim', in the same file); any stop that is not held clears it. A final text that claims nothing keeps the old
+// exits. Without the host's final text (an older host), this turn's own claim holds once, then warns. Any error: no lock.
+function claimBlock(why) {
+  try {
+    const last = typeof input.last_assistant_message === 'string' ? input.last_assistant_message : null;
+    const claims = last !== null ? scan.claimsReview(last) : r.turnClaim === true;
+    if (!claims) return;
+    let hold = !input.stop_hook_active;
+    if (last !== null) {
+      const count = notesBlockCount((n) => (n >= NOTES_BLOCKS_MAX ? 0 : n + 1), '#claim');
+      if (count !== null) hold = count < NOTES_BLOCKS_MAX;
+    }
+    if (!hold) return;
+    claimHeld = true;
+    out({
+      decision: 'block',
+      reason: 'The final text claims a pass (REVIEW/GATE: PASS) or hands over a push command, but ' + why + '. ' +
+        'Do not claim a pass or hand over a push command yet: get the build/test to pass on the final code first, then say it. ' +
+        'To report where things stand without a claim, send a text with no verdict line and no push command.',
+    });
+  } catch (e) { /* the lock is an extra; the stop goes on */ }
+}
+
 /* ---------------------------------------------------------------------------
  * Verdict — exactly one of six exits (open reviewer notes, above, turn any of them into a block):
  *   1. no code edit this session               → allow silently
@@ -135,6 +174,18 @@ try {
  *   5. last verify after the edit FAILED       → block ONCE: fix, re-run
  *   6. no verify at all since the last edit    → block ONCE: run the gate
  * ------------------------------------------------------------------------- */
+
+// The review record (2026-11-18, audit finding 2). A normal review verdict accepted here (a completed reviewer
+// run after the last change, `REVIEW: PASS` not "reused", no open note) puts the commits of HEAD on record, so
+// a later "reused" verdict can rest on it. The user usually pushes by hand, so the stop is the reliable point;
+// the push guard writes the same record. Writing twice changes nothing; any error writes nothing.
+try {
+  const store = require(path.join(__dirname, 'lib', 'review-store.cjs'));
+  const last = typeof input.last_assistant_message === 'string' ? input.last_assistant_message : null;
+  // 2026-11-18 (repair round): only the folder the reviewed change lives in is recorded, only at the stop that holds the
+  // verdict; a later stop adds a HEAD of the same tree and base; a FAIL or an open note withdraws (see review-store.cjs).
+  store.atStop(transcriptPath, r, last, input.cwd || process.cwd(), input.session_id);
+} catch (e) { /* the record is an extra; the gate goes on */ }
 
 if (r.lastEdit === -1) allow();
 
@@ -256,6 +307,7 @@ if (!failedAfterEdit && !pendingAfterEdit && (r.lastGreenProof ?? -1) > lastEdit
   out({ systemMessage: 'The tests ran green after the last code edit (a red-proof green run), but the proof itself did not hold (NOT RED, or a break not caught or invalid: see its RED-PROOF line).' + memo + ' Fix the tests and prove again: the push guard still counts the failed proof.' });
 }
 if (!failedAfterEdit && !pendingAfterEdit && r.lastProbeFailure > lastEdit) {
+  claimBlock('the last build/test after your code edit failed (a declared probe), so nothing here passed');
   out({ systemMessage: 'Declared review probe(s) failed as expected. That is evidence about the code under review, not verification of your own change; the push guard still refuses while they fail.' });
 }
 // A helper agent of the current work is still working (launched after the last passing check, even
@@ -263,6 +315,7 @@ if (!failedAfterEdit && !pendingAfterEdit && r.lastProbeFailure > lastEdit) {
 // it instead of asking for a check that cannot run yet (2026-11-06). Its finish brings the next stop
 // back to this gate. A helper launched before a later passing check belongs to older work.
 if (!failedAfterEdit && !pendingAfterEdit && (r.lastRunningHelper ?? -1) > r.lastVerify) {
+  claimBlock('a helper for this work is still running and the code is not verified yet');
   stopBusy = true;
   out({ systemMessage: 'A helper for this work is still running; the build/test check follows when its result is in.' });
 }
@@ -280,11 +333,13 @@ const file = /^<git(?:-remote)?>$/.test(owed) ? ' (last change: a git merge/rese
 // A run no notice can bring back (finished without an exit code, or no task id) still blocks.
 const stuckAfterEdit = (r.lastStuckVerifyStop ?? -1) > lastEdit;
 if (!failedAfterEdit && pendingAfterEdit && !stuckAfterEdit) {
+  claimBlock('a build/test for this work is still running in the background and has not passed yet');
   stopBusy = true;
   out({ systemMessage: 'A build/test for this work is still running in the background: `' + shown(r.lastPendingVerifyStopCommand) + '`. Not verified yet; this check runs again when it finishes.' });
 }
 
 if (input.stop_hook_active) {
+  claimBlock(failedAfterEdit ? 'the last build/test after your code edit failed' : pendingAfterEdit ? 'a verification command\'s result was never collected' : 'code changed after the last passing build/test');
   out({
     systemMessage: failedAfterEdit
       ? '⛔ Gate NOT verified: the last build/test after your code edit FAILED. Run /gate before shipping.'

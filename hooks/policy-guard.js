@@ -92,6 +92,21 @@ if (!shell) {
     emit('ask', 'policy-guard: command parser unavailable (hooks/lib/shell-command.cjs) — confirm this delete manually.');
   allow();
 }
+// 2026-11-18: the one rule of what is code (lib/code-paths.cjs), shared with the scanner. Without it a push cannot be judged.
+let codePaths = null;
+try { codePaths = require(path.join(__dirname, 'lib', 'code-paths.cjs')); } catch (e) { codePaths = null; }
+// 2026-11-18: the review record (lib/review-store.cjs). Without it a "reused" verdict is refused.
+let reviewStore = null;
+try { reviewStore = require(path.join(__dirname, 'lib', 'review-store.cjs')); } catch (e) { reviewStore = null; }
+let acceptedReview = null;
+// Called once the push is allowed: the commits being pushed, as reviewed, go on record. Never blocks.
+function writeAcceptedReview() {
+  try {
+    if (!acceptedReview || !reviewStore || remoteContext) return;
+    // Repair round: only the reviewed folder is recorded; a HEAD of a reviewed tree and base is added (a squash).
+    reviewStore.atPush(acceptedReview.transcript, true, acceptedReview.dir, acceptedReview.cwd, acceptedReview.base, input.session_id);
+  } catch (e) { /* a record that cannot be written changes no answer */ }
+}
 const SHELL_OPTS = { tool: input.tool_name === 'Bash' ? 'Bash' : 'PowerShell', home: require('os').homedir(), tmp: (require('os').tmpdir || (() => ''))() };
 
 function gitRaw(args) {
@@ -254,11 +269,37 @@ function checkRemoteGit(g) {
   ask(REMOTE_PUSH);
 }
 
+// 2026-11-18 (guard.json finding 1): the guard judges the HEAD that exists before the command runs. A git part
+// that changes HEAD (or the files) earlier in the same command makes a different tree go out than the one that
+// was verified, so a push or `gh pr create` after such a part is refused: it must be its own command.
+// Round 2 (finding 3): the rule is turned around. A push or `gh pr create` in one command is allowed only
+// after parts from a short read-only list; every other earlier part (also a git part behind if/while/!, a
+// `gh pr checkout`, `npm version`, `git update-ref`, `git fetch --update-head-ok`) must be its own command first.
+const SAFE_GIT_SUBS = /^(?:status|log|diff|fetch|add|rev-parse|show|rev-list|merge-base|range-diff|ls-remote|ls-files|push)$/;
+const SAFE_PROGRAMS = /^(?:cd|pushd|popd|echo|printf|pwd|true|:|set-location|write-output|write-host)$/;
+const SAFE_GH = /^(?:pr\s+(?:create|view|status|list|checks|diff)|run\s+(?:view|list))$/;
+let earlierUnsafe = '';
+function partIsReadOnly(rec) {
+  if (rec.remote) return false;
+  if (rec.git) {
+    const g = rec.git;
+    if (!SAFE_GIT_SUBS.test(g.sub || '')) return false;
+    if (g.sub === 'fetch' && g.args.some((t) => /^--update-head-ok$|^-u$/.test(t))) return false;
+    return true;
+  }
+  if (rec.gh) return SAFE_GH.test(String(rec.gh.command || '') + ' ' + String(rec.gh.sub === 'new' ? 'create' : rec.gh.sub || ''));
+  return SAFE_PROGRAMS.test(String(rec.program || '').toLowerCase());
+}
+function refuseAfterHeadMove() {
+  if (earlierUnsafe) deny('this command runs `' + earlierUnsafe + '` before it publishes, so the tree that goes out may not be the tree that was verified. Run the push as its own command after the check, the review and the gate: run the push as its own command.');
+}
+
 function checkPush(a, cliConfig) {
   // The last dry-run flag wins in git; a mix of both is ambiguous, so deny it.
   const dryFlags = a.filter((t) => /^(--dry-run|-n|--no-dry-run)$/.test(t));
   if (dryFlags.length && dryFlags.every((t) => t !== '--no-dry-run')) return;
   publishing = true;
+  refuseAfterHeadMove();
   if (dryFlags.some((t) => t !== '--no-dry-run') && dryFlags.includes('--no-dry-run')) {
     deny('conflicting dry-run flags (`--dry-run`/`-n` with `--no-dry-run`) make it unclear whether this push publishes. Use one form.');
     return;
@@ -275,7 +316,7 @@ function checkPush(a, cliConfig) {
     const t = a[i];
     if (/^(--force|--force-with-lease(=.*)?|--force-if-includes)$/.test(t) || /^-[a-zA-Z]*f[a-zA-Z]*$/.test(t)) { force = true; continue; }
     if (/^(--delete|-d)$/.test(t)) { del = true; continue; }
-    if (/^(--mirror|--all|--tags|--prune)$/.test(t)) { wide = true; continue; }
+    if (/^(--mirror|--all|--tags|--prune|--follow-tags)$/.test(t)) { wide = true; continue; }
     if (/^(-o|--push-option|--receive-pack|--repo|--exec)$/.test(t)) { i++; continue; }
     // Shell redirections are not refspecs: `> out.txt`, `2> err`, `>file`, `2>&1`.
     if (/^(\d*>>?|&>>?|\d*<)$/.test(t)) { i++; continue; }
@@ -300,8 +341,13 @@ function checkPush(a, cliConfig) {
   if (pushDefault === 'matching' && refspecs.length === 0 && !deleteMode) {
     deny('`push.default=matching` pushes every matching branch. Push the checked-out branch explicitly: `git push origin HEAD:refs/heads/<branch>`.');
   }
+  let tagPush = false;
   for (let r of refspecs) {
+    // 2026-11-18: a leading + forces that one refspec, exactly like --force.
+    if (r.startsWith('+')) force = true;
     r = r.replace(/^\+/, '');
+    // A destination under refs/tags/ (or a colon-less refs/tags/<name>) pushes a tag, like `git tag` + push.
+    if (/^refs\/tags\//.test(r.includes(':') ? r.slice(r.indexOf(':') + 1) : r)) tagPush = true;
     if (r === ':') {
       deny('matching-branch pushes cannot be verified as one code change. Push the explicit checked-out feature branch after its review and gate.');
       continue;
@@ -309,6 +355,8 @@ function checkPush(a, cliConfig) {
     if (r.startsWith(':')) { del = true; continue; }
     const i = r.indexOf(':');
     const src = i >= 0 ? r.slice(0, i) : r;
+    // Round 2 (finding 8): a tag named as the source goes to refs/tags/ by git's own rule, so it asks too.
+    if (src && src !== 'HEAD' && /^refs\/tags\//.test(git(['rev-parse', '--symbolic-full-name', src]))) tagPush = true;
     if (!deleteMode) publishesCode = true;
     if (!deleteMode && src !== 'HEAD') {
       const sourceCommit = git(['rev-parse', '--verify', src + '^{commit}']);
@@ -345,6 +393,7 @@ function checkPush(a, cliConfig) {
   const integ = dsts.find((d) => isIntegration(d));
   if (integ) ask('direct push to the integration branch `' + integ + '` bypasses the PR flow');
   if (force) ask('force-push rewrites pushed history (never on a shared branch)');
+  if (tagPush) ask('pushing a tag (a refs/tags/ destination) — CLAUDE.md: never tag a release');
   if (del) ask('deleting a remote branch');
   if (wide) ask('`--all` / `--mirror` / `--tags` pushes more than this branch');
 }
@@ -398,7 +447,40 @@ function gateCheck(base) {
     try { return !!dir && execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(8000, left), windowsHide: true }) === ''; } catch (e) { return false; }
   });
   const treeVerified = !remoteOnly && treeMatches && r.lastEditPath === '<git>' && status === '';
-  const lastEdit = remoteOnly ? r.lastNonRemoteEdit : treeVerified ? r.lastNonGitEdit : r.lastEdit;
+  let lastEdit = remoteOnly ? r.lastNonRemoteEdit : treeVerified ? r.lastNonGitEdit : r.lastEdit;
+  let lateVerifyOk = false;
+  // 2026-11-18 (guard.json finding 3): the review, the gate and the reviewer run must belong to the tree that
+  // goes out. When this exact tree has its own passing receipt, they are ordered against THAT receipt, not
+  // against the session's last edit (which may be work on another branch):
+  //  - anchor = the newest receipt of this tree before the reviewer run (before the gate in the workflow lane);
+  //  - a passing receipt of this repository for another tree between the anchor and the gate means the
+  //    verdicts were given for that other tree: refuse;
+  //  - otherwise, with a clean work tree, edits made after the anchor were made elsewhere (the receipt
+  //    proves this tree), so they no longer hold back a verdict that follows the anchor.
+  // A flow without such an anchor (a reused review, a reviewer run before the check) is judged as before.
+  if (receipts && receipts.length && status === '' && !remoteOnly && Array.isArray(r.passingReceipts)) {
+    const workflowLane = sanadConfig('lane') === 'workflow';
+    const mark = workflowLane ? r.lastGate : r.lastReviewerRun;
+    const own = receipts.map((c) => c.seq).filter((s) => typeof s === 'number' && s < mark);
+    if (own.length) {
+      const anchor = Math.max(...own);
+      // 2026-11-18 (round 2, findings 1 and 2): "another tree" also covers a work tree of the same repository
+      // (same git common dir, another folder), and a branch switch between the anchor and the gate means the
+      // verdicts may belong to the other branch. An edit between the anchor and the gate is never forgiven.
+      const inWindow = (s) => typeof s === 'number' && s > anchor && s < r.lastGate;
+      const otherTree = (c) => c && !(c.treeBefore === tree && c.treeAfter === tree);
+      const foreign = r.passingReceipts.some((c) => otherTree(c) && inWindow(c.seq) && (slash(c.toplevel) === root || sameRepository(c.toplevel)));
+      const switched = switchedBetweenCheckAndGate(tp, tree, root);
+      const editedInWindow = (Array.isArray(r.reviewChangeSeqs) && r.reviewChangeSeqs.some((c) => c && c.path && inWindow(c.seq))) || (Array.isArray(r.reviewEditSeqs) && r.reviewEditSeqs.some(inWindow));
+      if (foreign) deny('the review and the gate were given for a different tree: a check of another tree of this repository (this folder or another work tree of it) ran after the check of the outgoing tree and before the gate. Run the check, the reviewer and the gate on the tree that goes out (this branch), then push.');
+      else if (switched) deny('the review and the gate may belong to another branch: a `git switch` or `git checkout` ran after the check of the outgoing tree and before the gate. Check the tree that goes out again, run the reviewer and the gate on it, then push.');
+      else if (!editedInWindow && lastEdit >= anchor) {
+        lastEdit = anchor - 0.001;
+        // A check of another tree that came AFTER the gate is work elsewhere; it does not make this tree's gate stale (finding 6).
+        if (r.passingReceipts.some((c) => otherTree(c) && typeof c.seq === 'number' && c.seq > r.lastGate)) lateVerifyOk = true;
+      }
+    }
+  }
   if (!treeMatches || r.lastBoundCheck <= lastEdit) {
     deny('publishing requires a completed evidence.mjs check of this repository and the exact outgoing tree. Run the final check through skills/gate/scripts/evidence.mjs; bare output or a written PASS cannot replace it. Commit or ignore unrelated untracked files before checking.');
   } else if (receipts) {
@@ -414,7 +496,7 @@ function gateCheck(base) {
       (stopped ? 'A check was stopped before it finished (`' + String(r.lastCancelledVerifyCommand || '').slice(0, 160) + '`): rerun that command to a pass, or run a final evidence.mjs check of this tree after it. ' : '') +
       'Complete the checks, collect their results, then run review and /gate. For a malformed command or lost result that cannot be retried, use the recovery procedure in skills/gate/reference/command-evidence.md; never rerun destructive setup just to clear evidence.');
   }
-  if (r.lastGate <= Math.max(lastEdit, r.lastVerifyResult) || r.lastGateVerdict !== 'PASS') {
+  if (r.lastGate <= Math.max(lastEdit, lateVerifyOk ? -1 : r.lastVerifyResult) || r.lastGateVerdict !== 'PASS') {
     deny('code requires `GATE: PASS` after the last edit and completed verification' + file + '. ' +
          'Run /gate (Definition of Done + security checklist, real quoted output), present the ship brief, get the explicit yes — then push.');
   }
@@ -430,9 +512,18 @@ function gateCheck(base) {
     // change and completed before the verdict. A reused review (promotion) instead
     // needs a `git range-diff` equivalence check after the last change.
     // 2026-11-17 (audit F1/F3): the newest readable range-diff decides, and its new side must be exactly the commits being pushed.
-    const reused = /\breused\b/i.test(r.lastReviewText || '') && (r.lastRangeDiffProof ?? -1) > lastEdit && (r.lastRangeDiffProof ?? -1) > (r.lastRangeDiffChanged ?? -1) && rangeDiffCoversPush(r.lastRangeDiffNew);
+    let reused = /\breused\b/i.test(r.lastReviewText || '') && (r.lastRangeDiffProof ?? -1) > lastEdit && (r.lastRangeDiffProof ?? -1) > (r.lastRangeDiffChanged ?? -1) && rangeDiffCoversPush(r.lastRangeDiffNew);
+    // 2026-11-18 (audit finding 2): equal patches prove sameness, never that a review happened. Every old-side
+    // commit of the range-diff must be in a review record (lib/review-store.cjs) of this repository.
+    let unrecorded = '';
+    if (reused) {
+      const found = reviewStore ? reviewStore.reviewed(tp, gitCwd, r.lastRangeDiffOld) : { ok: false, last: '' };
+      if (!found.ok) { reused = false; unrecorded = found.last || 'the old commits'; }
+    }
     if (!reused && /reused/i.test(r.lastReviewText || '') && r.lastReviewerRun <= lastEdit) {
-      deny((r.lastRangeDiff ?? -1) > lastEdit && (r.lastRangeDiffChanged ?? -1) > lastEdit
+      deny(unrecorded
+        ? 'no completed review is on record for ' + unrecorded + ' (the old side of the range-diff)' + file + ': equal patches show the code is the same, not that anyone reviewed it. Run the independent reviewer on these commits and write `REVIEW: PASS` without "reused".'
+        : (r.lastRangeDiff ?? -1) > lastEdit && (r.lastRangeDiffChanged ?? -1) > lastEdit
         ? 'the range-diff shows a changed or new commit: this is a new patch and needs its own review' + file + '.'
         : (r.lastRangeDiff ?? -1) > lastEdit
           ? 'the range-diff output proves no equal series of the commits being pushed' + file + ': run git range-diff <old-base>..<old-head> <new-base>..<new-head> by itself so its output can be read.'
@@ -443,6 +534,9 @@ function gateCheck(base) {
            'Launch (or continue) the Sanad Step 3.5 reviewer — its prompt starts "You are the independent reviewer" — collect its finished report, then write the verdict. ' +
            'A promotion that reuses a review labels the verdict "reused" and runs `git range-diff` after the last change.');
     }
+    // A normal verdict accepted here is written down when the push goes through (see writeAcceptedReview).
+    // lastEdit: the change the guard really judged by (a verified tree relaxes it), so a squash is a normal review here too.
+    if (reviewStore && reviewStore.accepted(r, null, lastEdit)) acceptedReview = { transcript: tp, cwd: gitCwd, base: pushBase(), dir: reviewStore.reviewedDir(r, gitCwd) };
   }
   const relational = relationalCodeChanged();
   if (relational && (r.lastProviderRun <= lastEdit || r.lastFailedProvider !== -1 || r.lastPendingProvider !== -1 || r.lastGate <= r.lastProviderResult)) {
@@ -475,6 +569,65 @@ function uncheckedFolder(files, receipts, root, slash) {
     const top = root + '/' + f.toLowerCase();
     return !dirs.some((d) => d === root || d === top || d.startsWith(top + '/'));
   }) || '';
+}
+
+// 2026-11-18 (round 2, finding 2): is another work tree of the same repository (same git common dir)?
+const commonDirs = new Map();
+function commonDirOf(dir) {
+  const key = String(dir || '');
+  if (commonDirs.has(key)) return commonDirs.get(key);
+  let out = '';
+  const left = timeLeft();
+  if (key && left > 0) {
+    try { out = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: key, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: Math.min(5000, left), windowsHide: true }).trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase(); } catch (e) { out = ''; }
+  }
+  commonDirs.set(key, out);
+  return out;
+}
+function sameRepository(dir) { const mine = commonDirOf(gitCwd); return !!mine && mine === commonDirOf(dir); }
+
+// 2026-11-18 (round 2, finding 2): did a `git switch` / `git checkout` of another branch run after the last
+// passing check of the outgoing tree and before the last `GATE: PASS`? Then the verdicts may belong to that
+// other branch. Read in transcript order (the entries are in order; no scanner numbers are needed). A switch
+// that creates a branch from the current HEAD (`switch -c name`), a file checkout (`-- path`) and a commit are no switch.
+function switchedBetweenCheckAndGate(tp, tree, root) {
+  try {
+    const events = [];   // { i, kind: 'receipt' | 'gate' | 'switch' }
+    let i = 0;
+    for (const line of fs.readFileSync(tp, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let entry; try { entry = JSON.parse(line); } catch (e) { continue; }
+      const content = entry && entry.message && Array.isArray(entry.message.content) ? entry.message.content : [];
+      for (const blk of content) {
+        i++;
+        if (!blk || typeof blk !== 'object') continue;
+        if (blk.type === 'tool_result') {
+          const text = typeof blk.content === 'string' ? blk.content : Array.isArray(blk.content) ? blk.content.map((x) => (x && x.text) || '').join('\n') : '';
+          if (text.includes('CHECK_COMPLETED') && text.includes(tree)) events.push({ i, kind: 'receipt' });
+        } else if (blk.type === 'text' && entry.message.role === 'assistant' && /(?:^|\n)\W*GATE:\s*PASS/.test(String(blk.text || ''))) {
+          events.push({ i, kind: 'gate' });
+        } else if (blk.type === 'tool_use' && blk.input && typeof blk.input.command === 'string' && /\b(?:switch|checkout)\b/.test(blk.input.command)) {
+          let recs = [];
+          try { recs = shell.parseCommand(blk.input.command, { ...SHELL_OPTS, tool: blk.name === 'PowerShell' ? 'PowerShell' : 'Bash', cwd, resolveAlias: () => '' }); } catch (e) { recs = []; }
+          for (const rec of recs) {
+            const g = rec.git;
+            if (!g || (g.sub !== 'switch' && g.sub !== 'checkout')) continue;
+            const flags = g.args.filter((x) => x.startsWith('-')), plain = g.args.filter((x) => !x.startsWith('-'));
+            if (g.args.includes('--') || g.args.includes('.')) continue;
+            if (flags.length === 1 && /^-[cCbB]$/.test(flags[0]) && plain.length === 1) continue;
+            events.push({ i, kind: 'switch' });
+          }
+        }
+      }
+    }
+    const gates = events.filter((e) => e.kind === 'gate');
+    if (!gates.length) return false;
+    const gate = gates[gates.length - 1].i;
+    const receipts = events.filter((e) => e.kind === 'receipt' && e.i < gate);
+    if (!receipts.length) return false;
+    const anchor = receipts[receipts.length - 1].i;
+    return events.some((e) => e.kind === 'switch' && e.i > anchor && e.i < gate);
+  } catch (e) { return false; }
 }
 
 // Non-test .cs lines this push changes that only the real provider can prove:
@@ -532,9 +685,13 @@ function pushCodePaths() {
   // Paths also retain mode-only, empty-file and binary changes with zero text lines.
   const changed = gitRaw(['diff', '--no-renames', '--name-only', '-z', base, 'HEAD']).split('\0').filter(Boolean);
   return cachedPaths = changed.filter(file => {
-    // Only positively identified prose is exempt; configuration and executable
+    // 2026-11-18 (guard.json findings 2 and 4): WHAT is code is the one rule of lib/code-paths.cjs, the same
+    // the scanner uses. Only positively identified prose is exempt; configuration and executable
     // policy files require the same proof as code, wherever they live.
-    if (!/\.(md|txt|rst|adoc)$/i.test(file) || /(?:^|\/)(?:requirements[^/]*\.txt|CMakeLists\.txt|AGENTS\.md|CLAUDE\.md|SKILL\.md)$/i.test(file) || /(?:^|\/)\.(?:claude|github|gitlab)(?:\/|$)/i.test(file)) return true;
+    // Round 2 (finding 4): a tracked file in the outgoing diff is judged by isProsePath only. The never-project
+    // list of isCodePath (.codex, node_modules, .claude state folders) is for edit paths on disk, not for these files.
+    if (!codePaths.isProsePath(file)) return true;
+    if (/(?:^|\/)(?:requirements[^/]*\.txt|CMakeLists\.txt|AGENTS\.md|CLAUDE\.md|SKILL\.md)$/i.test(file) || (/\.(md|txt|rst|adoc)$/i.test(file) && /(?:^|\/)\.(?:claude|github|gitlab)(?:\/|$)/i.test(file))) return true;
     const entries = [base, 'HEAD'].flatMap(ref => gitRaw(['ls-tree', '-z', ref, '--', file]).split('\0').filter(Boolean));
     return !entries.length || entries.some(entry => !entry.startsWith('100644 blob '));
   }).sort();
@@ -579,6 +736,7 @@ function checkGh(g, raw) {
     if (act === 'create' && remoteContext) { ask('this opens a PR from another machine; the local checks cannot cover it'); return; }
     if (act === 'create') {
       publishing = true;
+      refuseAfterHeadMove();
       try {
         const branch = currentBranch();
         if (!branch || branch === 'HEAD' || (head !== null && head !== branch)) deny('PR head must be the verified checked-out branch.');
@@ -829,8 +987,12 @@ function checkTypeScriptProject(tokens, directory) {
 
 try {
   const records = shell.parseCommand(cmd, { ...SHELL_OPTS, cwd, resolveAlias });
+  let prevRec = null;
   for (const rec of records) {
     if (!rec.tokens.length) continue;
+    // Round 2 (finding 3): the part before this one is judged now, so a part never counts against itself.
+    if (prevRec && !earlierUnsafe && !partIsReadOnly(prevRec)) earlierUnsafe = String(prevRec.tokens.slice(0, 3).join(' ')).slice(0, 60);
+    prevRec = rec;
     // A command from another machine (rec.remote) gets the same text checks; this
     // machine's files and repository are never read for it.
     remoteContext = !!rec.remote;
@@ -867,5 +1029,6 @@ try {
 }
 
 if (publishing && outOfTime) emit('deny', TIME_UP);
+if (!verdict || verdict.d !== 'deny') writeAcceptedReview();
 if (verdict) emit(verdict.d, verdict.r);
 allow();

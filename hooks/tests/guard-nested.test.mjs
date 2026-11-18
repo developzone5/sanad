@@ -338,6 +338,7 @@ function gate({ command = 'git push origin feature/check', scan = passing(), cod
         if (n === 'os') return { homedir: () => 'C:/Users/dev', tmpdir: () => 'C:/Users/dev/AppData/Local/Temp' };
         if (n.endsWith('shell-command.cjs')) return shell;
         if (n.endsWith('verification-target.cjs')) return require(path.join(hooks, 'lib', 'verification-target.cjs'));
+        if (n.endsWith('code-paths.cjs')) return require(path.join(hooks, 'lib', 'code-paths.cjs'));   // 2026-11-18: the shared file rule
         if (n.endsWith('transcript-scan.js')) return { scanTranscript: () => scan };
         if (n === 'child_process') return { execFileSync(exe, args) { calls.push(args.join(' ')); clock.now += step; return answer(args); } };
         throw Error('Unexpected require: ' + n);

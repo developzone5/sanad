@@ -42,6 +42,13 @@
 //       Prints the totals, then `ASK THE USER: K<n> · <note text> — refuted: <evidence>` per refuted note, then
 //       one line that says K numbers are not the hooks' NOTE numbers. A report with no verdict line for a note
 //       of the brief is refused: the check did not run.
+//       2026-11-18 (scoped staleness): --brief also writes <notes>/note-check-files.json (path -> short hash of every
+//       file of the repository, not in the brief text) and numbers its run in <notes>/note-check-generation.json and
+//       a `Generation: <N>` line of the brief (the answer may write `BRIEF <id> g<N>`). --record no longer refuses
+//       the answer when some code changed: a REFUTED note stands only when every file its line and its evidence name
+//       is unchanged since the brief (a file new, gone or unreadable counts as changed); otherwise it is `UNSURE (the
+//       code it cites changed: check again)`, a `CHANGED SINCE THE BRIEF:` line names it, and it gets no author line.
+//       An answer for an older generation than the newest recorded (or than the brief on disk) is refused.
 // Exit 0: written, or no note to check. 2: usage error, a missing or unreadable file, the hooks' parser cannot
 // be loaded, an answer for another brief, a report with no verdict.
 import crypto from 'node:crypto';
@@ -49,8 +56,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { isMain } from './is-main.mjs';
+
+// 2026-11-18 (audit 3): the brief id binds the code state, with the same code-tree fingerprint the proof record uses
+// (proof-record.mjs: the working tree as git sees it, prose left out). Loaded once and not copied. An install that
+// lacks the module still loads this script (the hooks' parser is checked first, with its own message); a brief
+// that needs the fingerprint then says what is missing.
+let proof = null, proofError = '';
+try { proof = await import('./proof-record.mjs'); } catch (error) { proofError = String(error && error.message).split('\n')[0]; }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MIN_EVIDENCE = 12;
@@ -63,13 +78,22 @@ const MAX_ROW = 2000;
 export const BRIEF = 'note-check-brief.md';
 export const LIST = 'note-check.md';
 export const REPORT = 'note-check-report.md';
+// 2026-11-18 (scoped staleness), both in the notes folder and neither in the brief text: FILES holds the fingerprint of
+// every file of the repository at --brief (path -> short hash), which --record reads to see which cited file changed;
+// GENERATION holds the counter of the --brief runs and the newest generation recorded.
+export const FILES = 'note-check-files.json';
+export const GENERATION = 'note-check-generation.json';
+export const CHANGED_LABEL = 'UNSURE (the code it cites changed: check again)';
 // The hooks' note parser, from this scripts folder. One parser: a second one here would drift from the hooks,
 // and a note the hooks count would be missing from the check (or the other way round).
 export const PARSER = '../../../hooks/lib/transcript-scan.js';
 export const INSTRUCTIONS = "Before any fix. Each K line below is one note from a code review. Try to DISPROVE each note from the code: open the file and line the note names, and what calls it, and look for what makes the claim false (a guard, a caller that never sends that input, a test that already covers it). Answer with the BRIEF line given below first, then one line per note, and nothing else: 'CONFIRMED K<n> — <file:line and the input that shows it>', 'REFUTED K<n> — <file:line that makes the claim false>' or 'UNSURE K<n> — <what could not be checked>'. A note you cannot disprove with a file and line is CONFIRMED or UNSURE, never REFUTED. Read-only, about 3 minutes; do not edit.";
 // The line that names the brief an answer was written for. K numbers start at 1 in every brief, so the number
 // alone does not say which note an answer line is about.
-export const idLine = (id) => 'BRIEF ' + id;
+// 2026-11-18 (scoped staleness): a brief also carries its generation, so an answer saved for an older run of the same
+// notes over the same code (the same id) is told apart: `BRIEF <id> g<N>`. An answer that drops the g part is read as
+// the answer of the brief on disk.
+export const idLine = (id, generation = 0) => 'BRIEF ' + id + (generation ? ' g' + generation : '');
 // A checking seat, never a review: a prompt that starts "You are the independent reviewer" is counted by the
 // stop and push hooks as a finished review, so this check could have stood in for the review of the fix.
 export const PROMPT_START = 'Seat: Note check, before any fix.';
@@ -151,7 +175,7 @@ export function sessionHolds(file, scan, reportList) {
 export function guardNotes(transcript, scan) {
   if (typeof scan.scanTranscript !== 'function') throw usage("the hooks' scanner has no scanTranscript: install the hooks of the same release as this script.");
   const res = scan.scanTranscript(transcript) || {};
-  return (res.openReviewNotes || []).map((n) => ({ n: n.n, kind: n.kind, text: oneLine(n.text), guard: true }));
+  return (res.openReviewNotes || []).map((n) => ({ n: n.n, kind: n.kind, text: oneLine(n.text), guard: true, ...(n.asks ? { asks: true } : {}) }));
 }
 
 // The hooks' parser cuts a long note. Where it cuts is measured from the parser, not copied: a second number
@@ -201,7 +225,7 @@ export function collectNotes(files, reportNotes) {
     const report = readReport(file);
     for (const [index, found] of reportNotes(report).entries()) {
       if (list.some((k) => k.text === found.text)) continue;
-      const note = { n: list.length + 1, kind: found.kind, from: path.basename(file), text: found.text };
+      const note = { n: list.length + 1, kind: found.kind, from: path.basename(file), text: found.text, ...(found.asks ? { asks: true } : {}) };
       if (found.text.length >= limit) {
         const whole = wholeNote(report, index, reportNotes, limit);
         // The same text: the note ends where the parser cuts, and nothing is missing.
@@ -214,50 +238,150 @@ export function collectNotes(files, reportNotes) {
 }
 
 export const tag = (k) => (k.guard ? 'NOTE ' : 'K') + k.n;
-export const briefLine = (k) => (k.guard ? `NOTE ${k.n} · ${k.kind} · ${k.text}` : `K${k.n} · ${k.kind} · from ${k.from} · ${k.text}`);
+// asks (2026-11-18): a Gap or Bug line that asks the user to decide is marked on its line, so --record treats it as a Question.
+export const ASKS_MARK = ' (asks the user)';
+const kindText = (k) => k.kind + (k.asks && !/^Question$/i.test(k.kind) ? ASKS_MARK : '');   // a Question needs no mark
+export const briefLine = (k) => (k.guard ? `NOTE ${k.n} · ${kindText(k)} · ${k.text}` : `K${k.n} · ${kindText(k)} · from ${k.from} · ${k.text}`);
 // Under the K line of a cut note. Indented, so it is no K line: the K line keeps the text the hooks show.
 export const wholeLine = (k) => (k.whole
   ? `    ${tag(k)} in full (the ${k.guard ? 'line above' : 'K line'} is cut at ${k.cut} characters): ${k.whole}`
   : `    ${tag(k)} is cut at ${k.cut} characters, and its other lines were not found in ${k.from || 'its report'}: answer UNSURE when the part shown is not enough to check.`);
 const noteLines = (k) => (k.cut ? [briefLine(k), wholeLine(k)] : [briefLine(k)]);
 
-// A brief's id: a short hash of its repo and its note lines (line ends and spaces at a line's end do not count).
-// The same notes for the same repo give the same id; other notes, another order or another repo give another.
-export function briefId(repo, lines) {
-  const body = [repo ? slash(repo) : '', ...lines.map((l) => String(l).trimEnd()).filter(Boolean)].join('\n');
+// A brief's id: a short hash of its repo, its code state and its note lines (line ends and spaces at a line's end do
+// not count). The same notes for the same repo and code give the same id; other notes, another order, another repo
+// or other code give another. code: the code-tree fingerprint, '' when the folder is no git repository.
+export function briefId(repo, lines, code = '') {
+  const body = [repo ? slash(repo) : '', ...(code ? ['code ' + code] : []), ...lines.map((l) => String(l).trimEnd()).filter(Boolean)].join('\n');
   return crypto.createHash('sha256').update(body).digest('hex').slice(0, 8);
 }
+
+// The code state of the folder the check is about (the repo given, else the current folder): { top, code }. Both ''
+// when the folder is no git repository: there is no code state to bind then. Throws when it cannot be read.
+export function codeState(dir) {
+  if (!proof) throw usage(`the code fingerprint cannot be loaded (${proofError}). This check binds its brief to the code with proof-record.mjs: install the gate scripts of the same release.`);
+  const top = proof.toplevelOf(dir);
+  if (!top) return { top: '', code: '' };
+  const code = proof.codeFingerprint(top);
+  if (!code) throw usage(`the code state of ${slash(top)} cannot be read (git failed): fix the repository, then run --brief again`);
+  return { top: slash(top), code };
+}
+// 2026-11-18 (scoped staleness): the files of a repository as git sees them (tracked, and untracked but not ignored),
+// each with a short hash of its bytes: { 'src/a.cs': '1a2b3c4d5e6f', ... }. A file that cannot be read gets '' (changed
+// against any other state). Throws a usage error when git cannot list the files.
+const HASH_CAP = 64 * 1024 * 1024;   // a file larger than this is judged by its size
+export function listRepoFiles(top) {
+  let out;
+  try { out = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: top, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 }); }
+  catch { throw usage(`the files of ${slash(top)} cannot be listed (git failed): fix the repository, then run --brief again`); }
+  return [...new Set(out.split('\0').filter(Boolean))];
+}
+export function hashRepoFile(top, rel) {
+  try {
+    const file = path.join(top, rel);
+    const size = fs.statSync(file).size;
+    if (size > HASH_CAP) return 'big:' + size;
+    return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex').slice(0, 12);
+  } catch { return ''; }
+}
+export function fileFingerprint(top) {
+  const files = {};
+  for (const rel of listRepoFiles(top)) files[rel] = hashRepoFile(top, rel);
+  return files;
+}
+// The file names a text cites: a word with an extension, "Upload.cs:9", "src/App.cs", "README.md:1", "ar.json". The same
+// reading as the hooks' citedFiles (hooks/lib/transcript-scan.js), with whether a line number follows.
+// 2026-11-18 (repair 1, 2): a drive prefix ("C:\repos\x\src\Policy.cs:4"), [ ] ( ) + and a space are part of a name, and a leading
+// "/", "./" or "../" and the drive are dropped before names are compared; a match with spaces is also read word by word.
+const CITED_FILE = /((?:[A-Za-z]:)?[\w@.\-\/\\\[\]()+ ]+\.[A-Za-z]\w{0,9})(?![\w])(:\d+)?/g;
+const keyOf = (p) => String(p || '').replace(/\\/g, '/').replace(/[),;]+$/, '').toLowerCase().replace(/^[a-z]:(?=\/)/, '').replace(/^(?:\.{0,2}\/)+/, '').replace(/\.+$/, '');
+const baseOf = (k) => k.slice(k.lastIndexOf('/') + 1);
+// The cited files of the notes' texts that changed since the fingerprint `saved` was made, as their names. A name that
+// matches files (the end of the path, no case) counts changed when any of them is new (not in the fingerprint), gone or
+// unreadable, or has other bytes. A name that matches no file of the repository, then or now, is no file of it (a bare
+// word with a dot such as "e.g", a path outside it) and counts for nothing.
+export function citedChanged(top, saved, texts) {
+  const names = new Map();
+  const prefix = keyOf(top) + '/';
+  for (const t of texts) for (const m of String(t || '').matchAll(CITED_FILE)) {
+    for (const w of new Set([m[1], ...m[1].split(/\s+/)])) {
+      let k = keyOf(w);
+      if (!/\.[a-z]\w{0,9}$/.test(k)) continue;
+      if (k.startsWith(prefix)) k = k.slice(prefix.length);
+      if (k) names.set(k, (names.get(k) || false) || !!m[2]);
+    }
+  }
+  if (!names.size) return [];
+  const now = listRepoFiles(top);
+  const rels = [...new Set([...Object.keys(saved), ...now])];
+  const nowSet = new Set(now);
+  const changed = [];
+  for (const [name, lined] of names) {
+    let hits = rels.filter((rel) => { const k = rel.toLowerCase(); return k === name || k.endsWith('/' + name); });
+    // 2026-11-18 (repair 2): the full name matched no file (a diff prefix, a folder written another way): the bare file name is read too.
+    if (!hits.length) hits = rels.filter((rel) => baseOf(rel.toLowerCase()) === baseOf(name));
+    if (!hits.length) continue;   // no file of this repository, then or now: the name proves nothing either way
+    if (hits.some((rel) => !(rel in saved) || !nowSet.has(rel) || !saved[rel] || hashRepoFile(top, rel) !== saved[rel])) changed.push(name);
+  }
+  return changed;
+}
+
+function readJson(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } }
+// { issued: the number of the last --brief run, recorded: the newest generation recorded }.
+export function readGenerations(notes) {
+  const s = readJson(path.join(notes, GENERATION)) || {};
+  return { issued: Number.isInteger(s.issued) && s.issued > 0 ? s.issued : 0, recorded: Number.isInteger(s.recorded) && s.recorded > 0 ? s.recorded : 0 };
+}
+function writeGenerations(notes, state) {
+  try { fs.writeFileSync(path.join(notes, GENERATION), JSON.stringify(state) + '\n'); }
+  catch (error) { throw usage(`${path.join(notes, GENERATION)} cannot be written (${error.code}): the check cannot number its runs`); }
+}
+
+// A Question, or a note that asks the user to decide (asks, 2026-11-18): never refuted, the user's words close it.
+export const isQuestion = (k) => /^Question$/i.test(k.kind) || k.asks === true;
+// A Question is for the user: the checker still looks at the code and says what it shows and what it recommends.
+export const QUESTION_RULE = 'For a Question line: you cannot refute it, the user decides it. Whatever your verdict, say what the code shows (file:line) and give your recommended answer on the same line.';
+export const QUESTION_LIST_RULE = "A Question is never closed here or by the author: the user's words close it; the checker's view is advice.";
 
 // The same instructions for the guards' numbers: the lines are "NOTE <n> · ..." and the answer names "<n>".
 export const GUARD_INSTRUCTIONS = INSTRUCTIONS.replace('Each K line below', 'Each NOTE line below').replace(/K<n>/g, '<n>');
 export const GUARD_RULE = "These numbers are the guards' own NOTE numbers: the author closes each note under the same number.";
 
-export function buildBrief({ repo, notes, transcript }) {
+// 2026-11-18 (audit 3 repair): a brief with no code state says so, in the file, on the screen and again at --record. The current
+// folder is never taken as the code (it can be another repository: the change in the reviewed one was then never seen).
+export const NOT_BOUND = 'CODE: NOT BOUND — no --repo, or it is no git repository: this check is not tied to any code, so a code change after the agent read the code is not seen here. Run --brief again with --repo <the git repository> to bind it.';
+export function buildBrief({ repo, notes, transcript, code, generation = 0 }) {
   const guard = notes.length > 0 && notes.every((k) => k.guard);
   const lines = notes.flatMap(noteLines);
-  const id = briefId(repo, lines);
+  const id = briefId(repo, lines, code && code.code);
   return [
     '# Note check — before any fix', '',
     `Brief id: ${id}`,
+    ...(generation ? [`Generation: ${generation}`] : []),
     ...(repo ? [`Repo: ${slash(repo)}`] : []),
+    ...(code && code.code ? [`Code: ${code.code}`, `Code root: ${code.top}`] : [NOT_BOUND]),
     ...(guard && transcript ? [`Numbering: the guards' NOTE numbers, from ${path.basename(transcript)}`] : []), '',
     '## What to do', '',
     guard ? GUARD_INSTRUCTIONS : INSTRUCTIONS, '',
-    `First line of your answer: ${idLine(id)}`,
-    'It names the brief you read: an answer without it, or with another id, is not recorded.', '',
+    ...(notes.some(isQuestion) ? [QUESTION_RULE, ''] : []),
+    `First line of your answer: ${idLine(id, generation)}`,
+    'It names the brief you read: an answer without it, or with another id, is not recorded.',
+    ...(generation ? [`Write the run number after the id, as ${idLine(id, generation)}: an answer for an older run of this check is not recorded.`] : []), '',
     ...(repo ? ['A file a note names is relative to the repo above.', ''] : []),
     '## Notes', '',
     ...lines, '',
   ].join('\n');
 }
 
-// What a brief on disk says of itself: { written (its "Brief id:" line), made (the id its repo and note lines give) }.
+// What a brief on disk says of itself: { written (its "Brief id:" line), made (the id its repo, code and note lines
+// give), code and root (its "Code:" and "Code root:" lines, '' when it has none) }.
 // They differ when the note lines were changed after the brief was written, or when it has no id line.
 export function briefIds(text) {
   const rows = String(text).split(/\r?\n/).map((l) => l.trimEnd());
   const notes = rows.indexOf('## Notes');
   const find = (pattern) => rows.slice(0, Math.max(notes, 0)).map((l) => pattern.exec(l)).filter(Boolean).map((m) => m[1])[0] || '';
-  return { written: find(/^Brief id: ([0-9a-f]{8})$/), made: notes < 0 ? '' : briefId(find(/^Repo: (.+)$/), rows.slice(notes + 1)) };
+  const code = find(/^Code: ([0-9a-f]{40,64})$/);
+  return { generation: Number(find(/^Generation: (\d{1,9})$/)) || 0, written: find(/^Brief id: ([0-9a-f]{8})$/), made: notes < 0 ? '' : briefId(find(/^Repo: (.+)$/), rows.slice(notes + 1), code), code, root: find(/^Code root: (.+)$/), unbound: !code && find(/^(CODE: NOT BOUND) /) !== '' };
 }
 
 export function launchLine(brief, guard = true) {
@@ -305,20 +429,31 @@ export function writeBrief({ notes, reports, repo, transcript }) {
   const list = open.length ? open : fromReports;
   const numbering = open.length ? found : '';
   const removed = [REPORT, LIST, ...(list.length ? [] : [BRIEF])].filter((name) => removeOld(path.join(notes, name)));
-  if (!list.length) return { brief: '', notes: list, removed, transcript: '', unmatched: [], skipped };
+  removeOld(path.join(notes, FILES));   // the file fingerprint of the last brief goes with it, silently
+  if (!list.length) return { brief: '', notes: list, removed, transcript: '', unmatched: [], skipped, bound: true };
   const brief = path.join(notes, BRIEF);
-  fs.writeFileSync(brief, buildBrief({ repo, notes: list, transcript: numbering }));
-  return { brief, notes: list, removed, transcript: numbering, unmatched, skipped };
+  const code = repo === undefined ? { top: '', code: '' } : codeState(repo);
+  // 2026-11-18: every --brief run has its own generation, and a bound one saves the fingerprint of the repository's files.
+  const state = readGenerations(notes);
+  const generation = state.issued + 1;
+  const files = code.code ? fileFingerprint(code.top) : null;
+  const text = buildBrief({ repo, notes: list, transcript: numbering, code, generation });
+  writeGenerations(notes, { issued: generation, recorded: state.recorded });
+  fs.writeFileSync(brief, text);
+  if (files) fs.writeFileSync(path.join(notes, FILES), JSON.stringify({ brief: briefIds(text).written, generation, root: code.top, files }));
+  return { brief, notes: list, removed, transcript: numbering, unmatched, skipped, bound: !!code.code, generation };
 }
 
+// The kind of a brief line, without the asks mark: { kind, asks? }.
+const kindOf = (raw) => (raw.endsWith(ASKS_MARK) ? { kind: raw.slice(0, -ASKS_MARK.length), asks: true } : { kind: raw });
 // The K lines of a brief, in order: { n, kind, from, text }.
 export function parseBrief(text) {
   const out = [];
   for (const l of String(text).split(/\r?\n/)) {
     let m = /^K(\d+) · (.+?) · from (.+?) · (.*)$/.exec(l);
-    if (m) { out.push({ n: Number(m[1]), kind: m[2], from: m[3], text: m[4].trim() }); continue; }
+    if (m) { out.push({ n: Number(m[1]), ...kindOf(m[2]), from: m[3], text: m[4].trim() }); continue; }
     m = /^NOTE (\d+) · (.+?) · (.*)$/.exec(l);
-    if (m) out.push({ n: Number(m[1]), kind: m[2], text: m[3].trim(), guard: true });
+    if (m) out.push({ n: Number(m[1]), ...kindOf(m[2]), text: m[3].trim(), guard: true });
   }
   return out;
 }
@@ -342,6 +477,17 @@ const PLACEHOLDER = /<(?:file:line[^>]*|what could not be checked)>/i;
 
 // The line that names the brief the agent read: "BRIEF <id>". "Brief id: <id>" and marks around it are read too.
 const BRIEF_ID = /^BRIEF(?:\s+ID)?\s*[:#—–-]?\s*[`*_"]*([0-9a-f]{8})(?![0-9a-z])/i;
+
+// The generation the agent's BRIEF lines repeat ("BRIEF 1a2b3c4d g3"), in order; a line with no g part gives none.
+const BRIEF_GENERATION = /^BRIEF(?:\s+ID)?\s*[:#—–-]?\s*[`*_"]*[0-9a-f]{8}[`*_"]*[ \t]+g(\d{1,9})(?![0-9a-z])/i;
+export function answerGenerations(text) {
+  const out = [];
+  for (const row of String(text).split(/\r?\n/)) {
+    const m = BRIEF_GENERATION.exec(unwrap(row.slice(0, MAX_ROW)).text);
+    if (m) out.push(Number(m[1]));
+  }
+  return out;
+}
 
 // Every brief id the agent's answer names, in order.
 export function answerIds(text) {
@@ -390,6 +536,7 @@ export function renderCheck({ brief, report, recorded, rows }) {
     `Recorded: ${recorded}`, '',
     'No note is closed here (rule 5). CONFIRMED: fix it with a test. UNSURE: not proven either way; check the missing fact first (a reproducer, or the file the checker could not read), fix it only when the fact holds, and a product choice goes to the user.',
     'REFUTED: build no fix now; ask the user with this evidence and a recommended answer, and their words close it.',
+    ...(rows.some(isQuestion) ? [QUESTION_LIST_RULE] : []),
     rows.length && rows.every((r) => r.guard) ? GUARD_RULE : K_RULE, '',
     ...rows.map(checkLine), '',
   ].join('\n');
@@ -405,22 +552,51 @@ export function recordCheck({ report, notes, now = new Date() }) {
   if (!list.length) throw usage(`${brief} has no K line: run --brief again`);
   // And only for the brief on disk now: K1 of an older brief is another note. The answer names the brief it
   // was written for; an answer that names none, or another one, is not recorded.
-  const { written, made } = briefIds(briefText);
+  const { generation, written, made, code, root, unbound } = briefIds(briefText);
   if (!written || written !== made) throw usage(`${brief} does not carry the id of its notes (an older release wrote it, or it was changed since): run --brief again and launch the line it prints`);
   const answer = readReport(report);
   const ids = answerIds(answer);
   if (!ids.length) throw usage(`${report} has no '${idLine(written)}' line, so it does not say which brief the agent read: its K numbers may be other notes. Nothing recorded: launch the check again from the LAUNCH line of --brief.`);
   const other = ids.find((id) => id !== written);
   if (other) throw usage(`${report} answers brief ${other}; the brief in ${notes} is ${written}: the K numbers are not the same notes. Nothing recorded: launch the check again from the newest brief.`);
+  // 2026-11-18 (scoped staleness): two runs of --brief for the same notes and code share one id, so an older saved answer
+  // could be recorded after a newer one. Every run has a generation: an answer for an older generation than the newest
+  // recorded (or than the brief on disk) is refused.
+  const recorded = readGenerations(notes).recorded;
+  const said = answerGenerations(answer);
+  // 2026-11-18 (repair 4): a brief with a run number needs it in the answer: an answer with no g part could be an older run's.
+  if (generation && !said.length) throw usage(`${report} names the brief but not the run: write '${idLine(written, generation)}' as the first line (the g${generation} part is the run number). Nothing recorded: launch the check again from the LAUNCH line of --brief.`);
+  const old = said.find((g) => g < Math.max(recorded, generation));
+  if (old !== undefined) throw usage(`${report} was written for generation ${old} of this check; generation ${Math.max(recorded, generation)} ${recorded > generation ? 'is already recorded' : 'is the brief in ' + notes}: an older answer never replaces a newer one. Nothing recorded: launch the check again from the newest brief.`);
+  if (generation && recorded > generation) throw usage(`the brief in ${notes} is generation ${generation}, but generation ${recorded} is already recorded: an older check never replaces a newer one. Nothing recorded: run --brief again and launch the line it prints.`);
   const guard = list.every((k) => k.guard);
   const verdicts = parseVerdicts(answer, guard);
   if (!list.some((k) => verdicts.has(k.n))) {
     throw usage(`${report} has no CONFIRMED, REFUTED or UNSURE line for ${guard ? 'any NOTE of the brief' : `K1..K${list.length}`}: the check did not run. Save the agent's final message there and record again.`);
   }
-  const rows = list.map((k) => judge(k, verdicts.get(k.n)));
+  let rows = list.map((k) => judge(k, verdicts.get(k.n)));
+  // 2026-11-18 (scoped staleness): the answer counts for the files it cites, not for the whole code. A REFUTED verdict
+  // stands only when every file the note's line and the evidence name is unchanged since the brief; otherwise the note
+  // is UNSURE and gets no author line. Other code that changed (a plainly right note fixed meanwhile) changes nothing.
+  const changedNotes = [];
+  if (code) {
+    if (!proof) throw usage(`the code fingerprint cannot be loaded (${proofError}): the brief is bound to code, and this install cannot check it. Install the gate scripts of the same release.`);
+    const top = proof.toplevelOf(root);
+    const side = readJson(path.join(notes, FILES));
+    const saved = side && side.brief === written && side.files && typeof side.files === 'object' ? side.files : null;
+    rows = rows.map((r) => {
+      if (r.verdict !== 'REFUTED') return r;
+      let changed = !saved || !top;   // no fingerprint of that brief, or no repository now: nothing shows the files unchanged
+      if (!changed) changed = citedChanged(top, saved, [r.text, r.evidence]).length > 0;
+      if (!changed) return r;
+      changedNotes.push(tag(r));
+      return { ...r, verdict: 'UNSURE', label: CHANGED_LABEL };
+    });
+  }
   const out = path.join(notes, LIST);
   fs.writeFileSync(out, renderCheck({ brief, report: path.resolve(report), recorded: now.toISOString(), rows }));
-  return { out, rows, answer };
+  if (generation) writeGenerations(notes, { issued: Math.max(readGenerations(notes).issued, generation), recorded: Math.max(recorded, generation) });
+  return { out, rows, answer, unbound, changedNotes };
 }
 
 // The guards' own reader of a note checker's answer (hooks/lib/transcript-scan.js, REFUTED_RE and readRefutations),
@@ -436,8 +612,11 @@ const GUARD_FILE_LINE = /\w\.\w+[`*_"']*:\d+/;
 // script's own VERDICT reader; m[1] holds the numbers of the line ("1 and 2").
 const GUARD_NOT_REFUTED = /^[ \t]*(?:(?:[-*•]|\d{1,3}[.)]|#{1,6}|>)[ \t]+)?[`*_ \t]*(?:CONFIRMED|UNSURE)[`*_]*[ \t]*:?[ \t]*[`*_]*(?:NOTE[ \t]+|K[ \t]*)?[`*_]*(\d{1,4}(?:(?:[ \t]*,[ \t]*|[ \t]+(?:and|&)[ \t]+)(?:K[ \t]*)?\d{1,4})*)(?!\d)/gim;
 export function guardEvidence(answer, n) {
-  const text = String(answer || '').replace(/\r/g, '').replace(GUARD_FENCED, '');
-  const verdicts = [...[...text.matchAll(GUARD_REFUTED)].map((m) => ({ at: m.index, m })), ...[...text.matchAll(GUARD_NOT_REFUTED)].map((m) => ({ at: m.index, m, other: true }))]
+  const raw = String(answer || '').replace(/\r/g, '');
+  // 2026-11-18: a REFUTED line is read outside code blocks only (blanked in place, so places stay the same); a CONFIRMED
+  // or UNSURE line is read in one too, as it only withdraws, exactly as the guards do.
+  const text = raw.replace(GUARD_FENCED, (b) => b.replace(/[^\n]/g, ' '));
+  const verdicts = [...[...text.matchAll(GUARD_REFUTED)].map((m) => ({ at: m.index, m })), ...[...raw.matchAll(GUARD_NOT_REFUTED)].map((m) => ({ at: m.index, m, other: true }))]
     .sort((a, b) => a.at - b.at);
   let held = '';
   for (const { m, other } of verdicts) {
@@ -475,7 +654,7 @@ const USAGE = 'Usage: node note-check.mjs --brief --notes <dir> --reports <file1
 // Printed only when the guards' own reader takes the checker's line as a refutation of this note (2026-11-17: nine
 // answer shapes this script read were not read by the guards, and the printed line was then refused).
 const authorLine = (r, answer) => {
-  if (!r.guard) return '';
+  if (!r.guard || isQuestion(r)) return '';
   if (/^Blocker$/i.test(r.kind)) return `NOTE ${r.n} is a Blocker: ask the user; the guards do not close a Blocker as refuted.\n`;
   const held = guardEvidence(answer, r.n);
   return held ? `THE AUTHOR MAY NOW WRITE: NOTE ${r.n}: refuted — ${held}\n`
@@ -495,17 +674,26 @@ function main() {
       const report = quote(slash(path.join(notes, REPORT)));
       process.stdout.write(`NOTE CHECK BRIEF: ${slash(b.brief)} · ${b.notes.length} note(s)${b.transcript ? ` · the guards' NOTE numbers, from ${slash(b.transcript)}` : ''}\n` +
         launchLine(b.brief, b.notes.every((k) => k.guard)) + '\n' +
+        (b.bound ? '' : NOT_BOUND + '\n') +
         `THEN: save the agent's final message as ${report}, then run: node ${quote(slash(path.join(here, 'note-check.mjs')))} --record ${report} --notes ${quote(slash(notes))}\n` +
         (b.skipped ? `NUMBERING: no session in ${slash(path.dirname(b.skipped))} holds these notes, so K numbers are used (pass --transcript <file.jsonl> for the guards' NOTE numbers)\n` : '') +
         b.unmatched.map((u) => `NOT AN OPEN NOTE OF THE SESSION (left out of the brief): ${u.kind} · ${oneLine(u.text)}\n`).join('') +
         removed);
     } else {
-      const { out, rows, answer } = recordCheck({ report: path.resolve(o.record), notes });
+      const { out, rows, answer, unbound, changedNotes } = recordCheck({ report: path.resolve(o.record), notes });
       const count = (verdict) => rows.filter((r) => r.verdict === verdict).length;
       const refuted = rows.filter((r) => r.verdict === 'REFUTED');
+      // 2026-11-18 (user decision): a Question is never refuted: the user sees it with the checker's view and its
+      // recommended answer, and the user's words close it. No line for the author to write.
+      const ask = (r) => (isQuestion(r)
+        ? `ASK THE USER: ${tag(r)} · ${r.text} — Question, the checker's view (${r.label}): ${r.evidence || 'no view given'}\n`
+        : r.verdict === 'REFUTED' ? `ASK THE USER: ${tag(r)} · ${r.text} — refuted: ${r.evidence}\n` + authorLine(r, answer) : '');
+      // On stderr, so the result lines stay as they were (2026-11-18, audit 3 repair): the answer is not tied to any code.
+      if (unbound) process.stderr.write(NOT_BOUND + '\n');
       process.stdout.write(`NOTE CHECK: ${rows.length} note(s) — ${count('CONFIRMED')} confirmed, ${refuted.length} refuted, ${count('UNSURE')} unsure\n` +
-        refuted.map((r) => `ASK THE USER: ${tag(r)} · ${r.text} — refuted: ${r.evidence}\n` + authorLine(r, answer)).join('') +
-        (refuted.length ? REFUTED_RULE + '\n' : '') +
+        rows.map(ask).join('') +
+        (changedNotes.length ? `CHANGED SINCE THE BRIEF: ${changedNotes.join(', ')} — the code it cites changed: check again (its REFUTED does not stand; no author line)\n` : '') +
+        (refuted.some((r) => !isQuestion(r)) ? REFUTED_RULE + '\n' : '') +
         (rows.length && rows.every((r) => r.guard) ? GUARD_RULE : K_RULE) + '\n' +
         `WRITTEN: ${slash(out)}\n`);
     }

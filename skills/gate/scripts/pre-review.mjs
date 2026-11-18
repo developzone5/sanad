@@ -27,6 +27,10 @@
 //               again first, then every place needs `C<n>` or `none: <reason>` (with --check, n is one of
 //               its lines). With no --places: skipped for a text-only change (size tiny), else NOT RUN, a
 //               failure (2026-11-12: the rule "list every place by search" was text and was skipped)
+//               2026-11-18 (audit): a changed function that has callers (the size check's "callers:" row) must also be
+//               in the list's `Names:`, or the places check fails with `OPEN: <name> — changed, not on the places
+//               list`; with --lines and --check the siblings check also fails when those lines are not the ones
+//               the siblings were recorded for.
 //   siblings    siblings.mjs --check (--siblings): every sibling another agent named before code (a place with
 //               the same rule or defect that the places list missed) needs `P<n>` (with --places, a place on
 //               that list) or `none: <reason>`. It starts after the places check, which rewrites the list. With
@@ -231,7 +235,7 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
   if (places) checks.push({ name: 'places', cmd: process.execPath, args: [path.join(here, 'places.mjs'), '--refresh', places, '--repo', repo, '--check', places, ...(check ? ['--check-lines', check] : [])], cwd: repo, show: true });
   // 2026-11-14: a P<n> outcome is looked up in the places list, which the places check rewrites as it refreshes
   // it: this check starts when that one has ended (`after`), never while the list is half written.
-  if (siblings) checks.push({ name: 'siblings', cmd: process.execPath, args: [path.join(here, 'siblings.mjs'), '--check', siblings, ...(places ? ['--places', places] : [])], cwd: repo, show: true, after: 'places' });
+  if (siblings) checks.push({ name: 'siblings', cmd: process.execPath, args: [path.join(here, 'siblings.mjs'), '--check', siblings, ...(places ? ['--places', places] : []), ...(lines && check ? ['--lines', lines, '--check-lines', check] : [])], cwd: repo, show: true, after: 'places' });
   const mechanical = git(repo, ['config', '--get', 'sanad.mechanical']);
   if (mechanical) checks.push({ name: 'mechanical', cmd: process.execPath, args: [mechanical, '--repo', repo, '--base', base], cwd: repo, show: true });
   // 2026-11-12 (audit C14): with no --lines, --check or --was those parts were left out without a word, and
@@ -258,6 +262,77 @@ export function siblingsWithout(sizeOut, repo) {
   if (/^SIZE: tiny\b/m.test(String(sizeOut || ''))) return { skipped: { name: 'siblings', why: 'a text-only change' } };
   const cmd = `node ${path.join(here, 'siblings.mjs')} --brief --notes <notes> --repo ${repo}`.replace(/\\/g, '/');
   return { result: { name: 'siblings', notRun: true, code: 1, ms: 0, out: `look for the places the list misses, before code: ${cmd}; launch the line it prints, then --record <report> --notes <notes>, and give pre-review --siblings <notes>/siblings.md` } };
+}
+
+// 2026-11-18 (audit): the places list passed ("PLACES: 3 place(s), 0 open") while the size check of the same run printed
+// "callers: ensureDue ×1 …; lateness ×3 …": a changed function with callers that was on no list, because nothing
+// compared the functions the change touches with the names the list searched. The size check's caller rows are the
+// changed functions that have callers (a row with ×0 is not named); each name that is not in the list's `Names:` is
+// returned. `more`: how many changed functions the size check did not print (its rows are capped), which this
+// cannot compare.
+// 2026-11-18 (repair round): (1) a member of an object ("assignmentsApi.publishNow ×3", the project's API file shape)
+// did not match the row and was skipped without a word: a dotted name is read, and it is searched when the list holds
+// the full name or its last part; an entry that cannot be read is returned in `unreadable`, and fails the check.
+// (2) a handler declared inside a function and called only inside that same function (a form's own handleSubmit)
+// is not shared: it owes no name. That needs `opts.repo` and `opts.changed` (the changed files) to read the code;
+// without them every changed function with callers is owed, as before.
+const NAME = '[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*';
+// One line as code only: strings emptied, comments removed (a short local copy: this script runs alone, with no
+// other script of the folder, in the lock-start test).
+const codeOnly = (line) => String(line).replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '""').replace(/\/\*.*?\*\//g, ' ').replace(/\/\/.*$/, '');
+export function unsearchedCallers(sizeOut, listed, opts = {}) {
+  const row = /^\s*callers: (.*)$/m.exec(String(sizeOut || ''));
+  const names = [], unreadable = [], seen = new Set(listed || []);
+  let more = 0;
+  for (const raw of row ? row[1].split('; ') : []) {
+    const entry = raw.trim();
+    const m = new RegExp(`^(?:[^\\s:;]+:)?(${NAME}) ×(\\?|\\d+)`).exec(entry);
+    if (m) {
+      const last = m[1].slice(m[1].lastIndexOf('.') + 1);
+      if (m[2] !== '0' && !seen.has(m[1]) && !seen.has(last) && !localHandler(m, entry, opts)) { seen.add(m[1]); names.push(m[1]); }
+      continue;
+    }
+    const k = /^\(\+(\d+) more /.exec(entry);
+    if (k) more = Number(k[1]);
+    else if (entry) unreadable.push(entry);
+  }
+  return { names, more, unreadable };
+}
+
+// A changed function that is declared inside another function and called only inside it: every caller is listed
+// ("×n" with n files:lines), all in one file, and that file declares the name once, within one function's braces
+// that hold every caller line. Anything else (a caller outside, a name declared twice, an object member, a file that
+// cannot be read, a capped list) is shared.
+function localHandler(m, entry, { repo, changed } = {}) {
+  if (!repo || !changed || !/^\d+$/.test(m[2]) || m[1].includes('.')) return false;
+  const where = /\[([^\]]*)\]\s*$/.exec(entry);
+  if (!where) return false;
+  const spots = where[1].split(',').map(s => /^(.+):(\d+)$/.exec(s.trim()));
+  if (spots.some(s => !s) || spots.length !== Number(m[2])) return false;
+  const files = [...new Set(spots.map(s => s[1]))];
+  if (files.length !== 1 || !/\.[cm]?[jt]sx?$/i.test(files[0])) return false;
+  const found = files[0].includes('/') ? changed.filter(f => f === files[0]) : changed.filter(f => path.basename(f) === files[0]);
+  if (found.length !== 1) return false;
+  let lines;
+  try { lines = fs.readFileSync(path.join(repo, found[0]), 'utf8').split(/\r?\n/); } catch { return false; }
+  const decl = new RegExp(`(?:\\bfunction\\s+|\\b(?:const|let|var)\\s+)${m[1].replace(/\$/g, '\\$')}\\b`);
+  const at = lines.map((l, i) => (decl.test(codeOnly(l)) ? i : -1)).filter(i => i >= 0);
+  if (at.length !== 1) return false;
+  // The unmatched `{` above the declaration, and the line where it closes.
+  let need = 0, open = -1;
+  for (let k = at[0] - 1; k >= 0 && open < 0; k--) {
+    const code = codeOnly(lines[k]);
+    for (let c = code.length - 1; c >= 0; c--) {
+      if (code[c] === '}') need++;
+      else if (code[c] === '{') { if (need) need--; else { open = k; break; } }
+    }
+  }
+  if (open < 0 || !/(?:=>|\))\s*(?::\s*[\w<>\[\]|. ]+)?\s*\{?\s*$/.test(codeOnly(lines[open]).replace(/\{\s*$/, '').trimEnd())) return false;
+  let depth = 0, end = -1;
+  for (let k = open; k < lines.length && end < 0; k++) {
+    for (const ch of codeOnly(lines[k])) { if (ch === '{') depth++; else if (ch === '}' && --depth === 0) { end = k; break; } }
+  }
+  return end >= 0 && spots.every(s => Number(s[2]) - 1 > open && Number(s[2]) - 1 <= end);
 }
 
 // Same folder as checkLockDir() in evidence.mjs: a lock per source-bound check that runs right now.
@@ -355,6 +430,23 @@ export async function preReview(opts) {
   const results = await runChecks(checks, c => (c.cached ? Promise.resolve({ ...c, code: 0, out: c.cached.out, ms: 0 }) : (opts.run || runOne)(c)));
   remember(results);
   const size = results.find(r => r.name === 'size');
+  // 2026-11-18 (audit): every changed function that has callers is searched on the list, or the places check fails.
+  const listed = results.find(r => r.name === 'places' && !r.notRun);
+  if (opts.places && listed && size) {
+    let names = [];
+    try { const m = /^Names: (.*)$/m.exec(fs.readFileSync(opts.places, 'utf8')); names = m ? m[1].split(',').map(s => s.trim()).filter(Boolean) : []; } catch { /* the places check says so */ }
+    const { names: missing, more, unreadable } = names.length ? unsearchedCallers(size.out, names, { repo: opts.repo, changed: files }) : { names: [], more: 0, unreadable: [] };
+    if (missing.length) {
+      listed.code = 1;
+      listed.out += '\n' + missing.map(n => `OPEN: ${n} — changed, not on the places list: it has callers; search it with places.mjs --names ${n} and close each place`).join('\n');
+    }
+    // 2026-11-18 (repair round): a callers entry that cannot be read is no pass.
+    if (unreadable.length) {
+      listed.code = 1;
+      listed.out += '\n' + unreadable.map(e => `OPEN: callers entry not readable — "${e.slice(0, 80)}": compare that changed function with the list's Names yourself, search it with places.mjs --names and close each place`).join('\n');
+    }
+    if (more) listed.out += `\nNOTE: ${more} more changed function(s) are not named by the size check (it prints a few rows); compare them with the list's Names yourself`;
+  }
   for (const [owes, without] of [[placesOwed, placesWithout], [siblingsOwed, siblingsWithout]]) {
     if (!owes) continue;
     const owed = without(size && size.out, opts.repo);
@@ -370,7 +462,7 @@ export async function preReview(opts) {
     const text = r.out.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).filter(l => l.trim());
     if (r.code !== 0) lines.push(...failureLines(text).map(l => '      ' + l));
     // The project check's GAP and NOTE lines are leads for the review: shown also when it passes (2026-11-12).
-    else if (r.show) lines.push(...text.filter(l => /^(?:SIZE|SIZE GREW|MECHANICAL|GAP|NOTE|PLACES|SIBLINGS|  callers|  roles)/.test(l)).map(l => '      ' + l.trim()));
+    else if (r.show) lines.push(...text.filter(l => /^(?:SIZE|SIZE GREW|MECHANICAL|GAP|NOTE|PLACES|WIDE|SIBLINGS|  callers|  roles)/.test(l)).map(l => '      ' + l.trim()));
   }
   for (const s of skipped) lines.push(`  – ${s.name}: skipped (${s.why})`);
   return { ok: results.every(r => r.code === 0), text: lines.join('\n') };

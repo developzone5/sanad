@@ -125,7 +125,8 @@ test('--close writes one outcome on many places: file: and name: fill open place
   assert.equal(run(['--close', out]).status, 2, '--close needs a --set');
 });
 
-test('a name used in more than 40 product files is too wide, and a name with no hit is a spelling error', () => {
+// 2026-11-18 (audit finding 9): the 41-file case is no longer refused (see the finding 9 test below); the rest of this test is kept.
+test('a name used in more than 40 product files is listed with one place per file, and a name with no hit is a spelling error', () => {
   const { repo, write } = fixture();
   for (let i = 0; i < 40; i++) write(`wide/f${i}.ts`, 'wideName();\n');
   write('wide/f.test.ts', 'wideName();\n');
@@ -133,8 +134,8 @@ test('a name used in more than 40 product files is too wide, and a name with no 
   assert.equal(run(['--repo', repo, '--names', 'wideName', '--out', out]).status, 0, '40 product files are fine; tests do not count');
   write('wide/f40.ts', 'wideName();\n');
   const wide = run(['--repo', repo, '--names', 'wideName', '--out', path.join(root, 'list-3b.md')]);
-  assert.equal(wide.status, 2);
-  assert.match(wide.stderr, /too wide: wideName is used in 41 files; name the rule, function, code or key instead/);
+  assert.equal(wide.status, 0, wide.stderr);
+  assert.match(wide.stdout, /WIDE: wideName is used in 41 files/);
   const none = run(['--repo', repo, '--names', 'dueAfterPublish,dueMayEqualPublish', '--out', path.join(root, 'list-3c.md')]);
   assert.equal(none.status, 2);
   assert.match(none.stderr, /no place uses dueMayEqualPublish: check the spelling/);
@@ -189,9 +190,10 @@ test('the list itself is not a place; a name only tests use gives no place; a na
   fs.rmSync(path.join(repo, 'src/draft.ts'));
   fs.rmSync(path.join(repo, 'src/rules.test.ts'));
   const refresh = run(['--refresh', out, '--check', out]);
-  assert.equal(refresh.status, 0, refresh.stdout + refresh.stderr);
+  // 2026-11-18 (audit finding 2): the three places have no outcome, so they stay open: the name may be renamed.
+  assert.equal(refresh.status, 1, refresh.stdout + refresh.stderr);
   assert.equal(fs.readFileSync(out, 'utf8').split(/\r?\n/).filter(l => /^P\d+ \(gone\)/.test(l)).length, 3);
-  assert.match(refresh.stdout, /^PLACES: 0 place\(s\), 0 open$/m);
+  assert.match(refresh.stdout, /^PLACES: 0 place\(s\), 3 open$/m);
 });
 
 // 2026-11-13: on CI the temp folder has a short spelling (RUNNER~1) while git names the long one. The same
@@ -614,4 +616,250 @@ test('a closed place stays closed when a line is added above it, although a same
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /^PLACES: 1 place\(s\), 0 open$/m);
   assert.deepEqual(lineOf(list), ['P1 · Status · Api/Visibility.cs · Visibility.IsLive(string name) · lines 11 → C1']);
+});
+
+// ---- 2026-11-18 (audit of the release): findings 2, 3, 8 and 9 ----
+
+test('finding 2: a name renamed in every file leaves its places gone with no outcome: they stay open until none: <reason> is written; with outcomes written they stay closed', () => {
+  const { repo, write } = fixture();
+  const out = path.join(root, 'list-rename.md');
+  assert.equal(run(['--repo', repo, '--names', 'dueAfterPublish', '--out', out]).status, 0);
+  for (const f of ['src/rules.ts', 'src/schedule.ts']) write(f, fs.readFileSync(path.join(repo, f), 'utf8').replace(/dueAfterPublish/g, 'dueAfterPublishWindow'));
+  fs.rmSync(path.join(repo, 'src/draft.ts'));
+  const r = run(['--refresh', out, '--check', out]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^OPEN: P1 · dueAfterPublish · src\/draft\.ts · \(file\) — no longer found: add its new name with --names/m);
+  assert.match(r.stdout, /^PLACES: 0 place\(s\), 3 open$/m);
+  fill(out, { P1: 'none: the draft file was removed on purpose', P2: 'none: renamed to dueAfterPublishWindow', P3: 'none: renamed to dueAfterPublishWindow' });
+  const ok = run(['--check', out]);
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.match(ok.stdout, /^PLACES: 0 place\(s\), 0 open$/m);
+  // The new name, added, is listed as its own places.
+  const added = run(['--repo', repo, '--names', 'dueAfterPublishWindow', '--out', out]);
+  assert.equal(added.status, 0, added.stderr);
+});
+
+test('finding 2, must not change: one place of a name that has others lost its file: it is gone and needs no outcome', () => {
+  const { repo } = fixture();
+  const out = path.join(root, 'list-one-gone.md');
+  assert.equal(run(['--repo', repo, '--names', 'dueAfterPublish', '--out', out]).status, 0);
+  fs.rmSync(path.join(repo, 'src/draft.ts'));
+  fill(out, { P2: 'C1', P3: 'C1' });
+  const r = run(['--refresh', out, '--check', out]);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /^PLACES: 2 place\(s\), 0 open$/m);
+});
+
+const API_TS = [
+  'export const assignmentsApi = {',                                            // 1
+  '  create: (body: { dueDate: string }) => api.post("/a", body),',            // 2
+  '  schedule: (id: number, dueDate: string) => api.put("/s", { dueDate }),',   // 3
+  '  publishNow: (id: number, dueDate: string) => {',                           // 4
+  '    return api.post("/p", { dueDate });',                                    // 5
+  '  },',                                                                        // 6
+  '};',                                                                          // 7
+  '',
+].join('\n');
+const CONTROLLER = [
+  'public class HomeworkController : ControllerBase',   // 1
+  '{',                                                  // 2
+  '    [HttpPost]',                                     // 3
+  '    [Authorize(Policy = Policies.TeacherOrAdmin)]',  // 4
+  '    public IActionResult Create()',                  // 5
+  '    {',                                              // 6
+  '        return Ok();',                               // 7
+  '    }',                                              // 8
+  '',                                                   // 9
+  '    [Authorize(Policy = Policies.TeacherOrAdmin)]',  // 10
+  '    public IActionResult PublishNow() { return Ok(); }', // 11
+  '',                                                   // 12
+  '    [Authorize(Policy = Policies.TeacherOrAdmin)]',  // 13
+  '    [HttpDelete]',                                   // 14
+  '    public IActionResult Delete() { return Ok(); }', // 15
+  '}',                                                  // 16
+  '',
+].join('\n');
+
+test('finding 3: an attribute line belongs to the method under it: three actions of one controller are three places', () => {
+  const { repo, write } = fixture();
+  write('Api/Controllers/HomeworkController.cs', CONTROLLER);
+  const out = path.join(root, 'list-attr.md');
+  assert.equal(run(['--repo', repo, '--names', 'TeacherOrAdmin', '--out', out]).status, 0);
+  assert.deepEqual(lineOf(out), [
+    'P1 · TeacherOrAdmin · Api/Controllers/HomeworkController.cs · Create · lines 4 → ',
+    'P2 · TeacherOrAdmin · Api/Controllers/HomeworkController.cs · PublishNow · lines 10 → ',
+    'P3 · TeacherOrAdmin · Api/Controllers/HomeworkController.cs · Delete · lines 13 → ',
+  ]);
+  // One outcome closes one action only.
+  fill(out, { P1: 'C1' });
+  const r = run(['--check', out]);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /^PLACES: 3 place\(s\), 2 open$/m);
+});
+
+test('finding 3: the members of an exported API object are their own places; a top-level call stays the file\'s own place', () => {
+  const { repo, write } = fixture();
+  write('src/api/assignments.ts', API_TS);
+  const out = path.join(root, 'list-members.md');
+  assert.equal(run(['--repo', repo, '--names', 'dueDate', '--out', out]).status, 0);
+  assert.deepEqual(lineOf(out), [
+    'P1 · dueDate · src/api/assignments.ts · assignmentsApi.create · lines 2 → ',
+    'P2 · dueDate · src/api/assignments.ts · assignmentsApi.schedule · lines 3 → ',
+    'P3 · dueDate · src/api/assignments.ts · assignmentsApi.publishNow · lines 4, 5 → ',
+  ]);
+  // Same labels after a line is added above them: numbers and outcomes stay.
+  fill(out, { P1: 'C1', P2: 'C2' });
+  write('src/api/assignments.ts', '// header\n' + API_TS);
+  assert.equal(run(['--refresh', out]).status, 0);
+  assert.deepEqual(lineOf(out), [
+    'P1 · dueDate · src/api/assignments.ts · assignmentsApi.create · lines 3 → C1',
+    'P2 · dueDate · src/api/assignments.ts · assignmentsApi.schedule · lines 4 → C2',
+    'P3 · dueDate · src/api/assignments.ts · assignmentsApi.publishNow · lines 5, 6 → ',
+  ]);
+});
+
+test('finding 3: C# properties of two DTOs in one file are two places', () => {
+  const { repo, write } = fixture();
+  write('Api/Dtos.cs', [
+    'public class CreateDto', '{', '    public DateTime? DueDate { get; set; }', '}',
+    'public class UpdateDto', '{', '    public DateTime? DueDate { get; set; }', '}', '',
+  ].join('\n'));
+  const out = path.join(root, 'list-props.md');
+  assert.equal(run(['--repo', repo, '--names', 'DueDate', '--out', out]).status, 0);
+  assert.deepEqual(lineOf(out), [
+    'P1 · DueDate · Api/Dtos.cs · CreateDto.DueDate · lines 3 → ',
+    'P2 · DueDate · Api/Dtos.cs · UpdateDto.DueDate · lines 7 → ',
+  ]);
+});
+
+test('finding 3, must not change: top-level hits, a class-level attribute and a plain call stay the file\'s own place', () => {
+  const { repo, write } = fixture();
+  write('Api/Policies.cs', '[Authorize(Policy = Policies.TeacherOrAdmin)]\npublic class HomeController : ControllerBase\n{\n}\n');
+  const out = path.join(root, 'list-toplevel.md');
+  assert.equal(run(['--repo', repo, '--names', 'TeacherOrAdmin,dueAfterPublish', '--out', out]).status, 0);
+  assert.deepEqual(lineOf(out).filter(l => /TeacherOrAdmin/.test(l)), ['P1 · TeacherOrAdmin · Api/Policies.cs · (file) · lines 1 → ']);
+  assert.ok(lineOf(out).includes('P2 · dueAfterPublish · src/draft.ts · (file) · lines 1 → '));
+});
+
+test('finding 8: an outcome does not move to another class\'s method of the same name', () => {
+  const { repo, write } = fixture();
+  write('src/Rules.cs', ['public class Schedule {', '    public void Apply() {', '        DateRule.Check(h);', '    }', '}', ''].join('\n'));
+  const out = path.join(root, 'list-move-class.md');
+  assert.equal(run(['--repo', repo, '--names', 'DateRule', '--out', out]).status, 0);
+  assert.deepEqual(lineOf(out), ['P1 · DateRule · src/Rules.cs · Apply · lines 3 → ']);
+  fill(out, { P1: 'C1' });
+  write('src/Rules.cs', ['public class Schedule {', '    public void Apply() {', '        Other();', '    }', '}',
+    'public class PublishNow {', '    public void Apply() {', '        DateRule.Check(h);', '    }', '}', ''].join('\n'));
+  const r = run(['--refresh', out, '--check', out]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.deepEqual(lineOf(out), [
+    'P1 (gone) · DateRule · src/Rules.cs · Apply · lines none → C1',
+    'P2 (new) · DateRule · src/Rules.cs · PublishNow.Apply · lines 8 → ',
+  ]);
+  assert.match(r.stdout, /^OPEN: P2 · DateRule · src\/Rules\.cs · PublishNow\.Apply/m);
+});
+
+// 2026-11-18 (audit): past the file limit the list is the same as below it: one place per declaration.
+test('a wide name keeps one place per declaration: two functions of one file are two places, as below the limit', () => {
+  const { repo, write } = fixture();
+  for (let i = 0; i < 41; i++) write(`wide/f${i}.ts`, 'export function run() {\n  pageSize();\n}\n');
+  write('wide/two.ts', 'export function schedule() {\n  pageSize();\n}\nexport function publishNow() {\n  pageSize();\n}\n');
+  const out = path.join(root, 'list-wide-two.md');
+  const r = run(['--repo', repo, '--names', 'pageSize', '--out', out]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rows = lineOf(out);
+  assert.equal(rows.length, 43, rows.join('\n'));
+  assert.ok(rows.some(x => /wide\/two\.ts · schedule · lines 2 →/.test(x)), rows.join('\n'));
+  assert.ok(rows.some(x => /wide\/two\.ts · publishNow · lines 5 →/.test(x)), rows.join('\n'));
+  const c = run(['--close', out, '--set', 'file:wide/two.ts=none: only the schedule path was looked at']);
+  assert.match(c.stdout, /CLOSED: 2 place\(s\)/, 'a file: set still fills both: the user chose that');
+  assert.match(c.stdout, /PLACES: 43 place\(s\), 41 open/);
+  assert.match(r.stdout, /WIDE: pageSize is used in 42 files/);
+  const out2 = path.join(root, 'list-wide-two-b.md');
+  run(['--repo', repo, '--names', 'pageSize', '--out', out2]);
+  const one = run(['--close', out2, '--set', 'P42=none: schedule only']);
+  assert.match(one.stdout, /PLACES: 43 place\(s\), 42 open/, 'closing the schedule place leaves publishNow open');
+});
+
+test('finding 9: a name used in more than 40 files is never refused: it is listed as any name is', () => {
+  const { repo, write } = fixture();
+  for (let i = 0; i < 41; i++) write(`wide/f${i}.ts`, 'export function run() {\n  pageSize();\n}\n');
+  const out = path.join(root, 'list-wide.md');
+  const r = run(['--repo', repo, '--names', 'pageSize', '--out', out]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rows = lineOf(out);
+  assert.equal(rows.length, 41);
+  assert.equal(rows[0], 'P1 · pageSize · wide/f0.ts · run · lines 2 → ');
+  assert.match(r.stdout, /WIDE: pageSize is used in 41 files \(more than 40\): one place per declaration/);
+  // One --set closes all of them.
+  const c = run(['--close', out, '--set', 'name:pageSize=none: the page size is read, not changed']);
+  assert.equal(c.status, 0, c.stdout + c.stderr);
+  assert.match(c.stdout, /PLACES: 41 place\(s\), 0 open/);
+});
+
+// ---- 2026-11-18 (audit, repair round): rename with a leftover mention, and common declarations that were one (file) place ----
+function mini(files) {
+  const repo = fs.mkdtempSync(path.join(root, 'mini-'));
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid'); git('config', 'core.autocrlf', 'false');
+  const write = (n, t) => { fs.mkdirSync(path.dirname(path.join(repo, n)), { recursive: true }); fs.writeFileSync(path.join(repo, n), t); };
+  for (const [n, t] of Object.entries(files)) write(n, t);
+  git('add', '-A'); git('commit', '-qm', 'base');
+  return { repo, write, git };
+}
+const placeRows = (file) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(l => /^P\d/.test(l));
+
+test('audit 4: a renamed name with one leftover mention (a spec text) still leaves its gone places open; a gone place with an outcome needs nothing', () => {
+  const { repo, write } = mini({
+    'web/src/rules.ts': 'export const LATE_GRACE = 5;\n',
+    'web/src/report1.ts': "import { LATE_GRACE } from './rules';\nexport const r1 = LATE_GRACE;\n",
+    'web/src/report2.ts': "import { LATE_GRACE } from './rules';\nexport const r2 = LATE_GRACE;\n",
+    'specs/late.md': 'A hand-in is late after LATE_GRACE minutes.\n',
+  });
+  const out = path.join(root, 'list-a4.md');
+  assert.equal(run(['--repo', repo, '--names', 'LATE_GRACE', '--out', out]).status, 0);
+  assert.equal(run(['--close', out, '--set', 'file:specs/late.md=none: the spec text only names the constant', '--set', 'file:web/src/report1.ts=C1']).status, 0);
+  write('web/src/rules.ts', 'export const LATE_GRACE_MINUTES = 9;\n');
+  write('web/src/report1.ts', "import { LATE_GRACE_MINUTES } from './rules';\nexport const r1 = LATE_GRACE_MINUTES;\n");
+  write('web/src/report2.ts', "import { LATE_GRACE_MINUTES } from './rules';\nexport const r2 = LATE_GRACE_MINUTES;\n");
+  const r = run(['--refresh', out, '--repo', repo, '--check', out]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /OPEN: P\d+ · LATE_GRACE · web\/src\/rules\.ts · \(file\) — no longer found/);
+  assert.match(r.stdout, /OPEN: P\d+ · LATE_GRACE · web\/src\/report2\.ts/, 'a gone place with no outcome is open whatever else is live');
+  assert.doesNotMatch(r.stdout, /OPEN: P\d+ · LATE_GRACE · web\/src\/report1\.ts/, 'a gone place that has its outcome is closed');
+});
+
+test('audit 5a: a C# method with no access modifier, and an explicit interface method, are places of their own', () => {
+  const { repo, write } = mini({
+    'src/Rules.cs': 'class Schedule\n{\n    void Apply(H h)\n    {\n        DateRule.Check(h);\n    }\n}\n',
+    'src/Other.cs': 'class Other : IRule\n{\n    void IRule.Apply(H h) => DateRule.Check(h);\n    void Keep(H h) { DateRule.Check(h); }\n}\n',
+  });
+  const out = path.join(root, 'list-a5a.md');
+  assert.equal(run(['--repo', repo, '--names', 'DateRule', '--out', out]).status, 0);
+  assert.deepEqual(placeRows(out).map(l => l.split(' · ')[3]), ['Other.Apply', 'Other.Keep', 'Schedule.Apply']);
+  assert.equal(run(['--close', out, '--set', 'name:DateRule=C1']).status, 0);
+  // Schedule.Apply is changed to save, and PublishNow.Apply takes over the rule: C1 was written for Schedule.Apply.
+  write('src/Rules.cs', 'class Schedule\n{\n    void Apply(H h)\n    {\n        Save(h);\n    }\n}\nclass PublishNow\n{\n    void Apply(H h)\n    {\n        DateRule.Check(h);\n    }\n}\n');
+  const r = run(['--refresh', out, '--repo', repo, '--check', out]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /OPEN: P\d+ \(?[^\n]*DateRule · src\/Rules\.cs · PublishNow\.Apply/, 'the new class is its own open place');
+});
+
+test('audit 5b: class fields with arrow functions and one-line class methods are places of their own', () => {
+  const { repo } = mini({
+    'src/api/cls.ts': 'export class AssignmentsApi {\n  create = (dueDate: string) => post(dueDate);\n  schedule = async (dueDate: string) => {\n    return post2(dueDate);\n  };\n  update(dueDate: string) { return post3(dueDate); }\n}\n',
+  });
+  const out = path.join(root, 'list-a5b.md');
+  assert.equal(run(['--repo', repo, '--names', 'dueDate', '--out', out]).status, 0);
+  assert.deepEqual(placeRows(out).map(l => l.split(' · ')[3]), ['AssignmentsApi.create', 'AssignmentsApi.schedule', 'AssignmentsApi.update']);
+});
+
+test('audit 5, must not change: public methods, statements inside a method and object members keep their rows', () => {
+  const { repo } = mini({
+    'src/Svc.cs': 'class Svc\n{\n    public void Schedule(H h)\n    {\n        var x = Make(h);\n        DateRule.Check(h);\n        return;\n    }\n    public void Publish(H h)\n    {\n        DateRule.Check(h);\n    }\n}\n',
+    'src/api.ts': 'export const api = {\n  create: (dueDate: string) => post(dueDate),\n};\nexport function top(dueDate: string) {\n  return dueDate;\n}\n',
+  });
+  const out = path.join(root, 'list-a5c.md');
+  assert.equal(run(['--repo', repo, '--names', 'DateRule,dueDate', '--out', out]).status, 0);
+  assert.deepEqual(placeRows(out).map(l => l.split(' · ')[3]), ['Schedule', 'Publish', 'api.create', 'top']);
 });

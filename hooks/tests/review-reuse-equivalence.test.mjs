@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {createRequire} from 'node:module';
 import {runCommand} from '../../skills/gate/scripts/evidence.mjs';
 
 // Audit H1: a "reused" review needs a git range-diff whose OUTPUT shows every pair equal.
@@ -47,6 +48,12 @@ test('a reused review needs a range-diff whose output proves equal patches', asy
     const belowOut = git(['range-diff', `${base0}..${oldHead}`, `${base1}..${equalHead}`]);
     assert.match(dashxOut, /!/); assert.match(pathOut, /=/); assert.doesNotMatch(pathOut, />/); assert.match(selfOut, /=/); assert.match(belowOut, /=/);
     assert.match(equalOut, /=/); assert.match(extraOut, />/); assert.match(changedOut, /!/);
+
+    // 2026-11-18 (audit finding 2): a "reused" verdict also needs a completed review of the OLD commits on record.
+    // These tests are about the equal series, so the old commit is recorded here as reviewed (the child inherits the state folder).
+    process.env.SANAD_STATE_DIR = path.join(scratch, 'state');
+    const store = createRequire(import.meta.url)('../lib/review-store.cjs');
+    assert.equal(store.write(transcript, {repo: store.identity(repo), head: oldHead, commits: [oldHead]}, 'earlier-review'), true);
 
     // The evidence check is bound to a tree: one per branch under test; decide() puts it in front of the entries (the `bound` marker).
     const boundBy = {};
@@ -110,5 +117,5 @@ test('a reused review needs a range-diff whose output proves equal patches', asy
     await t.test('an empty range-diff output is denied', () => {
       assert.equal(decide([...bound, call('rd', rd), result('rd', ''), ...verdicts]).permissionDecision, 'deny');
     });
-  } finally { fs.rmSync(scratch, {recursive: true, force: true}); }
+  } finally { delete process.env.SANAD_STATE_DIR; fs.rmSync(scratch, {recursive: true, force: true}); }
 });

@@ -24,53 +24,15 @@ const proc = typeof process === 'object' && process ? process : null;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 
-const CODE_EXT = new RegExp(
-  '\\.(' +
-  'cs|csproj|vbproj|fsproj|razor|cshtml|' +          // .NET
-  'ts|tsx|mts|cts|js|jsx|mjs|cjs|vue|svelte|' +      // JS/TS
-  'py|ipynb|go|rb|php|java|kt|kts|rs|swift|scala|' + // other backends
-  'dart|lua|ex|exs|fs|fsx|vb|groovy|pl|' +
-  'c|cc|cpp|cxx|h|hpp|' +                            // C/C++
-  'sh|bash|ps1|psm1|' +                              // shell scripts
-  'sln|props|targets|yaml|yml|toml|xml|config|ini|' +   // build/configuration
-  'sql|css|scss|less' +                              // db + styles
-  ')$', 'i'
-);
-const CODE_BASENAME = /(^|[/\\])dockerfile[^/\\]*$/i;
-// Config/locale JSON whose syntax breaks a build: appsettings*, tsconfig*,
-// launchSettings, and anything under a src/ tree (i18n bundles).
-const CODE_JSON = /(^|[/\\])(appsettings[^/\\]*|tsconfig[^/\\]*|launchSettings)\.json$|(^|[/\\])src[/\\].*\.json$/i;
-const MANIFEST_BASENAME = /(^|[/\\])(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|requirements[^/\\]*\.txt|Pipfile(\.lock)?|go\.(mod|sum)|Cargo\.(toml|lock)|Gemfile(\.lock)?|pom\.xml|build\.gradle(\.kts)?|global\.json|docker-compose(\.[^/\\]+)?\.ya?ml|compose(\.[^/\\]+)?\.ya?ml)$/i;
-// Paths that never oblige a verify: Claude's and Codex's own config, memory,
-// scratch, specs, vendored/VCS-internal trees, device files. The temp folder
+// 2026-11-18: WHAT is code is one rule shared with the push guard (lib/code-paths.cjs): every file but plain
+// prose. The old list of extensions, and the exemption of any folder named specs, memory or .claude, let an
+// edit of index.html, nginx.conf or data/seed.json pass unseen after the review.
+const { isProsePath, isCodePath: isCodeFile, collapseDots, inTempWorkTree, TEMP_DIR, stripQuotes } = require('./code-paths.cjs');
+// Paths that never oblige a verify, for isContentPath (the note check's wider rule): Claude's and Codex's own
+// config, memory, scratch, specs, vendored/VCS-internal trees, device files. The temp folder
 // (the session scratchpad lives in it) is named literally or by its variable.
-const EXEMPT = /((^|[/\\])\.claude([/\\]|$)|(^|[/\\])\.codex([/\\]|$)|[/\\]memory[/\\]|[/\\]specs[/\\]|[/\\]node_modules[/\\]|[/\\]\.git[/\\]|^\/tmp\/|^\/private\/tmp\/|^\/(?:private\/)?var\/folders\/|^\$\{?(?:TEMP|TMP|TMPDIR)\}?[/\\]|^\$env:(?:TEMP|TMP)[/\\]|^%(?:TEMP|TMP)%[/\\]|^\/dev\/|^\/proc\/)/i;
-// The Windows temp folder is exempt only outside a git work tree: real worktrees live there too, and
-// edits in them never counted (2026-11-12, audit H3: no check asked, no timer).
-const TEMP_DIR = /AppData\/Local\/Temp/i;
-const workTreeDirs = new Map(); // folder -> inside a work tree rooted below the temp folder (for this process)
-function inTempWorkTree(p) {
-  const local = p.replace(/^\/([A-Za-z])\//, '$1:/');   // Git Bash spells C:/ as /c/
-  const m = TEMP_DIR.exec(local);
-  if (!m) return false;
-  const top = local.slice(0, m.index + m[0].length);
-  // Walk up from the file's folder to the temp folder; a folder that does not exist yet has no .git,
-  // so the nearest existing parent decides.
-  const seen = [];
-  let dir = local.replace(/\/+$/, '').replace(/\/[^/]*$/, ''), inside = false;
-  while (dir.length > top.length) {
-    if (workTreeDirs.has(dir)) { inside = workTreeDirs.get(dir); break; }
-    seen.push(dir);
-    let found = false;
-    try { found = fs.existsSync(dir + '/.git'); } catch (e) { found = false; }
-    if (found) { inside = true; break; }
-    dir = dir.replace(/\/[^/]*$/, '');
-  }
-  for (const d of seen) workTreeDirs.set(d, inside);
-  return inside;
-}
-
-function stripQuotes(s) { return String(s || '').replace(/^["']+|["']+$/g, ''); }
+const EXEMPT =/((^|[/\\])\.claude([/\\]|$)|(^|[/\\])\.codex([/\\]|$)|[/\\]memory[/\\]|[/\\]specs[/\\]|[/\\]node_modules[/\\]|[/\\]\.git[/\\]|^\/tmp\/|^\/private\/tmp\/|^\/(?:private\/)?var\/folders\/|^\$\{?(?:TEMP|TMP|TMPDIR)\}?[/\\]|^\$env:(?:TEMP|TMP)[/\\]|^%(?:TEMP|TMP)%[/\\]|^\/dev\/|^\/proc\/)/i;
+// The Windows temp folder is exempt only outside a git work tree (see code-paths.cjs).
 
 // A relative name written by a shell command lands in the folder that command is
 // in (its `cd`, else the tool's folder). Judge it there: `cd <scratchpad> && sed -i
@@ -82,27 +44,15 @@ function inFolder(p, base) {
   return String(base).replace(/[\\/]+$/, '') + '/' + s;
 }
 
-// `a/b/../c` is `a/c`: a name that climbs out of an exempt folder is judged where it lands.
-function collapseDots(p) {
-  const parts = [];
-  for (const part of p.split('/')) {
-    if (part === '.') continue;
-    const last = parts[parts.length - 1];
-    if (part === '..' && parts.length && last !== '..' && last !== '' && !/^[A-Za-z]:$/.test(last)) { parts.pop(); continue; }
-    parts.push(part);
-  }
-  return parts.join('/');
-}
-
-function isCodePath(p) {
-  p = stripQuotes(p).replace(/[),;]+$/, '');
-  if (!p) return false;
-  // Claude-managed worktrees contain application code, even though their
-  // absolute path starts inside .claude. Apply exemptions within that checkout.
-  p = collapseDots(p.replace(/\\/g, '/')).replace(/^.*(?:^|\/)\.claude\/worktrees\/[^/]+\//i, '');
-  if (EXEMPT.test(p)) return false;
-  if (!(CODE_EXT.test(p) || CODE_BASENAME.test(p) || CODE_JSON.test(p) || MANIFEST_BASENAME.test(p))) return false;
-  return !TEMP_DIR.test(p) || inTempWorkTree(p);
+// The file rule is code-paths.cjs's (the same one the push guard uses).
+const isCodePath = isCodeFile;
+// A name read out of a shell command's words (not a file the Edit tool names): the words of a command are
+// many things (`s/a/b/`, a folder, a branch), so such a name counts only when it looks like a file: an
+// extension, or a well-known extensionless build file (2026-11-18).
+const BUILD_NAMES = /(?:^|[/\\])(?:Makefile|GNUmakefile|Dockerfile[^/\\]*|Jenkinsfile|Procfile|Gemfile|Rakefile|Vagrantfile|Brewfile|Podfile|Fastfile|BUILD|WORKSPACE)$/i;
+function isCodeToken(p) {
+  const s = stripQuotes(p).replace(/[),;]+$/, '');
+  return isCodeFile(s) && (/\.[A-Za-z0-9_-]+$/.test(s.replace(/\\/g, '/').split('/').pop()) || BUILD_NAMES.test(s));
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +136,11 @@ function segmentIsVerify(seg) {
   }
   const command = words.join(' ');
   if (/(?:^|\s)(?:--list-tests|--collect-only|--collectonly|--passWithNoTests|--help|--version)(?:\s|=|$)/i.test(command)) return false;
+  // A listing or a clean runs no test and builds nothing: `dotnet test -t` / `--list-tests`, `vitest list`,
+  // `jest --listTests`, `playwright test --list`, `tsc --build --clean`, `npm test --if-present` (2026-11-18). Vitest's and
+  // jest's own `-t` is a name filter and still runs tests; only dotnet's `-t` lists.
+  if (/(?:^|\s)(?:--list|--listTests|--clean|--if-present)(?:\s|=|$)/i.test(command) ||
+      /^(?:npx\s+)?vitest\s+list\b/i.test(command) || (/^dotnet\s+test\b/i.test(command) && /(?:^|\s)-t(?:\s|$)/.test(command))) return false;
   // A fixer rewrites the code it checks: it is an edit, not a passing check (2026-11-12, audit H14).
   if (/(?:^|\s)--fix(?:\s|=|$)/i.test(command)) return false;
   // TypeScript inventory/help commands can exit 0 without checking any source.
@@ -410,8 +365,11 @@ function segmentIsProvider(seg) {
 // sentinel like '<patch>' when the write has no named path). Over-approximates
 // on purpose: a segment that carries a write indicator counts every code path
 // it names.
-const WRITE_TOOL = /(^|[\s(])(sed\s+(-[a-zA-Z]*i|--in-place)|tee(\s+-a)?\s|Set-Content|Out-File|Add-Content|WriteAllText|WriteAllLines|AppendAllText|cp\s|mv\s|copy\s|move\s|Copy-Item|Move-Item|csharpier\s+format)/i;
-const PATHLESS_WRITE = /(^|[\s(])(git\s+apply|patch\s|dotnet\s+ef\s+migrations\s+add|npm\s+(install|i|uninstall|remove|add|rm)\b|pnpm\s+(add|remove|install)\b|yarn\s+(add|remove)\b|dotnet\s+(add|remove)\s+(package|reference))/i;
+const WRITE_TOOL = /(^|[\s(])(sed\s+(-[a-zA-Z]*i|--in-place)|tee(\s+-a)?\s|Set-Content|Out-File|Add-Content|WriteAllText|WriteAllLines|AppendAllText|cp\s|mv\s|copy\s|move\s|Copy-Item|Move-Item|csharpier\s+format|perl\s+-[a-zA-Z]*i|Rename-Item|rni\s|ren\s|rename\s|sc\s|ac\s)/i;
+// 2026-11-18: `git clean -f` deletes untracked files (dry run -n or --dry-run does not).
+// A script run by its file name (`node scripts/codemod.mjs`, `python rename_all.py`) is not judged: what it writes
+// cannot be known from the command. Only an interpreter whose own text calls a write counts (see interpreterWrites).
+const PATHLESS_WRITE = /(^|[\s(])(git\s+apply|patch\s|git(?:\.exe)?\s+clean\s+(?=[^;&|\n]*-[a-zA-Z]*f)(?![^;&|\n]*(?:-[a-zA-Z]*n\b|--dry-run))|dotnet\s+ef\s+migrations\s+add|npm\s+(install|i|uninstall|remove|add|rm)\b|pnpm\s+(add|remove|install)\b|yarn\s+(add|remove)\b|dotnet\s+(add|remove)\s+(package|reference)|pip-compile\b|uv\s+pip\s+compile\b|uv\s+(?:add|remove|lock)\b|poetry\s+(?:add|remove|lock|update)\b)/i;   // 2026-11-18 (round 3): the Python tools rewrite the manifest too
 // Git operations that replace working-tree content change the code as surely as
 // an edit: evidence collected before them no longer describes the source.
 const GIT_CONTENT_CHANGE = /(^|[\s(;&|"'])git(?:\.exe)?(?:\s+-[Cc]\s+(?:"[^"]*"|'[^']*'|(?:\\.|\S)+))*\s+(?:merge|pull|rebase|cherry-pick|revert|reset|switch|checkout|restore|am|stash(?!\s+(?:list|show)(?=\s|$)))(?=[\s"']|$)/i;
@@ -436,10 +394,39 @@ function readsStdin(seg) {
   if (/^(?:iex|invoke-expression)$/.test(program)) return true;
   return STDIN_SHELL.test(program) && args.every((a) => /^(?:-s|-|-command|-noprofile|-nologo|-noninteractive)$/i.test(a));
 }
+// The command text without the bodies of its heredocs (the terminator line stays).
+function withoutHeredocBodies(s) {
+  let out = '', i = 0;
+  while (i < s.length) {
+    const m = /<<-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(s.slice(i));
+    if (!m) { out += s.slice(i); break; }
+    const at = i + m.index + m[0].length;
+    const eol = s.indexOf('\n', at);
+    if (eol === -1) { out += s.slice(i); break; }
+    out += s.slice(i, eol + 1);
+    let j = eol + 1, end = s.length;
+    while (j < s.length) {
+      let nl = s.indexOf('\n', j);
+      if (nl === -1) nl = s.length;
+      if (s.slice(j, nl).replace(/^\t+/, '').trim() === m[2]) { end = j; break; }
+      j = nl + 1;
+    }
+    i = end;
+  }
+  return out;
+}
 // wide: the next segment runs this one's output as commands.
 function gitContentChange(seg, wide) {
   if (!GIT_CONTENT_CHANGE.test(seg)) return false;
-  const { program } = programArgs(seg);
+  const { program, args } = programArgs(seg);
+  // 2026-11-18 (finding 8): a commit, tag or note with its message in a heredoc (`-m "$(cat <<'EOF' … git pull … EOF)"`)
+  // runs no git of the message's words. Judged by the text outside quotes and outside the heredoc body; a command
+  // substitution inside the quotes still counts (`-m "$(git pull)"`).
+  if (program === 'git' && !wide && /^(?:commit|tag|notes)$/.test(gitSubcommand(args).sub)) {
+    const bare = withoutHeredocBodies(seg);
+    const inner = [...bare.matchAll(/\$\(([^)]*)\)|`([^`]*)`/g)].map((m) => m[1] || m[2]).join('\n');
+    return GIT_CONTENT_CHANGE.test(blankQuoted(bare).replace(/\s#.*$/, '')) || GIT_CONTENT_CHANGE.test(inner);
+  }
   const runs = !!wide || RUNS_INSIDE.test(seg) || RUNS_BRACKET.test(blankQuoted(seg));
   if (TEXT_PROGRAM.test(program)) return runs || (program === 'sed' && SED_RUNS.test(seg));
   if (RUNNER_PROGRAM.test(program) || runs) return true;
@@ -459,6 +446,7 @@ function copyWrites(tokens) {
     if (/^(?:-destination|-t|--target-directory)$/i.test(t)) { dest = tokens[++i]; destIndex = i; continue; }
     if (/^--target-directory=/i.test(t)) { dest = t.slice(t.indexOf('=') + 1); destIndex = i; continue; }
     if (/^-(?:path|literalpath)$/i.test(t)) { if (tokens[i + 1] !== undefined) sources.push(tokens[++i]); continue; }
+    if (/^\d*>/.test(t)) { if (/^\d*>{1,2}$/.test(t)) i++; continue; }   // 2026-11-18: a redirection word is no source or destination
     if (t.startsWith('-')) continue;
     sources.push(t);
   }
@@ -512,8 +500,191 @@ function joinFolder(p, base, gitBash) {
   return String(base).replace(/[\\/]+$/, '') + '/' + s;
 }
 
+// 2026-11-18 (stop gate promise, finding 4): a rewrite done through an interpreter. Only an interpreter whose own
+// text (a `-e` / `-c` one-liner, or a heredoc body) calls a write on a path that is code counts, as '<generated>':
+// reading and reporting one-liners run all the time and are never an edit. A script run by its file name cannot
+// be known from the command and is left. A path built at run time (a variable) is not read either.
+const INTERPRETER = /^(?:node|nodejs|python\d*|py|perl|ruby|pwsh|powershell)$/;
+const SCRIPT_WRITE = /\b(?:writeFileSync|appendFileSync|renameSync|rmSync|unlinkSync|copyFileSync|cpSync|writeFile|appendFile|unlink)\s*\(|\.(?:write_text|write_bytes)\s*\(|\bopen\s*\([^)]*['"][wax]\+?b?['"]|\bos\.(?:rename|remove|unlink)\s*\(|\bshutil\.(?:move|copy\w*|rmtree)\s*\(|Set-Content|Out-File|Add-Content|Remove-Item|Rename-Item|Move-Item/i;
+// 2026-11-18 (false edits, rule 6): the target of each write call is read. A string literal that is no code path is
+// no edit; a target that is a variable or an expression is unknown and counts ('<unknown>'), except when the
+// command runs in a temp folder (see commandFolder) and no absolute code path appears in its text.
+const LIT_ARG = /^\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`([^`$\\]*)`)\s*$/;
+const litOf = (a) => { const m = LIT_ARG.exec(String(a)); return m ? (m[1] ?? m[2] ?? m[3]) : null; };
+// The first `max` top-level arguments of the call whose '(' is at text[open].
+function callArgs(text, open, max) {
+  const args = []; let depth = 0, q = null, cur = '';
+  for (let i = open + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { cur += ch; if (ch === '\\') { cur += text[++i] || ''; } else if (ch === q) q = null; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { q = ch; cur += ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    if (ch === ')' || ch === ']' || ch === '}') { if (depth === 0) { args.push(cur); return args; } depth--; }
+    if (ch === ',' && depth === 0) { args.push(cur); cur = ''; if (args.length >= max) return args; continue; }
+    cur += ch;
+  }
+  args.push(cur);
+  return args;
+}
+const JS_WRITE = /\b(writeFileSync|appendFileSync|renameSync|rmSync|unlinkSync|copyFileSync|cpSync|writeFile|appendFile|unlink)\s*\(/g;
+const PY_WRITE = /\b(?:os\.(?:rename|remove|unlink)|shutil\.(?:move|copy\w*|rmtree))\s*\(/g;
+const PS_WRITE = /\b(?:Set-Content|Out-File|Add-Content|Remove-Item|Rename-Item|Move-Item)\b/gi;
+function writeCalls(text) {
+  const calls = [];   // each: a literal target, or null when it is not a string literal
+  const add = (a) => calls.push(a === undefined ? null : a);   // the raw text of the target; resolved by interpreterWrites
+  for (const m of text.matchAll(JS_WRITE)) {
+    const a = callArgs(text, m.index + m[0].length - 1, 2);
+    if (/^(?:renameSync|copyFileSync|cpSync)$/.test(m[1])) { if (m[1] === 'renameSync') add(a[0]); add(a[1]); } else add(a[0]);
+  }
+  for (const m of text.matchAll(/\bopen\s*\(/g)) {
+    const a = callArgs(text, m.index + m[0].length - 1, 3);
+    const mode = a.length > 1 ? litOf(a[1].replace(/^\s*mode\s*=/, '')) : null;   // (the mode, not the target)
+    if (mode !== null && /[wax]/.test(mode) && /^[rwax+bt]+$/.test(mode)) add(a[0]);
+  }
+  for (const m of text.matchAll(PY_WRITE)) for (const x of callArgs(text, m.index + m[0].length - 1, 2)) add(x);
+  for (const m of text.matchAll(/\.(?:write_text|write_bytes)\s*\(/g)) {
+    const r = /Path\(\s*('[^']*'|"[^"]*")\s*\)\s*$/.exec(text.slice(0, m.index));
+    calls.push(r ? r[1] : null);
+  }
+  for (const m of text.matchAll(PS_WRITE)) {
+    const rest = text.slice(m.index + m[0].length).split(/[|;\n]|&&|\|\|/)[0];
+    const w = tokenize(rest);
+    let target;
+    const n = w.findIndex((x) => /^-(?:path|filepath|literalpath|destination)$/i.test(x));
+    if (n !== -1) target = w[n + 1]; else target = pathArgs(w)[0];
+    calls.push(target !== undefined && !/[$`(]/.test(target) ? JSON.stringify(target) : null);
+  }
+  return calls;
+}
+// The temp folder (and only when no git work tree lives there) is never the project.
+function tempFolder(base) {
+  if (!base) return false;
+  const b = stripQuotes(base).replace(/\\/g, '/').replace(/\/+$/, '');
+  return (TEMP_DIR.test(b) || /^\/(?:private\/)?tmp(?:\/|$)/.test(b)) && !isCodeFile(b + '/zz');
+}
+// A code name, also with a glob in it (`scripts/remote/*.sh` is a code target: isCodePath rejects the star itself).
+function codeTarget(p, base) {
+  const s = inFolder(p, base);
+  return isCodeToken(s) || (/[*?]/.test(s) && isCodeToken(s.replace(/[*?]+/g, 'x')));
+}
+// The folder a command works in: the first `cd <dir>` of the command line when it is in the temp folder
+// ('' for none). The segments' variables are already expanded. Returns { base, from } (from: the segment index).
+function commandFolder(segs) {
+  for (let i = 0; i < segs.length; i++) {
+    const { program, args } = programArgs(segs[i]);
+    if (!/^(?:cd|pushd|set-location|sl|chdir)$/.test(program)) continue;
+    const d = args.find((a) => !/^-/.test(a));
+    if (d === undefined) return { base: undefined, from: i };
+    const dir = stripQuotes(d).replace(/\\/g, '/').replace(/^\/([A-Za-z])(?=\/|$)/, '$1:');
+    return { base: tempFolder(dir) ? dir : undefined, from: i };
+  }
+  return { base: undefined, from: -1 };
+}
+function interpreterWrites(seg, base) {
+  const { program } = programArgs(seg);
+  if (!INTERPRETER.test(program) || !SCRIPT_WRITE.test(seg)) return [];
+  const text = String(seg).replace(/\\(["'])/g, '$1');
+  const calls = writeCalls(text);
+  const out = [];
+  if (!calls.length) {   // a write the call reader does not know: any string that is a code name
+    for (const re of [/'([^'\r\n]*)'/g, /"([^"\r\n]*)"/g, /`([^`\r\n]*)`/g]) {
+      for (const m of text.matchAll(re)) {
+        const lit = m[1];
+        // The tail of a path built at run time (`process.env.TEMP + '/x.json'`) is not a place in the project.
+        if (/^[/\\]/.test(lit) && /\+$/.test(text.slice(0, m.index).trimEnd())) continue;
+        if (/^[^\s'"`()=;|&<>]+$/.test(lit) && isCodeToken(inFolder(lit, base))) out.push(lit);
+      }
+    }
+    return out;
+  }
+  // `process.argv[N]` / `sys.argv[N]` is the N-th word after the one-liner's text (`node -e "<text>" a b`).
+  const words = tokenize(seg);
+  const flag = words.findIndex((w) => /^(?:-e|-c|-p|--eval|-command)$/i.test(w));
+  const extras = flag === -1 ? [] : words.slice(flag + 2);
+  let unknown = false;
+  for (let c of calls) {
+    let lit = c === null ? null : litOf(c);
+    // The tail of a path built at run time (`process.env.TEMP + '/x.json'`, `dir + "/a.ts"`) is not a place in the project.
+    if (c !== null && /^\s*[^'"`\s+][^'"`+]*\+\s*(?:'[\\/][^']*'|"[\\/][^"]*"|`[\\/][^`$]*`)\s*$/.test(c)) continue;
+    if (lit === null && c !== null) {
+      // a variable set once from the arguments or a literal (`const p = process.argv[1]`, `p = "a.ts"`)
+      const alias = /^\s*([A-Za-z_]\w*)\s*$/.exec(c);
+      const defs = alias ? [...text.matchAll(new RegExp('(?:\\b(?:const|let|var)\\s+|^|[;\\n]\\s*)' + alias[1] + '\\s*=\\s*([^;\\n,]+)', 'g'))].map((d) => d[1].trim()) : [];
+      if (defs.length === 1) c = defs[0];
+      lit = litOf(c);
+    }
+    if (lit === null && c !== null) {
+      const v =/^\s*(?:process|sys)\.argv\[(\d+)\]\s*$/.exec(c);
+      const w = v ? extras[Number(v[1]) - 1] : undefined;
+      if (w !== undefined && !/[$`]/.test(w)) lit = w;
+    }
+    if (lit === null) unknown = true;
+    else if (codeTarget(lit, base)) out.push(lit);
+  }
+  if (unknown) {
+    const temp = tempFolder(base);
+    // In a temp folder a target that is a variable lands there; only an absolute code path in the text could leave it.
+    const leaves = temp && [...text.matchAll(/(['"`])((?:[A-Za-z]:[\\/]|\/|~)[^'"`\r\n]*)\1/g)].some((m) => codeTarget(m[2], undefined));
+    if (!temp || leaves) out.push('<unknown>');
+  }
+  return out;
+}
+// splitSegments drops a heredoc's body, so an interpreter fed by one (`python - <<'EOF' … open('src/App.ts','w') … EOF`)
+// is read from the whole command: the index of the segment that starts such a heredoc, or -1.
+const HEREDOC_START = /<<-?\s*["']?[A-Za-z_]/;
+function heredocWriteSegment(segs, cmd, base) {
+  const s = String(cmd || '');
+  if (!HEREDOC_START.test(s)) return -1;
+  const re = /^([^\n]*?)<<-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)\2[^\n]*\n/gm;
+  let m, writes = false;
+  while ((m = re.exec(s)) !== null) {
+    const start = re.lastIndex;
+    let j = start, end = s.length;
+    while (j < s.length) {
+      let nl = s.indexOf('\n', j);
+      if (nl === -1) nl = s.length;
+      if (s.slice(j, nl).replace(/^\t+/, '').trim() === m[3]) { end = j; break; }
+      j = nl + 1;
+    }
+    if (interpreterWrites(m[1].split(/&&|\|\||;|\|/).pop() + ' ' + s.slice(start, end), base).length) writes = true;
+    re.lastIndex = Math.max(re.lastIndex, end);
+  }
+  return writes ? segs.findIndex((x) => INTERPRETER.test(programArgs(x).program) && HEREDOC_START.test(x)) : -1;
+}
+// A download written onto a file: `curl -o <file>`, `wget -O <file>`, `-OutFile <file>`.
+function downloadWrites(seg, base) {
+  const { program, args } = programArgs(seg);
+  if (!/^(?:curl|wget|invoke-webrequest|iwr)$/.test(program)) return [];
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    let v = null;
+    if (program === 'curl' && (a === '--output' || /^-[a-zA-Z]*o$/.test(a))) v = args[++i];                 // -o f, -sSo f
+    else if (program === 'curl' && /^-[a-zA-Z]*o[^-\s]+$/.test(a)) v = a.replace(/^-[a-zA-Z]*?o/, '');       // -of
+    else if (program === 'wget' && (a === '-O' || a === '--output-document')) v = args[++i];
+    else if (/^(?:invoke-webrequest|iwr)$/.test(program) && /^-outfile$/i.test(a)) v = args[++i];
+    else if (/^--(?:output|output-document)=/i.test(a)) v = a.slice(a.indexOf('=') + 1);
+    // 2026-11-18 (false edits): a download counts only when it is saved as a source file (a .json, .zip or page
+    // saved for a look is data); folder and relative name are judged in the command's folder.
+    if (v && SOURCE_END.test(stripQuotes(v)) && codeTarget(v, base)) out.push(stripQuotes(v));
+  }
+  return out;
+}
+const SOURCE_END = /\.(?:cs|ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|kt|rs|swift|sh|ps1|sql|css|scss)$/i;
+
 // base: the folder the segment runs in, for relative names (see inFolder).
-function segmentEditPaths(seg, base, wide) {
+// afterCheck: the segment before this one is a build/test run, so a display step here (`| tee build.log`,
+// `| tail`) only shows that run's output and writes no code (2026-11-18: a log is a file, and files are code now).
+const REPORT_FILE = /\.(?:txt|log|diff|patch)$/i;
+function isReporter(seg) {
+  const { program, args } = programArgs(seg);
+  if (program === 'ls') return true;
+  if (program === 'git') return /^(?:diff|log|show|status)$/.test(gitSubcommand(args).sub);
+  if (program === 'gh') return String(args[0]).toLowerCase() === 'pr' && /^(?:view|diff)$/i.test(String(args[1]));
+  return false;
+}
+// afterReader: the segment before this one is a read-only reporter (see isReporter).
+function segmentEditPaths(seg, base, wide, afterCheck, afterReader) {
   const out = [];
   let m;
   // A command sent over ssh runs on another machine: its git checkout or file writes change nothing
@@ -522,23 +693,93 @@ function segmentEditPaths(seg, base, wide) {
   if (/^(?:ssh|scp)(?:\.exe)?$/i.test(String(tokenize(seg)[0] || '').split(/[\\/]/).pop())) {
     const unquoted = seg.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
     REDIRECT.lastIndex = 0;
-    while ((m = REDIRECT.exec(unquoted)) !== null) if (isCodePath(inFolder(m[2], base))) out.push(stripQuotes(m[2]));
+    while ((m = REDIRECT.exec(unquoted)) !== null) if (isCodeToken(inFolder(m[2], base))) out.push(stripQuotes(m[2]));
     return [...new Set(out)];
   }
-  REDIRECT.lastIndex = 0;
-  while ((m = REDIRECT.exec(seg)) !== null) {
-    if (isCodePath(inFolder(m[2], base))) out.push(stripQuotes(m[2]));
-  }
-  if (WRITE_TOOL.test(seg)) {
+  if (afterCheck && isDisplaySegment(seg)) return [];   // callers pass afterCheck for a build/test run or an evidence run
+  // The output of a build or test run sent to a file is the run's report, not code it wrote.
+  const checkRun = segmentIsVerify(seg) || isEvidenceCommand(seg);
+  // 2026-11-18 (round 3): the targets come from redirectTargets, which blanks quoted text first (`=>`, `->` and `>` in
+  // a script, a query or a commit message are no redirection). A read-only reporter (git diff/log/show/status,
+  // gh pr view/diff, ls) saved to a .txt/.log/.diff/.patch file writes a report, not code; so does `| tee <that>` after one.
+  const reporter = isReporter(seg), teeAfterReader = !!afterReader && programArgs(seg).program === 'tee';
+  const isReport = (t) => (reporter || teeAfterReader) && REPORT_FILE.test(stripQuotes(t));
+  if (!checkRun) for (const t of redirectTargets(seg)) if (!isReport(t) && codeTarget(t, base)) out.push(stripQuotes(t));
+  // 2026-11-18 (false edits): the write words are looked for outside quotes (a "copy" in a --set text is no cp),
+  // except in a nested shell (`bash -c "cp a b"`).
+  const shellWords = /^(?:bash|sh|zsh|dash|pwsh|powershell|cmd)$/.test(programArgs(seg).program);
+  if (WRITE_TOOL.test(shellWords ? seg : blankQuoted(seg))) {
     const tokens = tokenize(seg);
     const program = String(tokens[0] || '').split(/[\\/]/).pop().replace(/\.exe$/i, '');
-    const written = COPY_PROGRAM.test(program) ? copyWrites(tokens) : null;
-    for (const t of written || tokens) if (isCodePath(inFolder(t, base))) out.push(stripQuotes(t));
+    let written = COPY_PROGRAM.test(program) ? copyWrites(tokens) : null;
+    // `docker cp <container>:<file> <dest>` reads a file out of a container: only a local destination is written.
+    if (/^(?:docker|podman)$/i.test(program) && /^cp$/i.test(tokens[1] || '')) {
+      const rest = tokens.slice(2).filter((t) => !t.startsWith('-'));
+      const dest = rest.length > 1 ? rest[rest.length - 1] : null;
+      written = dest && !/^[^\s\\/:]{2,}:/.test(dest) ? [dest] : [];
+    }
+    for (const t of written || tokens) if (!isReport(t) && codeTarget(t, base)) out.push(stripQuotes(t));
   }
-  for (const t of deletedPaths(seg)) if (isCodePath(inFolder(t, base))) out.push(stripQuotes(t));
+  for (const t of deletedPaths(seg)) if (codeTarget(t, base)) out.push(stripQuotes(t));
+  out.push(...downloadWrites(seg, base));
+  if (interpreterWrites(seg, base).length) out.push('<generated>');
   if (PATHLESS_WRITE.test(seg) || formatterWrites(seg)) out.push('<generated>');
   if (gitContentChange(seg, wide)) out.push(remoteCheckout(seg) ? '<git-remote>' : '<git>');
   return [...new Set(out)];
+}
+
+// 2026-11-18 (audit 3 repair): a content change, for the note check's refutation: any change that can alter what a
+// checker read after its launch. Wider than isCodePath: every file but prose (.md) and the places that are never
+// the project (EXEMPT, the temp folder); a git move, git apply and patch; a shell write to a named non-code file.
+// A formatter run (<generated>) is left out, as in noteEditSeq.
+function isContentPath(p) {
+  p = stripQuotes(p).replace(/[),;]+$/, '');
+  // 2026-11-18 (scoped staleness): prose (.md) counts too, with its path: a refutation that cites README.md:1 is
+  // cancelled when README.md changes. A change cancels a refutation by its path (see changeCancels), so a prose edit
+  // of another file still cancels nothing.
+  if (!p) return false;
+  p = collapseDots(p.replace(/\\/g, '/')).replace(/^.*(?:^|\/)\.claude\/worktrees\/[^/]+\//i, '');
+  if (EXEMPT.test(p)) return false;
+  return !TEMP_DIR.test(p) || inTempWorkTree(p);
+}
+const WIDE_WRITE = /(^|[\s(])(?:sed\s+(?:-[a-zA-Z]*i|--in-place)|Set-Content|WriteAllText|WriteAllLines|cp\s|mv\s|copy\s|move\s|Copy-Item|Move-Item)/i;
+// 2026-11-18 (scoped staleness): returns the paths the segment writes; '' is a change with no known path (git apply,
+// patch); [] is no change.
+function contentChange(seg, base) {
+  const s = String(seg);
+  if (/^(?:ssh|scp)(?:\.exe)?$/i.test(String(tokenize(s)[0] || '').split(/[\\/]/).pop())) return [];
+  // 2026-11-18 (repair 6): patch and git apply count only as the program of the segment, and a git apply that only
+  // checks (--check, --stat, --numstat, --summary) changes no file; the word "patch" in a curl method or a grep is no patch.
+  const head = programArgs(s.replace(/^\s*\(\s*/, ''));
+  if (head.program === 'patch') return [''];
+  if (head.program === 'git') {
+    const g = gitSubcommand(head.args);
+    if (g.sub === 'apply' && !g.rest.some((a) => /^--(?:check|stat|numstat|summary)$/.test(a))) return [''];
+  }
+  const hasExt = (t) => /\.[A-Za-z0-9]{1,10}["']*$/.test(String(t)) && isContentPath(inFolder(t, base));
+  // 2026-11-18 (repair 3): a shell write or delete of any file, prose too (>, >>, tee, Add-Content, Out-File, rm, git rm,
+  // del, Remove-Item), by the same reader check-lock-guard uses; a heredoc body is text, not a command.
+  const wrote = segmentWritePaths(withoutHeredocBodies(s)).filter(hasExt);
+  if (!WIDE_WRITE.test(s)) return wrote;
+  const tokens = tokenize(s);
+  const program = String(tokens[0] || '').split(/[\\/]/).pop().replace(/\.exe$/i, '');
+  const copied = COPY_PROGRAM.test(program) ? copyWrites(tokens) : null;
+  return [...new Set([...wrote, ...(copied || tokens.slice(1)).filter(hasExt).map((t) => stripQuotes(String(t)))])];
+}
+// 2026-11-18 (repair 6): a git command that moves no file content: a new branch from where it stands, a soft or mixed
+// reset, a restore of the index only. It cancels no refutation (the note check only). Every other git form stays a move.
+function gitMovesNoContent(seg) {
+  const s = String(seg);
+  if (/\$\(|`|[<>]\(/.test(s)) return false;
+  const { program, args } = programArgs(s.replace(/^\s*\(\s*/, ''));
+  if (program !== 'git') return false;
+  const { sub, rest } = gitSubcommand(args);
+  const flags = rest.filter((a) => a.startsWith('-')), plain = rest.filter((a) => !a.startsWith('-'));
+  if (sub === 'checkout') return flags.length === 1 && /^-[bB]$/.test(flags[0]) && plain.length === 1;
+  if (sub === 'switch') return flags.length === 1 && /^-[cC]$/.test(flags[0]) && plain.length === 1;
+  if (sub === 'reset') return !flags.some((a) => /^--(?:hard|merge|keep)$/.test(a));
+  if (sub === 'restore') return flags.some((a) => /^(?:--staged|-S)$/.test(a)) && !flags.some((a) => /^(?:--worktree|-W)$/.test(a) || /^-[A-Za-z]*W/.test(a));
+  return false;
 }
 
 // A deleted code file changes the code like an edit; a formatter or fixer rewrites the files it is
@@ -607,6 +848,8 @@ function blankQuoted(s) {
   let out = '', q = null;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
+    // 2026-11-18: a backslash escapes the next character (`\"` inside a double-quoted string, `\"` outside quotes).
+    if (ch === '\\' && q !== "'" && i + 1 < s.length) { out += q ? '__' : ch + s[i + 1]; i++; continue; }
     if (q) { out += ch === q ? ch : '_'; if (ch === q) q = null; continue; }
     if (ch === '"' || ch === "'") q = ch;
     out += ch;
@@ -678,7 +921,10 @@ function expandVariables(segs) {
 function shellEditPaths(cmd) {
   const out = [];
   const segs = expandVariables(splitSegments(cmd));
-  for (let i = 0; i < segs.length; i++) out.push(...segmentEditPaths(segs[i], undefined, i + 1 < segs.length && readsStdin(segs[i + 1])).map((p) => GIT_CHANGE.test(p) ? '<git>' : p));
+  // 2026-11-18 (false edits): a name is judged in the folder the command moved into, when that is a temp folder.
+  const folder = commandFolder(segs);
+  if (heredocWriteSegment(segs, cmd, folder.base) !== -1) out.push('<generated>');
+  for (let i = 0; i < segs.length; i++) out.push(...segmentEditPaths(segs[i], i > folder.from ? folder.base : undefined, i + 1 < segs.length && readsStdin(segs[i + 1]), i > 0 && (segmentIsVerify(segs[i - 1]) || isEvidenceCommand(segs[i - 1])), i > 0 && isReporter(segs[i - 1])).map((p) => GIT_CHANGE.test(p) ? '<git>' : p));
   return [...new Set(out)];
 }
 
@@ -768,10 +1014,27 @@ function resultText(block, entry) {
   return s;
 }
 
-function verifyFailed(text, isError) {
+// 2026-11-18 (stop gate promise, finding 6): failure-SHAPED words in the output of a run that passed: a log line
+// "3 failed rows listed", a passing test named "... 2 failed checks ...". The runner's own exit code (0, visible)
+// and its own pass line outrank such words; the strong markers (Build FAILED, Failed!, an exit-code line, npm ERR!,
+// a test listed as failed) always count. Hidden exit codes keep every marker (see hiddenVerificationResult).
+const LOOSE_FAIL = new Set(FAIL_MARKERS.filter((re) => [/\b[1-9]\d* failed\b/i, /\[FAIL\]/, /\berror (CS|MSB|TS|NU|NETSDK)\d{3,5}\b/, /\): error [A-Z]{2,}\d{2,}\s*:/].some((x) => x.source === re.source)));
+const RUNNER_PASS_LINES = [].concat(...Object.values(PASS_MARKERS));
+function verifyFailed(text, isError, exitZero) {
   if (isError) return true;
   const t = String(text || '').replace(ANSI, '');
-  return FAIL_MARKERS.some((re) => re.test(t));
+  const loose = exitZero === true && RUNNER_PASS_LINES.some((re) => re.test(t));
+  return FAIL_MARKERS.some((re) => !(loose && LOOSE_FAIL.has(re)) && re.test(t));
+}
+
+// 2026-11-18 (finding 2): a run that tested nothing earns no credit: a mistyped filter ("No test matches the given
+// testcase filter"), go's "[no tests to run]", jest's "No tests found", vitest's "No test files found", pytest's
+// "no tests ran", a total of 0. Not when the same output also shows tests that passed (several test projects).
+const NO_TEST_RAN = /\bNo tests? (?:matches|found|files? found|is available|to run|ran)\b|\[no tests to run\]|\bcollected 0 items\b|\bTotal(?: tests)?:\s+0\b|^\s*(?:ℹ |# )tests 0\s*$|\bTests:\s+0 total\b|^\s*Tests\s+no tests\b|\bPassed:\s+0,\s+Skipped:\s+\d+,\s+Total:\s+0\b/im;
+const SOME_TEST_PASSED = /\bPassed:\s+[1-9]|\bTests\s+(?:\d+ \w+ \| )?[1-9]\d* passed|\bTests:.*\b[1-9]\d* passed|^\s*(?:ℹ |# )pass [1-9]|^\s*\d+ passed\b|\b[1-9]\d* passed\b/im;
+function noTestRan(text) {
+  const t = String(text || '').replace(ANSI, '');
+  return NO_TEST_RAN.test(t) && !SOME_TEST_PASSED.test(t);
 }
 
 function userRejected(block, entry) {
@@ -899,10 +1162,13 @@ function verificationResult(block, entry) {
   const t = entry.toolUseResult || {};
   const text = resultText(block, entry);
   const exit = t.task?.exitCode ?? t.exitCode ?? t.exit_code;
-  if (verifyFailed(text, block.is_error === true) || t.interrupted === true ||
-      (exit !== undefined && exit !== null && Number(exit) !== 0) ||
+  const exitSeen = exit !== undefined && exit !== null;
+  if (verifyFailed(text, block.is_error === true, !exitSeen || Number(exit) === 0) || t.interrupted === true ||
+      (exitSeen && Number(exit) !== 0) ||
       /^(failed|killed|cancelled|canceled)$/.test(t.task?.status || '')) return 'failed';
   if (stillRunning(t, text)) return 'pending';
+  // A run that tested nothing proves nothing: no credit, no failure (finding 2, 2026-11-18).
+  if (noTestRan(text)) return 'none';
   return 'passed';
 }
 function stillRunning(t, text) {
@@ -923,6 +1189,7 @@ function hiddenVerificationResult(block, entry, hidden) {
   if (FAIL_MARKERS.some((re) => re !== EXIT_LINE && re.test(text)) || t.interrupted === true ||
       /^(killed|cancelled|canceled)$/.test(t.task?.status || '') || (hidden.realExit && nonZero)) return 'failed';
   if (stillRunning(t, text)) return 'pending';
+  if (noTestRan(text)) return 'none';
   const runners = hidden.runners || [];
   return runners.length && runners.every((r) => (PASS_MARKERS[r] || []).some((re) => re.test(text))) ? 'passed' : 'none';
 }
@@ -1003,11 +1270,26 @@ function proofResult(st, rec, blk, entry, outcome) {
   return { outcome: run.exit === 0 ? (green ? 'passed' : 'none') : 'failed', green };
 }
 
+// 2026-11-18 (finding 5): a stream redirection (`2>&1`, `> check.log`) is no part of the command, and the spec
+// may be given as `--spec=<file>`. The installed helper lives under some user's .claude folder; any other
+// evidence.mjs is a stray script.
 function isEvidenceCommand(segment) {
-  const words = tokenize(segment);
-  // The installed helper lives under some user's .claude folder; any other evidence.mjs is a stray script.
-  return words.length === 4 && /^node(?:\.exe)?$/i.test((words[0] || '').split(/[\\/]/).pop()) &&
-    /(?:^|\/)\.claude\/skills\/gate\/scripts\/evidence\.mjs$/i.test((words[1] || '').replace(/\\/g, '/')) && words[2] === '--spec';
+  const words = stripRedirects(tokenize(segment));
+  if (!(/^node(?:\.exe)?$/i.test((words[0] || '').split(/[\\/]/).pop()) &&
+    /(?:^|\/)\.claude\/skills\/gate\/scripts\/evidence\.mjs$/i.test((words[1] || '').replace(/\\/g, '/')))) return false;
+  return (words.length === 4 && words[2] === '--spec') || (words.length === 3 && /^--spec=\S/.test(words[2]));
+}
+// The one evidence run of a command, in its common honest forms: a leading `cd <dir> &&`, a display tail
+// (`| tail`, `| head`, `| tee`) after it, a redirect of its output. { decorated } is true when its output may not
+// reach the result (a redirect to a file, a tail that cuts it): no receipt line then is no failure, only no credit.
+// Anything else around it (a second command) is not read.
+const LEADING_CD = /^\s*(?:cd|Set-Location|pushd)\s+(?:\/d\s+)?(?:"[^"]+"|'[^']+'|[^\s;&|]+)\s*$/i;
+function evidenceRun(segs) {
+  const at = segs.findIndex(isEvidenceCommand);
+  if (at === -1 || segs.slice(at + 1).some((s) => !isDisplaySegment(s))) return null;
+  if (segs.slice(0, at).some((s) => !LEADING_CD.test(String(s)))) return null;
+  const toFile = tokenize(segs[at]).some((w) => !/^\d*>&(?:\d+|-)$/.test(w) && /^(?:&>|\d*>>?|<)/.test(w));
+  return { decorated: toFile || at < segs.length - 1 };
 }
 
 // A receipt's command is a list of words, not a shell line. A run on the test machine is judged from
@@ -1033,8 +1315,9 @@ function checkReceipt(block, entry) {
       if (!/^[a-f0-9-]{36}$/i.test(record.runId || '') || typeof record.cwd !== 'string' || typeof record.executable !== 'string' || !Array.isArray(record.args) || record.args.some(arg => typeof arg !== 'string') || !['passed', 'failed'].includes(record.status)) continue;
       if (!receiptIsVerify(record.executable, record.args)) continue;
       const invalidTarget = invalidVerificationTarget(record.executable, record.args, record.cwd);
-      const passed = !invalidTarget && record.status === 'passed' && record.nativeExitCode === 0 && !record.reason && !record.signal && verificationResult(block, entry) === 'passed';
-      return { key: record.cwd.replace(/\\/g, '/').toLowerCase() + '\n' + JSON.stringify([record.executable, ...record.args]), outcome: passed ? 'passed' : 'failed', record };
+      const seen = !invalidTarget && record.status === 'passed' && record.nativeExitCode === 0 && !record.reason && !record.signal ? verificationResult(block, entry) : 'failed';
+      // A receipt of a run that tested nothing ('none') is no passing receipt and no failure (finding 2, 2026-11-18).
+      return { key: record.cwd.replace(/\\/g, '/').toLowerCase() + '\n' + JSON.stringify([record.executable, ...record.args]), outcome: seen === 'passed' ? 'passed' : seen === 'none' ? 'none' : 'failed', record };
     } catch { /* incomplete or forged output is not a completed check */ }
   }
   return null;
@@ -1232,9 +1515,29 @@ function handBack(text) {
 const INTERIM_RESULT = /^\s*This agent has not reported yet\b/i;
 const INTERIM_SUMMARY = /\bis waiting on its own background work\b/i;
 const interimNotice = (note) => INTERIM_RESULT.test(note.result || '') || INTERIM_SUMMARY.test(note.summary || '');
+// 2026-11-18 (finding 7): is this a second copy of a report this agent already gave? A queued or delivered second
+// copy of an old hand-back, arriving after a SendMessage moved the run's launch, would otherwise credit the
+// follow-up run before it has reported. A run reaches the transcript through two channels, its hand-back ('hand')
+// and its finish notice ('notice'). Judged by the report text: an identical text whose run has not yet come through
+// both channels is a copy (the same channel again, or the other one); once both came, the run is complete and the
+// same text later is a new run's report (a re-check that finds the same thing). Remembers what it saw.
+function reportSeen(agent, text, kind) {
+  const t = String(text || '').replace(/\r/g, '').trim();
+  if (!t) return false;
+  const mark = require('crypto').createHash('sha1').update(t).digest('hex');
+  if (!agent.seen || typeof agent.seen !== 'object' || Array.isArray(agent.seen)) agent.seen = {};
+  const kinds = agent.seen[mark];
+  if (Array.isArray(kinds) && !(kinds.includes('hand') && kinds.includes('notice'))) {
+    if (!kinds.includes(kind)) kinds.push(kind);
+    return true;
+  }
+  agent.seen[mark] = [kind];
+  return false;
+}
 // A reviewer run is complete: credit it for the push gate and the task timer.
 function creditReviewer(st, agent, seq, at) {
   reviewDone(st, agent.at, String(at || ''));
+  agent.done = true;   // 2026-11-18: this run has reported (res.lastRunningReviewer, the review record)
   if (agent.launch > st.res.lastReviewerRun) { st.res.lastReviewerRun = agent.launch; st.res.lastReviewerResult = seq; }
 }
 
@@ -1262,10 +1565,12 @@ function recommendReport(text) {
 // Question; its Bug/Gap/… lines are design input for the author, not review notes.
 // seat: who wrote the report (see reviewerSeat, expertSeat, FILE_SEAT). Each note's seat and the checklist line
 // it names go in st.noteSeats and st.noteClasses, at the note's index (2026-11-17, review score).
-function addReport(st, report, key, seq, at, seat, questionsOnly = false) {
+const expertReadKey = (id, expert) => (expert.msg ? id + '@' + expert.launch + '~' + expert.msg : '');
+// readKey: the note checker's one-reading key, which a SendMessage to it changes while its launch stays (2026-11-18).
+function addReport(st, report, key, seq, at, seat, questionsOnly = false, readKey = '') {
   if (typeof st.since === 'number') { const t = Date.parse(at || ''); if (Number.isFinite(t) && t < st.since) return; }
   // A note checker's report (2026-11-17, user decision): its REFUTED lines make a note refutable; it adds no note.
-  if (seat === NOTE_CHECK_SEAT) { readRefutations(st, report, key); return; }
+  if (seat === NOTE_CHECK_SEAT) { readRefutations(st, report, key, readKey); return; }
   const notes = st.res.reviewNotes;
   const classes = [];
   const unread = [];
@@ -1290,7 +1595,8 @@ function addReport(st, report, key, seq, at, seat, questionsOnly = false) {
     const seen = key ? st.reportKeys.some((k) => k.startsWith(key + '#') && (notes[Number(k.slice(key.length + 1)) - 1] || {}).text === note.text)
       : notes.some((n) => n.text === note.text);
     if (seen) continue;
-    notes.push({ n: notes.length + 1, kind: note.kind, text: note.text, outcome: null });
+    // asks (2026-11-18, audit 3): a Gap or Bug that asks the user to decide is the user's, like a Question.
+    notes.push({ n: notes.length + 1, kind: note.kind, text: note.text, outcome: null, ...(note.asks ? { asks: true } : {}) });
     st.noteSeqs.push(seq);
     st.noteSeats.push(seat || 'reviewer');
     st.noteClasses.push(classes[i] || '');
@@ -1317,36 +1623,73 @@ const FILE_LINE = /\w\.\w+[`*_"']*:\d+/;
 // the number, "K1", "1 and 2"); a prose line such as "CONFIRMED 1 file holds it" then only withdraws a refutation,
 // which is the safe side. m[1]: the numbers of the line.
 const NOT_REFUTED_RE = /^[ \t]*(?:(?:[-*•]|\d{1,3}[.)]|#{1,6}|>)[ \t]+)?[`*_ \t]*(?:CONFIRMED|UNSURE)[`*_]*[ \t]*:?[ \t]*[`*_]*(?:NOTE[ \t]+|K[ \t]*)?[`*_]*(\d{1,4}(?:(?:[ \t]*,[ \t]*|[ \t]+(?:and|&)[ \t]+)(?:K[ \t]*)?\d{1,4})*)(?!\d)/gim;
-function readRefutations(st, report, key) {
+// 2026-11-18 (audit 3, user decision): a note kind the checker never refutes. A Blocker and a Question go to the user;
+// the checker gives its view, the user's words close them.
+// A note that asks the user to decide (a Gap or Bug line with "you decide", asks: true) is the user's too.
+const NEVER_REFUTED = /^(?:Blocker|Question)$/;
+const neverRefuted = (note) => NEVER_REFUTED.test(note.kind) || note.asks === true;
+// One verdict of the checker run launched at `launch` for note n. refuted: the evidence of a valid REFUTED line, or
+// null for a verdict that is not a refutation (CONFIRMED, UNSURE, an invalid REFUTED); confirmed: a CONFIRMED line.
+// Verdicts apply in the order the checkers were LAUNCHED, not the order their results arrive: a result of an older
+// launch changes nothing for a note once a newer launch gave a verdict for it (st.verdictLaunch: { n, launch }).
+// A refutation holds for the newest launch only; a newer CONFIRMED reopens a note closed as refuted, while a note
+// closed by the user's words or as fixed stays closed.
+// 2026-11-18 (scoped staleness): answers are ordered by (launch, then the order the answers completed). reading is that
+// order: the number of the answer reading (the count of keys in st.reportKeys when it was read, which only grows). A later
+// answer of the SAME checker (a follow-up to it) beats its earlier one: REFUTED, then a CONFIRMED of the follow-up reopens.
+function giveVerdict(st, n, launch, reading, refuted, confirmed) {
+  const note = st.res.reviewNotes[n - 1];
+  if (!note || !(st.noteSeqs[n - 1] < launch)) return;
+  const known = st.verdictLaunch.find((v) => v.n === n);
+  if (known && known.launch > launch) return;
+  if (known) known.launch = launch; else st.verdictLaunch.push({ n, launch });
+  const at = st.refutable.findIndex((r) => r.n === n);
+  const held = at === -1 ? null : st.refutable[at];
+  if (refuted !== null) {
+    if (note.outcome || neverRefuted(note)) return;
+    if (held && held.reading === reading) return;   // the same answer named it twice: the first line stands
+    if (at !== -1) st.refutable.splice(at, 1);
+    st.refutable.push({ n, evidence: refuted.slice(0, NOTE_CHARS), launch, reading });
+    return;
+  }
+  if (!held) return;
+  if (!note.outcome) { st.refutable.splice(at, 1); return; }
+  if (confirmed && note.outcome === 'refuted' && held.reading !== reading) {
+    st.refutable.splice(at, 1);
+    note.outcome = null; delete note.evidence; delete note.problem;
+  }
+}
+function readRefutations(st, report, key, readKey = '') {
   const launch = key ? Number(String(key).slice(String(key).lastIndexOf('@') + 1)) : NaN;
   if (!Number.isFinite(launch)) return;
-  const notes = st.res.reviewNotes;
-  const text = String(report || '').replace(/\r/g, '').replace(FENCED, '');
+  const raw = String(report || '').replace(/\r/g, '');
+  // A refutation is read fence-free (code blocks blanked, same places); a CONFIRMED or UNSURE line is read in a code block
+  // too, as it only withdraws or reopens (2026-11-18, audit 3 repair: note-check.mjs reads it there as well).
+  const text = raw.replace(FENCED, (b) => b.replace(/[^\n]/g, ' '));
   // The checker's last verdict for a note wins (2026-11-17): the verdict lines of both kinds, in the order written.
-  const verdicts = [...[...text.matchAll(REFUTED_RE)].map((m) => ({ at: m.index, m })), ...[...text.matchAll(NOT_REFUTED_RE)].map((m) => ({ at: m.index, m, other: true }))]
+  const verdicts = [...[...text.matchAll(REFUTED_RE)].map((m) => ({ at: m.index, m })), ...[...raw.matchAll(NOT_REFUTED_RE)].map((m) => ({ at: m.index, m, other: true }))]
     .sort((a, b) => a.at - b.at);
   // One reading per checker run: a second copy of the run (hand-back and finish notice) must not re-arm a refutation
-  // that a later run withdrew.
+  // that a later run withdrew. A SendMessage to the checker gives a reading of its own (readKey), never a new launch.
   if (verdicts.length) {
-    const ncKey = key + '#nc';
+    // 2026-11-18 (repair 5): the reading is keyed by the answer's own text, not by a SendMessage number: another text from the
+    // same checker is a later reading (a follow-up sent by id or by name, or none seen); the same text is a copy.
+    const ncKey = key + '#nc~' + require('crypto').createHash('sha1').update(raw.replace(/\s+/g, ' ').trim()).digest('hex').slice(0, 16);
     if (st.reportKeys.includes(ncKey)) return;
     st.reportKeys.push(ncKey);
   }
+  const reading = st.reportKeys.length;   // the order the answers were read in (see giveVerdict)
   for (const { m, other } of verdicts) {
     if (other) {
-      // CONFIRMED or UNSURE: an open note is no longer refutable; a note already closed stays as it is.
-      for (const num of m[1].match(/\d+/g)) {
-        const n = Number(num);
-        const held = st.refutable.findIndex((r) => r.n === n);
-        if (notes[n - 1] && !notes[n - 1].outcome && held !== -1) st.refutable.splice(held, 1);
-      }
+      // CONFIRMED or UNSURE: an open note is no longer refutable. A CONFIRMED of a newer launch also reopens a note
+      // closed as refuted (2026-11-18); a note closed by the user's words or as fixed stays closed.
+      const confirmed = /^[^A-Za-z]*CONFIRMED/i.test(m[0]);
+      for (const num of m[1].match(/\d+/g)) giveVerdict(st, Number(num), launch, reading, null, confirmed);
       continue;
     }
-    const n = Number(m[1]);
-    const note = notes[n - 1];
+    // A REFUTED line without a file and line, or too short, is no refutation: for the newest launch it withdraws one.
     const evidence = m[2].replace(/[`*_\s]+$/, '').trim();
-    if (!note || note.outcome || note.kind === 'Blocker' || !(st.noteSeqs[n - 1] < launch) || evidence.length < 12 || !FILE_LINE.test(evidence)) continue;
-    if (!st.refutable.some((r) => r.n === n)) st.refutable.push({ n, evidence: evidence.slice(0, NOTE_CHARS) });
+    giveVerdict(st, Number(m[1]), launch, reading, evidence.length < 12 || !FILE_LINE.test(evidence) ? null : evidence, false);
   }
 }
 
@@ -1461,16 +1804,18 @@ function applyOutcomes(notes, seqs, words, plain, ctx) {
 function openNotesAfter(r, text) {
   const notes = (r && Array.isArray(r.reviewNotes) ? r.reviewNotes : []).map((n) => ({ ...n }));
   applyOutcomes(notes, (r && r.reviewNoteSeqs) || [], (r && r.reviewUserWords) || [], String(text || '').replace(FENCED, ''),
-    { seq: Infinity, edits: (r && r.reviewEditSeqs) || [], passes: (r && r.reviewPassSeqs) || [], refutable: (r && r.reviewRefutable) || [] });
+    { seq: Infinity, edits: (r && r.reviewEditSeqs) || [], changes: (r && r.reviewChangeSeqs) || [], passes: (r && r.reviewPassSeqs) || [], refutable: (r && r.reviewRefutable) || [] });
   return notes.filter((n) => !n.outcome);
 }
 const FIXED_NEEDS_CHANGE = 'a fixed line needs a code change and a passing test after the note; a note that needs no change, or a text-only fix (a doc, a locale or a config file), is refuted by the note check or closed by the words the user typed';
-const REFUTE_NEEDS_CHECK = 'only a note the note check refuted can be closed as refuted (a Blocker: never)';
+const REFUTE_NEEDS_CHECK = 'only a note the note check refuted can be closed as refuted (a Blocker or a Question: never)';
+const REFUTE_QUESTION = 'a Question is closed only by the words the user typed: the note check gives its view to the user, it never closes a Question (nor a note that asks the user to decide)';
+const REFUTE_STALE = 'the code or a test changed after the note check started: run the note check again, and refute only on its newest answer';
 function applyOutcome(notes, seqs, words, n, kind, rest, ctx) {
   const note = notes[n - 1];
   if (!note || note.outcome) return;
   const said = String(rest).replace(/[`*\s]+$/, '').trim();
-  const c = ctx || { seq: Infinity, edits: [], passes: [], refutable: [] };
+  const c = ctx || { seq: Infinity, edits: [], changes: [], passes: [], refutable: [] };
   if (kind.toLowerCase() === 'fixed') {
     // `<what changed and its test>` is the format example, not an answer.
     if (!(said.length >= 12 && !/^<[^>]*>$/.test(said))) { note.problem = 'a fixed line must say what changed and its test (12 characters or more)'; return; }
@@ -1483,9 +1828,14 @@ function applyOutcome(notes, seqs, words, n, kind, rest, ctx) {
     return;
   }
   if (kind.toLowerCase() === 'refuted') {
-    // Only an independent note checker may refute, never a Blocker (user decision 2026-11-17).
+    // Only an independent note checker may refute, never a Blocker (user decision 2026-11-17) or a Question (2026-11-18).
+    if (note.kind === 'Question' || note.asks === true) { note.problem = REFUTE_QUESTION; return; }
     const hit = note.kind !== 'Blocker' && c.refutable.find((r) => r.n === n);
     if (!hit) { note.problem = REFUTE_NEEDS_CHECK; return; }
+    // 2026-11-18: the check holds only for the code it looked at: a code or test edit after its launch cancels it.
+    // Any content change counts (a git move, git apply, a locale file), not only a code or test edit (audit 3 repair).
+    // 2026-11-18 (scoped staleness): only a change of a file the note or the evidence names, or one with no known path.
+    if ((c.changes || []).some((e) => { const ch = typeof e === 'number' ? { seq: e, path: '' } : e; return ch.seq > hit.launch && ch.seq < c.seq && changeCancels(ch, note, hit.evidence); })) { note.problem = REFUTE_STALE; return; }
     note.outcome = 'refuted'; note.evidence = hit.evidence; delete note.problem;
     return;
   }
@@ -1500,14 +1850,15 @@ function applyOutcome(notes, seqs, words, n, kind, rest, ctx) {
 // The final text claims the review passed: a line that starts with `REVIEW: PASS` or `GATE: PASS`
 // (code blocks included: shown to the user, it still reads as a pass), or a code block with a command
 // that runs `git push` or `gh pr create` (the user pushes by hand when the author hands one over).
+// 2026-11-18: the push command counts wherever it stands in the text: a code block, inline backticks, quotes or
+// plain words ("Run `git push origin HEAD:x`" was not seen before). The command may follow a backtick or quote.
 const CLAIM_LINE = /^[ \t]*(?:REVIEW|GATE):[ \t]*PASS\b/m;
-const CODE_BLOCK = /(```|~~~)[^\n]*\n([\s\S]*?)\1/g;
-const PUSH_COMMAND = /(?:^|[\s;&|(])git(?:\.exe)?(?:\s+-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+))*\s+push\b|(?:^|[\s;&|(])gh(?:\.exe)?\s+pr\s+create\b/m;
+// 2026-11-18 (round 3): the command may follow any character but a word, dot or dash (bold, curly quotes, a path,
+// a prompt `C:\repo>`), and git options may stand between git and push (`git --no-pager push`).
+const PUSH_COMMAND = /(?<![A-Za-z0-9.-])git(?:\.exe)?["']?(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[A-Za-z][\w-]*(?:=\S+)?))*\s+push\b|(?<![A-Za-z0-9.-])gh(?:\.exe)?["']?\s+pr\s+create\b/;
 function claimsReview(text) {
   const s = String(text || '');
-  if (CLAIM_LINE.test(s)) return true;
-  for (const m of s.matchAll(CODE_BLOCK)) if (PUSH_COMMAND.test(m[2])) return true;
-  return false;
+  return CLAIM_LINE.test(s) || PUSH_COMMAND.test(s);
 }
 
 // The open notes as the stop gate and the push guard show them; at most 40 lines of notes.
@@ -1530,7 +1881,7 @@ function openNotesMessage(open) {
 // later call continues where the last one stopped (2026-11-12, audit H17).
 function newScanState() {
   return {
-    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastNonSyncEdit: -1, lastNonSyncEditPath: '', syncMoves: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastGreenProof: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1, lastRangeDiffProof: -1, lastRangeDiffNew: [], lastRangeDiffChanged: -1,
+    res: { lastEdit: -1, lastEditPath: '', lastNonGitEdit: -1, lastNonRemoteEdit: -1, remoteCheckouts: [], lastNonSyncEdit: -1, lastNonSyncEditPath: '', syncMoves: [], lastGitRepo: '', passedTrees: [], passingReceipts: [], lastVerify: -1, lastVerifyResult: -1, lastFailedVerify: -1, lastFailedVerifyStop: -1, lastProbeFailure: -1, lastGreenProof: -1, lastPendingVerify: -1, lastPendingVerifyStop: -1, lastCancelledVerify: -1, lastCancelledVerifyCommand: '', lastGate: -1, lastGateVerdict: '', lastGateAt: '', lastReview: -1, lastReviewVerdict: '', completedCheck: null, lastBoundCheck: -1, lastProviderRun: -1, lastProviderResult: -1, lastFailedProvider: -1, lastPendingProvider: -1, lastReviewerRun: -1, lastReviewerResult: -1, lastReviewText: '', lastRangeDiff: -1, lastRangeDiffProof: -1, lastRangeDiffNew: [], lastRangeDiffOld: [], lastRangeDiffChanged: -1, lastRunningReviewer: -1,
       // Reviewer notes: { n, kind, text, outcome: null | 'fixed' | 'user', problem? }; the open ones are set by
       // finishScan. turnClaim: an assistant text since the user's last message has a REVIEW/GATE: PASS line or a
       // handed-over push (the stop gate's answer when the host does not send the last message).
@@ -1566,7 +1917,9 @@ function newScanState() {
     helperEdits: [],           // helper agents' edits not yet placed in time: { t, file, pos, edit }
     helperPending: new Map(),  // '<helper file>\n<tool_use id>' -> a helper's edit awaiting its result
     editSeqs: [],              // seq of every code or test edit (audit 3: a fixed line needs one after its note)
-    refutable: [],             // notes a note checker refuted: { n, evidence }
+    changeSeqs: [],            // every content change: { seq, path } (path '' = unknown; see creditContent; 2026-11-18)
+    refutable: [],             // notes a note checker refuted: { n, evidence, launch, reading }
+    verdictLaunch: [],         // the newest checker launch that gave a verdict for a note: { n, launch } (see giveVerdict)
     noteSeqs: [],            // the seq of the report each reviewer note came in (same order as res.reviewNotes)
     noteSeats: [],             // the seat that wrote each note (same order; 2026-11-17, review score)
     noteClasses: [],           // the checklist line each note names, or an empty string (same order; see noteClass)
@@ -1575,7 +1928,7 @@ function newScanState() {
   };
 }
 const STATE_MAPS = ['pending', 'background', 'verificationStates', 'providerStates', 'reviewerCalls', 'reviewerAgents', 'reviewerAt', 'helperCalls', 'helpersRunning', 'stopCalls', 'helperPending', 'expertCalls', 'expertAgents', 'askCalls', 'seatCalls'];
-const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'syncMoves', 'helperEdits', 'noteSeqs', 'editSeqs', 'refutable', 'noteSeats', 'noteClasses', 'reportKeys', 'userWords'];
+const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'syncMoves', 'helperEdits', 'noteSeqs', 'editSeqs', 'changeSeqs', 'refutable', 'verdictLaunch', 'noteSeats', 'noteClasses', 'reportKeys', 'userWords'];
 function saveState(st) {
   const o = { ...st, finishedUncollected: [...st.finishedUncollected] };
   for (const k of STATE_MAPS) o[k] = [...st[k]];
@@ -1604,6 +1957,7 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
   if (EDIT_TOOLS.has(blk.name)) {
     const p = String(blk.input.file_path || blk.input.notebook_path || '');
     if (isCodePath(p)) { rec.editSeq = seq; rec.editPath = p; rec.nonGitEditSeq = seq; rec.noteEditSeq = seq; rec.nonRemoteEditSeq = seq; rec.nonSyncEditSeq = seq; rec.nonSyncEditPath = p; }
+    if (isContentPath(p)) noteContentChange(rec, seq, p);   // 2026-11-18: any file counts for the note check, with its path
     return;
   }
   const segs = splitSegments(String(blk.input.command || ''));
@@ -1613,7 +1967,8 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
   if (!editsOnly) {
     rec.verifyKey = String(blk.input.cwd || blk.input.workdir || entry.cwd || '') + '\n' + identitySegments(segs).map(verificationIdentity).join(' ; ');
     rec.command = commandIdentity(blk.input.command);
-    if (segs.length === 1 && isEvidenceCommand(segs[0])) { rec.evidence = true; rec.verifySeq = seq + 0.001; }
+    const evidenceCall = evidenceRun(segs);
+    if (evidenceCall) { rec.evidence = true; rec.verifySeq = seq + 0.001; if (evidenceCall.decorated) rec.evidenceDecorated = true; }
   }
   const expanded = expandVariables(segs);
   // A red-proof bundle (`git stash push; <test>; git stash pop`) restores
@@ -1629,6 +1984,7 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
   // (popd, `cd` alone). A GIT_* variable set in the command can point git elsewhere: no sync in it then.
   const gitBash = blk.name === 'Bash' && !!proc && proc.platform === 'win32';
   let syncDir = joinFolder(cdDir, '', gitBash);
+  const heredocAt = heredocWriteSegment(segs, String(blk.input.command || ''), cdDir);   // an interpreter fed a heredoc that writes (2026-11-18)
   const gitEnv = segs.some((s) => /(?:^|[\s;&|(])(?:export\s+|set\s+|\$env:)?GIT_[A-Za-z_]+\s*=/i.test(String(s)));
   for (let i = 0; i < segs.length; i++) {
     const frac = seq + (i + 1) / 1000;
@@ -1642,7 +1998,11 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
       // 2026-11-17 (audit H1): only a bare run can be read as proof; a redirect, a substitution or a one-sided filter hides the new/changed commits.
       rec.rangeDiffReadable = rangeDiffCommandReadable(String(segs[i]));
     }
-    const paths = segmentEditPaths(expanded[i], cdDir, i + 1 < expanded.length && readsStdin(expanded[i + 1])).filter((p) => !(stashBundle && p === '<git>' && /\bstash\b/i.test(segs[i])));
+    const paths = [...segmentEditPaths(expanded[i], cdDir, i + 1 < expanded.length && readsStdin(expanded[i + 1]), i > 0 && (segmentIsVerify(segs[i - 1]) || isEvidenceCommand(segs[i - 1])), i > 0 && isReporter(segs[i - 1])), ...(i === heredocAt ? ['<generated>'] : [])].filter((p) => !(stashBundle && p === '<git>' && /\bstash\b/i.test(segs[i])));
+    // 2026-11-18 (audit 3 repair; scoped staleness): each change keeps its path; a git move has none ('').
+    const noMove = gitMovesNoContent(expanded[i]);   // 2026-11-18 (repair 6): a git form that moves no file content
+    for (const p of paths) if (p !== '<generated>' && !(noMove && GIT_CHANGE.test(p))) noteContentChange(rec, frac, GIT_CHANGE.test(p) ? '' : p);
+    for (const p of contentChange(expanded[i], cdDir)) noteContentChange(rec, frac, p);
     if (paths.length) {
       rec.editSeq = frac; rec.editPath = paths[0];
       if (paths.some((p) => !GIT_CHANGE.test(p))) rec.nonGitEditSeq = frac; if (paths.some((p) => !GIT_CHANGE.test(p) && p !== '<generated>')) rec.noteEditSeq = frac; // a git move or a formatter run is no author edit
@@ -1671,7 +2031,7 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
     if (proof) rec.proof = proof;
   }
 }
-const emptyRecord = (background) => ({ editSeq: -1, editPath: '', nonGitEditSeq: -1, noteEditSeq: -1, nonRemoteEditSeq: -1, remotes: [], nonSyncEditSeq: -1, nonSyncEditPath: '', syncs: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background });
+const emptyRecord = (background) => ({ editSeq: -1, editPath: '', nonGitEditSeq: -1, noteEditSeq: -1, contentChangeSeq: -1, contentChanges: [], nonRemoteEditSeq: -1, remotes: [], nonSyncEditSeq: -1, nonSyncEditPath: '', syncs: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background });
 
 function reviewDone(st, launchAt, doneAt) {
   if (launchAt && doneAt && !st.reviews.some((r) => r.launchAt === launchAt)) st.reviews.push({ launchAt, doneAt });
@@ -1716,12 +2076,14 @@ function feedLine(st, l) {
     const agent = st.reviewerAgents.get(handed.id);
     const expert = st.expertAgents.get(handed.id);
     if (agent) {
+      // 2026-11-18 (finding 7): a second copy of a report this agent already gave credits no follow-up run.
+      if (reportSeen(agent, handed.report, 'hand')) return;
       const seq = ++st.seq;
       addReport(st, handed.report, handed.id + '@' + agent.launch, seq, entry.timestamp, agent.seat);
       creditReviewer(st, agent, seq, entry.timestamp);
     } else if (expert) {
       // An expert seat's hand-back: its questions for the user only, and no reviewer credit (2026-11-16).
-      addReport(st, handed.report, handed.id + '@' + expert.launch, ++st.seq, entry.timestamp, expert.seat || 'expert', true);
+      addReport(st, handed.report, handed.id + '@' + expert.launch, ++st.seq, entry.timestamp, expert.seat || 'expert', true, expertReadKey(handed.id, expert));
     }
     return;
   }
@@ -1744,13 +2106,13 @@ function feedLine(st, l) {
       // waits on its own background work is no finish (2026-11-12, follow-up E: such a run counted as a
       // completed review before its report existed); its hand-back or a later notice finishes it.
       const agent = st.reviewerAgents.get(note.id);
-      const finished = !!agent && note.status === 'completed' && !interimNotice(note);
+      const finished = !!agent && note.status === 'completed' && !interimNotice(note) && !(note.result && reportSeen(agent, note.result, 'notice'));
       // Its finish notice can carry its report too (see addReport: each note counts once per run).
       if (finished && note.result) addReport(st, note.result, note.id + '@' + agent.launch, st.seq, entry.timestamp, agent.seat);
       if (finished) creditReviewer(st, agent, st.seq, entry.timestamp);
       // An expert seat's finish notice can carry its report too: its questions only, never a reviewer run.
       const expert = st.expertAgents.get(note.id);
-      if (expert && note.status === 'completed' && !interimNotice(note) && note.result) addReport(st, note.result, note.id + '@' + expert.launch, st.seq, entry.timestamp, expert.seat || 'expert', true);
+      if (expert && note.status === 'completed' && !interimNotice(note) && note.result) addReport(st, note.result, note.id + '@' + expert.launch, st.seq, entry.timestamp, expert.seat || 'expert', true, expertReadKey(note.id, expert));
     }
     // A bundled notice shares the entry with the user's own words; nothing else there is scanned.
     return;
@@ -1790,7 +2152,7 @@ function feedLine(st, l) {
       }
       // Reviewer notes (2026-11-12): what this turn claims, and each note's outcome line.
       if (claimsReview(blk.text)) res.turnClaim = true;
-      if (applyOutcomes(res.reviewNotes, st.noteSeqs, st.userWords, plain, { seq, edits: st.editSeqs, passes: st.passes.map((p) => p.seq), refutable: st.refutable })) pruneUserWords(st);
+      if (applyOutcomes(res.reviewNotes, st.noteSeqs, st.userWords, plain, { seq, edits: st.editSeqs, changes: st.changeSeqs, passes: st.passes.map((p) => p.seq), refutable: st.refutable })) pruneUserWords(st);
       continue;
     }
 
@@ -1819,9 +2181,13 @@ function feedLine(st, l) {
         st.seatCalls.set(blk.id, NOTE_CHECK_PROMPT.test(String(blk.input.prompt || '')) ? NOTE_CHECK_SEAT : expertSeat(String(blk.input.prompt || '')));
       } else if (blk.name === 'SendMessage' && st.reviewerAgents.has(String(blk.input.to || ''))) {
         st.reviewerAgents.get(String(blk.input.to)).launch = seq;   // a follow-up review run
+        st.reviewerAgents.get(String(blk.input.to)).done = false;
         st.reviewerAgents.get(String(blk.input.to)).at = String(entry.timestamp || '');
       } else if (blk.name === 'SendMessage' && st.expertAgents.has(String(blk.input.to || ''))) {
-        st.expertAgents.get(String(blk.input.to)).launch = seq;     // a follow-up expert run: a new report
+        // A follow-up expert run: a new report. The note checker keeps its first launch (the launch order and the edit rule
+        // use it); the message number only keys its next reading (2026-11-18, audit 3 repair).
+        const expert = st.expertAgents.get(String(blk.input.to));
+        if (expert.seat === NOTE_CHECK_SEAT) expert.msg = seq; else expert.launch = seq;
       } else if (blk.name === 'AskUserQuestion') {
         const questions = Array.isArray(blk.input.questions) ? blk.input.questions : [];
         st.askCalls.set(blk.id, questions.map((q) => String((q && q.question) || '')).filter(Boolean));
@@ -1829,7 +2195,7 @@ function feedLine(st, l) {
         Object.assign(rec, st.background.get(blk.input.task_id), { editSeq: -1, taskId: blk.input.task_id });
       }
       if (blk.name === 'Agent') st.helperCalls.set(blk.id, seq);
-      if (rec.editSeq !== -1 || rec.verifySeq !== -1 || rec.providerSeq !== -1 || rec.rangeDiffSeq !== -1) st.pending.set(blk.id, rec);
+      if (rec.editSeq !== -1 || rec.contentChangeSeq !== -1 || rec.verifySeq !== -1 || rec.providerSeq !== -1 || rec.rangeDiffSeq !== -1) st.pending.set(blk.id, rec);
       continue;
     }
 
@@ -1873,7 +2239,11 @@ function feedLine(st, l) {
       const id = String(t.agentId || (/agentId:\s*([A-Za-z0-9_-]+)/.exec(resultText(blk, entry)) || [])[1] || '');
       const at = st.reviewerAt.get(blk.tool_use_id) || '';
       st.reviewerAt.delete(blk.tool_use_id);
-      if (id && blk.is_error !== true) st.reviewerAgents.set(id, { launch, at, seat });
+      if (id && blk.is_error !== true) {
+        const agent = { launch, at, seat, done: t.status === 'completed' };
+        if (agent.done) { reportSeen(agent, resultText(blk, null), 'hand'); reportSeen(agent, resultText(blk, null), 'notice'); }
+        st.reviewerAgents.set(id, agent);
+      }
       if (id && t.status === 'completed') reviewDone(st, at, String(entry.timestamp || ''));
       // A synchronous reviewer returns its finished report in this result: its notes count (2026-11-12).
       if (id && t.status === 'completed' && blk.is_error !== true) addReport(st, resultText(blk, null), id + '@' + launch, seq, entry.timestamp, seat);
@@ -1926,6 +2296,50 @@ function creditEdit(st, rec) {
   const nonSync = rec.nonSyncEditSeq ?? rec.editSeq;
   if (nonSync > res.lastNonSyncEdit) { res.lastNonSyncEdit = nonSync; res.lastNonSyncEditPath = rec.nonSyncEditPath || rec.editPath || ''; st.syncMoves = st.syncMoves.filter((c) => c.seq > nonSync); }
   for (const c of rec.syncs || []) st.syncMoves.push(c);
+}
+
+// A content change at seq (2026-11-18, audit 3 repair): it ends every refutation of a check launched before it. A note
+// already closed as refuted by such a check opens again, whether the author wrote the line before or after the change;
+// an open note keeps its refutable entry, and the line is refused when written (applyOutcome).
+// 2026-11-18 (scoped staleness): the change keeps its path ('' = unknown: a git move, git apply, patch). It cancels the
+// refutation of note n only when its path is unknown or is a file the note's text or the refutation's evidence names
+// (changeCancels); a change of any other file cancels nothing, so the check can run while plainly right notes are fixed.
+function noteContentChange(rec, seq, path) {
+  rec.contentChangeSeq = seq;
+  if (!Array.isArray(rec.contentChanges)) rec.contentChanges = [];
+  rec.contentChanges.push({ seq, path: String(path || '') });
+}
+// 2026-11-18 (repair 1, 2): no drive prefix ("C:") and no leading "/", "./" or "../", so "C:\repos\x\src\Policy.cs", "/src/Policy.cs"
+// and "..\src\Policy.cs" are compared as folder names.
+const pathKey = (p) => stripQuotes(String(p || '')).replace(/\\/g, '/').replace(/[),;]+$/, '').replace(/:\d+(?::\d+)?$/, '').toLowerCase().replace(/^[a-z]:(?=\/)/, '').replace(/^(?:\.{0,2}\/)+/, '');
+// The file names a text cites: a word with an extension, as "Upload.cs:9", "src/App.cs", "README.md:1", "ar.json", "C:\a\b.cs:4",
+// "app/[id]/page.tsx", "src/My Upload.cs". The name class holds [ ] ( ) + and a space; a match with spaces is also read word by word.
+const CITED_FILE = /(?:[A-Za-z]:)?[\w@.\-\/\\\[\]()+ ]+\.[A-Za-z]\w{0,9}(?![\w])/g;
+function citedFiles(...texts) {
+  const out = new Set();
+  const add = (x) => { const k = pathKey(x).replace(/\.+$/, ''); if (k && /\.[a-z]\w{0,9}$/.test(k)) out.add(k); };
+  for (const t of texts) for (const m of String(t || '').matchAll(CITED_FILE)) { add(m[0]); for (const w of m[0].split(/\s+/)) add(w); }
+  return [...out];
+}
+const baseName = (k) => k.slice(k.lastIndexOf('/') + 1);
+// The changed path against a cited name: slashes made uniform, no case, one is the end of the other at a folder
+// border; failing that, the bare file name is the same (a diff prefix "b/", a folder the checker wrote another way).
+function pathMatches(changed, named) {
+  const c = pathKey(changed), n = pathKey(named);
+  if (!c || !n) return false;
+  return c === n || c.endsWith('/' + n) || n.endsWith('/' + c) || baseName(c) === baseName(n);
+}
+function changeCancels(change, note, evidence) {
+  const path = change && typeof change === 'object' ? change.path : '';
+  if (!path) return true;   // no known path: any file may have changed
+  return citedFiles(note && note.text, evidence).some((n) => pathMatches(path, n));
+}
+function creditContent(st, seq, path = '') {
+  st.changeSeqs.push({ seq, path: String(path || '') });
+  for (const r of st.refutable) {
+    const note = st.res.reviewNotes[r.n - 1];
+    if (note && note.outcome === 'refuted' && r.launch < seq && changeCancels({ path }, note, r.evidence)) { note.outcome = null; delete note.evidence; note.problem = REFUTE_STALE; }
+  }
 }
 
 // The marks of the pair lines of a git range-diff output: "=" equal, "!" changed, "<" only old, ">" only new.
@@ -1989,10 +2403,16 @@ function settle(st, rec, blk, entry) {
   // An Edit/Write that errored changed nothing; a shell segment that
   // wrote a file usually did, even if a later segment failed.
   if (rec.editSeq !== -1 && !(isErr && rec.verifySeq === -1)) creditEdit(st, rec);
+  if ((rec.contentChangeSeq ?? -1) !== -1 && !(isErr && rec.verifySeq === -1)) {
+    // Each change with its own seq and path (2026-11-18, scoped staleness); a record without the list is one unknown path.
+    if (Array.isArray(rec.contentChanges) && rec.contentChanges.length) for (const c of rec.contentChanges) creditContent(st, c.seq, c.path);
+    else creditContent(st, rec.contentChangeSeq, '');
+  }
   if (rec.verifySeq !== -1) {
     const receipt = rec.evidence ? checkReceipt(blk, entry) : null;
     const key = receipt?.key || rec.verifyKey;
-    const checkOutcome = rec.evidence && outcome !== 'pending' ? receipt?.outcome || 'failed' : outcome;
+    // A decorated run (output sent to a file, cut by a tail) may show no receipt line: no credit, not a failure.
+    const checkOutcome = rec.evidence && outcome !== 'pending' ? receipt?.outcome || (rec.evidenceDecorated ? 'none' : 'failed') : outcome;
     if (receipt && checkOutcome !== 'pending') {
       const launch = st.verificationStates.get(rec.verifyKey);
       if (launch?.outcome === 'pending' && launch.seq === rec.verifySeq) st.verificationStates.delete(rec.verifyKey);
@@ -2031,7 +2451,7 @@ function settle(st, rec, blk, entry) {
     // A range compared with itself proves nothing: the old side must differ from the new side (audit F1, case 4).
     const same = series.oldHashes.length > 0 && series.oldHashes.every((h, k) => h === series.newHashes[k]);
     if (rec.rangeDiffReadable && pairs.length > 0 && pairs.every((m) => m === '=') && !same) {
-      if (rec.rangeDiffSeq > res.lastRangeDiffProof) { res.lastRangeDiffProof = rec.rangeDiffSeq; res.lastRangeDiffNew = series.newHashes; }
+      if (rec.rangeDiffSeq > res.lastRangeDiffProof) { res.lastRangeDiffProof = rec.rangeDiffSeq; res.lastRangeDiffNew = series.newHashes; res.lastRangeDiffOld = series.oldHashes; /* 2026-11-18: the old side, for the review record */ }
     }
     else if (rec.rangeDiffReadable && pairs.some((m) => m !== '=')) res.lastRangeDiffChanged = Math.max(res.lastRangeDiffChanged, rec.rangeDiffSeq);
   }
@@ -2070,8 +2490,8 @@ function feedHelperLine(st, file, l, pos) {
     if (blk.type === 'tool_use' && blk.input && typeof blk.input === 'object' && (EDIT_TOOLS.has(blk.name) || SHELL_TOOLS.has(blk.name))) {
       const rec = emptyRecord(false);
       fillToolRecord(rec, blk, entry, 0, true);
-      if (rec.editSeq !== -1) {
-        st.helperPending.set(file + '\n' + blk.id, { editPath: rec.editPath, nonGit: rec.nonGitEditSeq !== -1, noteEdit: rec.noteEditSeq !== -1, nonRemote: rec.nonRemoteEditSeq !== -1,
+      if (rec.editSeq !== -1 || rec.contentChangeSeq !== -1) {
+        st.helperPending.set(file + '\n' + blk.id, { editPath: rec.editPath, nonGit: rec.nonGitEditSeq !== -1, noteEdit: rec.noteEditSeq !== -1, content: rec.contentChangeSeq !== -1, contentPaths: rec.contentChanges.map((c) => c.path), nonRemote: rec.nonRemoteEditSeq !== -1,
           gitRepo: rec.gitRepo, remotes: rec.remotes.map((r) => r.repo), verifies: rec.verifySeq !== -1, at: String(entry.timestamp || ''),
           nonSync: rec.nonSyncEditSeq !== -1, nonSyncPath: rec.nonSyncEditPath, syncs: rec.syncs.map((c) => ({ repo: c.repo, remote: c.remote })) });
       }
@@ -2103,6 +2523,11 @@ function placeHelperEdits(st, timestamp) {
 }
 function creditHelperEdit(st, { edit }) {
   const s = ++st.seq;
+  if (edit.content === undefined ? edit.nonGit : edit.content) {   // an edit kept before this field counts as before
+    const paths = Array.isArray(edit.contentPaths) && edit.contentPaths.length ? edit.contentPaths : [''];
+    for (const p of new Set(paths)) creditContent(st, s, p);
+  }
+  if (!edit.editPath) return;   // a content change with no code path (a locale file) is no code edit
   creditEdit(st, { editSeq: s, editPath: edit.editPath, nonGitEditSeq: edit.nonGit ? s : -1, noteEditSeq: (edit.noteEdit === undefined ? edit.nonGit : edit.noteEdit) ? s : -1, nonRemoteEditSeq: edit.nonRemote ? s : -1,
     remotes: edit.remotes.map((repo) => ({ seq: s, repo })), gitRepo: edit.gitRepo,
     // An edit kept without these fields (2026-11-14) is a change of its own, never a sync.
@@ -2319,6 +2744,9 @@ function finishScan(st) {
   // background command can still be running (2026-11-05: lost results held the
   // stop at "still running" for hours). The push guard keeps the strict count.
   res.lastRunningHelper = helpersRunning.size ? Math.max(...helpersRunning.values()) : -1;
+  // 2026-11-18: the newest reviewer launch that has not reported (a launch with no result yet counts too);
+  // the review record is written only when none runs after the last change.
+  res.lastRunningReviewer = Math.max(-1, ...[...st.reviewerAgents.values()].filter((a) => a && a.done !== true).map((a) => a.launch), ...st.reviewerCalls.values());
   res.reviews = reviews;
   // For the task timer: a background check with a finish notice still to come, or a helper, works on at
   // this stop, whatever the stop verdict is (2026-11-11: a stop after a later passing check counted ten
@@ -2336,6 +2764,7 @@ function finishScan(st) {
   res.openReviewNotes = res.reviewNotes.filter((n) => !n.outcome);
   res.reviewNoteSeqs = st.noteSeqs;
   res.reviewEditSeqs = st.editSeqs;
+  res.reviewChangeSeqs = st.changeSeqs;
   res.reviewPassSeqs = st.passes.map((p) => p.seq);
   res.reviewRefutable = st.refutable;
   // Notes closed by the note check, with its evidence, for the ship brief (2026-11-17).
@@ -2349,7 +2778,7 @@ function finishScan(st) {
 
 module.exports = {
   EDIT_TOOLS, SHELL_TOOLS,
-  isCodePath, splitSegments, tokenize, segmentIsVerify, hasVerify, segmentIsProvider,
+  isCodePath, isProsePath, splitSegments, tokenize, segmentIsVerify, hasVerify, segmentIsProvider,
   segmentEditPaths, shellEditPaths, shellWriteTargets, verifyFailed, resultText,
   scanTranscript,
   verificationCommand,

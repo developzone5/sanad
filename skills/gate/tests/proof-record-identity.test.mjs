@@ -553,3 +553,357 @@ test('repair 7: a new vacuous check in a test file whose path holds a space is s
   assert.equal(checked.status, 1, checked.stdout + checked.stderr);
   assert.match(checked.stdout, /UNPROVEN: my tests\/rows\.test\.cjs:4 /);
 });
+
+// ---- Repairs after the third audit (2026-11-18, its findings 4 and 5) ----
+
+test('finding 4: a helper counts only when executable code of a test calls it: not a comment, not the text of a string or template; a real call, also inside a ${} hole, still counts', async () => {
+  const { testSpans, helperCallers } = await import('../scripts/proof-record.mjs');
+  const callers = (body, file = 'src/rows.test.cjs') => {
+    const text = lines('const expectNoRows = (rows) => {', '  expect(rows).toEqual([]);', '};', "it('refuses unauthorized rows', () => {", ...body, '});');
+    return helperCallers(text, testSpans(text, file), 2).length;
+  };
+  assert.equal(callers(['  expectNoRows(product.rows());']), 1, 'a real call');
+  assert.equal(callers(['  // expectNoRows(product.rows());', '  expect(product.rows()).toEqual([]);']), 0, 'a line comment');
+  assert.equal(callers(['  /* expectNoRows(product.rows()); */', '  expect(product.rows()).toEqual([]);']), 0, 'a block comment');
+  assert.equal(callers(['  /*', '   expectNoRows(product.rows());', '  */']), 0, 'a block comment over lines');
+  assert.equal(callers(['  const s = "expectNoRows(rows)";']), 0, 'a double-quoted string');
+  assert.equal(callers(["  const s = 'expectNoRows(rows)';"]), 0, 'a single-quoted string');
+  assert.equal(callers(['  const s = `expectNoRows(rows) and more`;']), 0, 'a template literal');
+  assert.equal(callers(['  const s = `a ${1} expectNoRows(rows) ${2}`;']), 0, 'text between two holes');
+  assert.equal(callers(['  const s = `x ${expectNoRows(product.rows())} y`;']), 1, 'a call inside a template hole runs');
+  assert.equal(callers(['  const s = "it\'s", t = "// expectNoRows(rows)";', '  expectNoRows(product.rows());']), 1, 'a quote or slashes in a string do not hide the next real call');
+  assert.equal(callers(['  const re = /expectNoRows\\(/;']), 0, 'a regex literal');
+  assert.equal(callers(["  const url = 'http://x'; expectNoRows(product.rows());"]), 1, '// inside a string is no comment');
+  // A commented-out helper declaration is no helper: the line is in no helper, so no test is its caller.
+  const dead = lines('// const expectNoRows = (rows) => {', '  expect(rows).toEqual([]);', '// };', "it('refuses unauthorized rows', () => {", '  expectNoRows(product.rows());', '});');
+  assert.deepEqual(helperCallers(dead, testSpans(dead, 'src/rows.test.cjs'), 2), []);
+  // C#
+  const cs = (body) => {
+    const text = lines('public class RowsTests {', 'private static void ExpectNoRows(List<int> rows)', '{', '    rows.Should().BeEmpty();', '}', '[Fact]', 'public void Refuses_Unauthorized()', '{', ...body, '}', '}');
+    return helperCallers(text, testSpans(text, 'Api.Tests/RowsTests.cs'), 4).length;
+  };
+  assert.equal(cs(['    ExpectNoRows(rows);']), 1, 'a real C# call');
+  assert.equal(cs(['    // ExpectNoRows(rows);', '    Assert.True(true);']), 0, 'a C# line comment');
+  assert.equal(cs(['    /* ExpectNoRows(rows); */']), 0, 'a C# block comment');
+  assert.equal(cs(['    var s = "ExpectNoRows(rows)";']), 0, 'a C# string');
+  assert.equal(cs(['    var s = @"say ""x"" ExpectNoRows(rows)";']), 0, 'a verbatim string with doubled quotes');
+  assert.equal(cs(['    var s = $"a {ExpectNoRows(rows)} b";']), 1, 'a call in an interpolation hole runs');
+  assert.equal(cs(['    var s = $"a {{ExpectNoRows(rows)}} b";']), 0, 'doubled braces are text');
+  assert.equal(cs(["    var c = '\"'; ExpectNoRows(rows);"]), 1, 'a quote char literal does not open a string');
+  assert.equal(cs(['    var s = """', '      ExpectNoRows(rows)', '    """;']), 0, 'a raw string');
+});
+
+test('finding 4: a commented-out or quoted test call is no test and no [Fact]; the limit (a conditional call counts) is written where the rule lives', async () => {
+  const { testSpans } = await import('../scripts/proof-record.mjs');
+  const text = lines("// it('ghost', () => {", "const s = \"it('also a ghost', () => {})\";", "it('real', () => {", '  expect(1).toBe(1);', '});');
+  assert.deepEqual(testSpans(text, 'a.test.cjs').map(s => s.titles[0]), ['real']);
+  const cs = lines('// [Fact]', 'public void Ghost() { }', '[Fact]', 'public void Real() { }');
+  assert.deepEqual(testSpans(cs, 'A.cs').map(s => s.titles[0]), ['Real']);
+  assert.match(fs.readFileSync(path.join(scripts, 'proof-record.mjs'), 'utf8'), /cannot prove that a conditional assertion ran/);
+});
+
+test('finding 4: a commented call to a helper that checks zero writes does not prove the helper check: refused before any run', () => {
+  const base = { 'dependency.cjs': DEPENDENCY, 'product.cjs': PRODUCT('["left in"]'), 'check.cjs': CHECK_ROWS };
+  const f = repoWith(base, { 'product.cjs': PRODUCT('[]'), 'src/rows.test.cjs': lines('const expectNoRows = (rows) => {', '  expect(rows).toEqual([]);', '};', "it('refuses unauthorized rows', () => {", '  // expectNoRows(product.rows());', '  expect(product.rows()).toEqual([]);', '});') });
+  const r = f.proof([ALLOW], full);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stdout, /UNPROVEN ✗ src\/rows\.test\.cjs: 1 /);
+});
+
+test('finding 5: the class of a C# test is the class whose braces hold it, not the last `class X` written above it (a closed nested class, a comment or a string that says class)', async () => {
+  const { testSpans } = await import('../scripts/proof-record.mjs');
+  const text = lines('namespace Demo;', 'public class ServiceTests', '{', '    private class FakeHandler', '    {', '        public string Name => "class Nope {";', '    }', '    // class CommentClass {', '    private const string S = "class StringClass {";', '', '    [Fact]', '    public void RefusesUnauthorized() { x.Should().BeEmpty(); }', '', '    public class InnerTests', '    {', '        [Fact]', '        public void InnerRefuses() { x.Should().BeEmpty(); }', '    }', '', '    [Fact]', '    public void AfterInner() { x.Should().BeEmpty(); }', '}', '', 'public class OtherTests', '{', '    [Fact]', '    public void OtherRefuses() { x.Should().BeEmpty(); }', '}');
+  const got = Object.fromEntries(testSpans(text, 'Api.Tests/ServiceTests.cs').map(s => [s.titles[0], s.klass]));
+  assert.deepEqual(got, { RefusesUnauthorized: 'ServiceTests', InnerRefuses: 'InnerTests', AfterInner: 'ServiceTests', OtherRefuses: 'OtherTests' });
+});
+
+test('finding 5: the result that is shown (survivors) and the record that is saved (caughtTests) take the same identity: the failure of the right class, found past a closed nested class; another class is not it', async () => {
+  const { survivors, caughtTests, failureReasons } = await import('../scripts/red-proof.mjs');
+  const { testSpans, declaredTests } = await import('../scripts/proof-record.mjs');
+  const text = lines('public class ServiceTests', '{', '    private class FakeHandler', '    {', '        public int X => 1;', '    }', '', '    [Fact]', '    public void RefusesUnauthorized() { x.Should().BeEmpty(); }', '}');
+  const file = 'Api.Tests/ServiceTests.cs';
+  const own = failureReasons('  Failed Demo.ServiceTests.RefusesUnauthorized [12 ms]\n  Error Message:\n   Assert.True() Failure\n');
+  const wrong = failureReasons('  Failed Demo.FakeHandler.RefusesUnauthorized [12 ms]\n  Error Message:\n   Assert.True() Failure\n');
+  const spans = testSpans(text, file), declared = declaredTests(text, file);
+  assert.deepEqual(survivors(['RefusesUnauthorized'], own, [], declared), []);
+  assert.equal(caughtTests(['RefusesUnauthorized'], own, [], spans).length, 1, 'the record holds the test the result shows caught');
+  assert.equal(survivors(['RefusesUnauthorized'], wrong, [], declared).length, 1, 'a failure of another class is not this test: shown as not failing');
+  assert.deepEqual(caughtTests(['RefusesUnauthorized'], wrong, [], spans), [], 'and not saved');
+  // A failure printed with another test file is not a vitest test of this file, in the result as in the record.
+  const js = "it('refuses unauthorized rows', () => { expect(1).toBe(2); });\n";
+  const other = failureReasons(' FAIL  src/a.test.cjs > refuses unauthorized rows\nAssertionError: expected 1 to be 0\n');
+  assert.equal(survivors(['refuses unauthorized rows'], other, [], declaredTests(js, 'src/b.test.cjs')).length, 1);
+  assert.deepEqual(caughtTests(['refuses unauthorized rows'], other, [], testSpans(js, 'src/b.test.cjs')), []);
+  const mine = failureReasons(' FAIL  src/b.test.cjs > refuses unauthorized rows\nAssertionError: expected 1 to be 0\n');
+  assert.deepEqual(survivors(['refuses unauthorized rows'], mine, [], declaredTests(js, 'src/b.test.cjs')), []);
+});
+
+// ---- Repair round 2026-11-18 (seven confirmed findings on the first repair of audit findings 4 and 5) ----
+
+test('repair finding 1: a wrapper call (await waitFor(() => {, return act(() => {, await WithDbAsync(async db =>) is no helper declaration: only a real declaration names the helper', async () => {
+  const { testSpans, helperCallers } = await import('../scripts/proof-record.mjs');
+  const js = lines('const expectNoRows = async () => {', '  await waitFor(() => {', '    expect(calc.rows()).toEqual([]);', '  });', '};', "it('returns the correct value', async () => {", '  await waitFor(() => expect(calc.value()).toBe(2));', '});');
+  assert.deepEqual(helperCallers(js, testSpans(js, 'src/rows.test.cjs'), 3), [], 'no test calls expectNoRows');
+  const js2 = lines('const expectNoRows = async () => {', '  await waitFor(() => {', '    expect(calc.rows()).toEqual([]);', '  });', '};', "it('refuses', async () => {", '  await expectNoRows();', '});');
+  assert.equal(helperCallers(js2, testSpans(js2, 'src/rows.test.cjs'), 3).length, 1, 'the real helper still has its caller');
+  const act = lines('function expectNoRows() {', '  return act(() => {', '    expect(calc.rows()).toEqual([]);', '  });', '}', "it('returns the correct value', () => {", '  return act(() => calc.value());', '});');
+  assert.deepEqual(helperCallers(act, testSpans(act, 'src/rows.test.cjs'), 3), []);
+  const hook = lines("beforeEach(async () => {", '  await waitFor(() => {', '    expect(calc.rows()).toEqual([]);', '  });', '});', "it('returns the correct value', async () => {", '  await waitFor(() => expect(calc.value()).toBe(2));', '});');
+  assert.deepEqual(helperCallers(hook, testSpans(hook, 'src/rows.test.cjs'), 3), []);
+  const cs = lines('public class RowsTests', '{', '    private async Task AssertNoRowsAsync()', '    {', '        await WithDbAsync(async db =>', '        {', '            Assert.Empty(db.Rows);', '        });', '    }', '', '    [Fact]', '    public async Task Saves_Row()', '    {', '        await WithDbAsync(async db => { db.Save(); });', '    }', '}');
+  assert.deepEqual(helperCallers(cs, testSpans(cs, 'Api.Tests/RowsTests.cs'), 7), [], 'C#: no test calls AssertNoRowsAsync');
+  const cs2 = cs.replace('db.Save(); });', 'db.Save(); });\n        await AssertNoRowsAsync();');
+  assert.equal(helperCallers(cs2, testSpans(cs2, 'Api.Tests/RowsTests.cs'), 7).length, 1, 'C#: the real helper still has its caller');
+});
+
+test('repair finding 2: a C# verbatim string that starts with a doubled quote (@"""x"" y") is not a raw string: the tests after it stay tests; an unclosed literal keeps the raw text so tests cannot vanish', async () => {
+  const { testSpans, declaredTests, executableText, helperCallers } = await import('../scripts/proof-record.mjs');
+  const make = (decl) => lines('namespace Demo;', 'public class ServiceTests', '{', decl, '', '    [Fact]', '    public void RefusesUnauthorized() { x.Should().BeEmpty(); }', '', '    [Fact]', '    public void RefusesUnauthorized_ForGuest() { x.Should().BeEmpty(); }', '}');
+  for (const decl of ['    private const string Cmd = @"""C:\\tools\\run.exe"" --quiet";', '    private const string Cmd = @"""";', '    private const string H = @"""Full Name"",Email";', '    private const string H = $@"""{1}"" x";']) {
+    const text = make(decl);
+    assert.equal(declaredTests(text, 'Api.Tests/ServiceTests.cs').length, 2, decl);
+    assert.equal(testSpans(text, 'Api.Tests/ServiceTests.cs').length, 2, decl);
+  }
+  // A raw string (no @) still hides its text.
+  assert.doesNotMatch(executableText('var s = """\n  ExpectNoRows(rows)\n""";\n', 'A.cs'), /ExpectNoRows/);
+  // Safety net: a literal with no end keeps the raw text from its start, so declarations after it are still seen.
+  const open = lines('public class T', '{', '    private const string S = @"never closed;', '    [Fact]', '    public void RefusesUnauthorized() { x.Should().BeEmpty(); }', '}');
+  assert.equal(testSpans(open, 'Api.Tests/T.cs').length, 1);
+  const tpl = lines("const s = `never closed;", "it('first', () => {});", "it('second', () => {});");
+  assert.equal(declaredTests(tpl, 'a.test.ts').length, 2);
+  // A real helper call after a verbatim string with doubled quotes is counted.
+  const call = lines('public class RowsTests', '{', '    private const string H = @"""Full Name"",Email";', '    private static void ExpectNoRows(List<int> rows)', '    {', '        rows.Should().BeEmpty();', '    }', '    [Fact]', '    public void Refuses_Unauthorized()', '    {', '        ExpectNoRows(rows);', '    }', '}');
+  assert.equal(helperCallers(call, testSpans(call, 'Api.Tests/RowsTests.cs'), 6).length, 1);
+});
+
+test('repair finding 3: a regex literal after return, typeof, case, throw, yield, await, void, in, of, do or else is a regex: a backtick in it opens no template', async () => {
+  const { declaredTests, testSpans, helperCallers, closeOf } = await import('../scripts/proof-record.mjs');
+  for (const kw of ['return', 'typeof', 'case', 'throw', 'yield', 'await', 'void', 'do', 'else']) {
+    const text = lines(`const isTick = (c) => { ${kw} /\`/.test(c); };`, "it('first [C1] refuses', () => {});", "it('second [C1] refuses', () => {});");
+    assert.equal(declaredTests(text, 'a.test.ts').length, 2, kw);
+  }
+  const text = lines('const expectNoRows = (rows) => {', '  expect(rows).toEqual([]);', '};', "it('refuses', () => {", '  const isTick = (c) => { return /`/.test(c); };', '  expectNoRows(product.rows());', '});');
+  assert.equal(helperCallers(text, testSpans(text, 'a.test.ts'), 2).length, 1);
+  // closeOf reads it the same way.
+  const src = "{ return /`/.test(c); }";
+  assert.equal(closeOf(src, 0), src.length - 1);
+  // Division after an identifier is still division, not a regex.
+  const div = lines('const r = a / b; const s = c / d;', "it('a', () => {});");
+  assert.equal(declaredTests(div, 'a.test.ts').length, 1);
+});
+
+test('repair finding 4: a test of an abstract base class (or a class another class derives from) is printed by the runner with the derived class: that is the same test', async () => {
+  const { survivors, caughtTests, failureReasons } = await import('../scripts/red-proof.mjs');
+  const { testSpans, declaredTests, csClassList } = await import('../scripts/proof-record.mjs');
+  const base = lines('namespace Demo;', 'public abstract class ServiceTestsBase', '{', '    [Fact]', '    public void RefusesUnauthorized() { x.Should().BeEmpty(); }', '}');
+  const file = 'Api.Tests/ServiceTestsBase.cs';
+  const derived = failureReasons('  Failed Demo.SqlServiceTests.RefusesUnauthorized [12 ms]\n  Error Message:\n   Assert.True() Failure\n');
+  // Changed 2026-11-18 (round 3): the derived class must be known from the test files read (here its class list is
+  // passed); with none known the failure is not credited (see round 3 problem 2).
+  const sqlClasses = csClassList('public class SqlServiceTests : ServiceTestsBase { }', 'Api.Tests/SqlServiceTests.cs');
+  assert.deepEqual(survivors(['RefusesUnauthorized'], derived, [], declaredTests(base, file), sqlClasses), []);
+  assert.equal(caughtTests(['RefusesUnauthorized'], derived, [], testSpans(base, file), sqlClasses).length, 1);
+  // A plain base class that a class in the same file names as its base is open the same way.
+  const plain = lines('public class Shared<T> where T : class', '{', '    [Fact]', '    public void Refuses() { x.Should().BeEmpty(); }', '}', 'public sealed class Sql : Shared<int>, IDisposable', '{', '}');
+  const printed = failureReasons('  Failed Demo.Sql.Refuses [12 ms]\n  Error Message:\n   Assert.True() Failure\n');
+  assert.deepEqual(survivors(['Refuses'], printed, [], declaredTests(plain, 'A.cs')), []);
+  // A plain class nobody derives from still needs its own class name.
+  const closed = lines('public class ServiceTests', '{', '    [Fact]', '    public void Refuses() { x.Should().BeEmpty(); }', '}', 'public class Other', '{', '}');
+  const wrong = failureReasons('  Failed Demo.Other.Refuses [12 ms]\n  Error Message:\n   Assert.True() Failure\n');
+  assert.equal(survivors(['Refuses'], wrong, [], declaredTests(closed, 'A.cs')).length, 1);
+});
+
+test('repair finding 5: a custom fact attribute ([SkippableFact], [MySqlFact], [AttemptMySqlFact(...)]) makes a test, as [Fact] and [Theory] do', async () => {
+  const { testSpans, declaredTests, enclosingTest, skippedLines } = await import('../scripts/proof-record.mjs');
+  const text = lines('public class DbTests', '{', '    [SkippableFact]', '    public async Task Refuses_OnMySql()', '    {', '        rows.Should().BeEmpty();', '    }', '', '    [MySqlTheory(Skip = "no db")]', '    [InlineData(1)]', '    public void Skipped_OnMySql(int x) { }', '', '    [Xunit.Fact]', '    public void Qualified() { }', '}');
+  const file = 'Api.Tests/DbTests.cs';
+  const spans = testSpans(text, file);
+  assert.deepEqual(spans.map(s => s.titles[0]), ['Refuses_OnMySql', 'Skipped_OnMySql', 'Qualified']);
+  assert.equal(enclosingTest(spans, 6)?.titles[0], 'Refuses_OnMySql');
+  assert.deepEqual(declaredTests(text, file).map(d => d.titles[0]), ['Refuses_OnMySql', 'Qualified']);
+  assert.ok(skippedLines(text, file).has(11));
+  // Not an attribute of a test: a name that only holds the word.
+  assert.equal(testSpans(lines('[Description("Fact")]', 'public void NotATest() { }'), file).length, 0);
+});
+
+test('repair finding 6: a [Theory] row whose argument text holds a parenthesis is matched to its test', async () => {
+  const { survivors, caughtTests, failureReasons } = await import('../scripts/red-proof.mjs');
+  const { testSpans, declaredTests } = await import('../scripts/proof-record.mjs');
+  const text = lines('public class ServiceTests', '{', '    [Theory]', '    [InlineData("a (b)")]', '    public void Refuses(string role) { }', '}');
+  const file = 'Api.Tests/ServiceTests.cs';
+  const reasons = failureReasons('  Failed Demo.ServiceTests.Refuses(role: "a (b)") [1 ms]\n  Error Message:\n   Assert.True() Failure\n');
+  assert.deepEqual(survivors(['Refuses'], reasons, [], declaredTests(text, file)), []);
+  assert.equal(caughtTests(['Refuses'], reasons, [], testSpans(text, file)).length, 1);
+  const other = failureReasons('  Failed Demo.Other.Refuses(role: "a (b)") [1 ms]\n  Error Message:\n   Assert.True() Failure\n');
+  assert.equal(survivors(['Refuses'], other, [], declaredTests(text, file)).length, 1, 'the class is still checked');
+});
+
+test('repair finding 7: a helper call inside a C# #if false ... #endif block is no call; the live branch (#else) still counts', async () => {
+  const { testSpans, helperCallers, executableText } = await import('../scripts/proof-record.mjs');
+  const cs = (body) => {
+    const text = lines('public class RowsTests {', 'private static void ExpectNoRows(List<int> rows)', '{', '    rows.Should().BeEmpty();', '}', '[Fact]', 'public void Refuses_Unauthorized()', '{', ...body, '}', '}');
+    return helperCallers(text, testSpans(text, 'Api.Tests/RowsTests.cs'), 4).length;
+  };
+  assert.equal(cs(['#if false', '    ExpectNoRows(rows);', '#endif', '    Assert.True(true);']), 0);
+  assert.equal(cs(['#if false', '    ExpectNoRows(rows);', '#else', '    Assert.True(true);', '#endif']), 0);
+  assert.equal(cs(['#if false', '    Assert.True(true);', '#else', '    ExpectNoRows(rows);', '#endif']), 1, 'the #else branch of #if false is live');
+  assert.equal(cs(['#if false', '#if DEBUG', '    Assert.True(true);', '#endif', '    ExpectNoRows(rows);', '#endif', '    Assert.True(true);']), 0, 'a nested #if inside the dead block');
+  assert.equal(cs(['#if DEBUG', '    ExpectNoRows(rows);', '#endif']), 1, 'other conditions are named in the limit, not decided');
+  assert.equal(cs(['    ExpectNoRows(rows);']), 1);
+  // Same length, same lines.
+  const t = '#if false\r\nA();\r\n#endif\r\nB();\r\n';
+  const e = executableText(t, 'A.cs');
+  assert.equal(e.length, t.length);
+  assert.equal(e.split('\n').length, t.split('\n').length);
+  assert.match(fs.readFileSync(path.join(scripts, 'proof-record.mjs'), 'utf8'), /#if/);
+});
+
+// ---- Repair round 2026-11-18 (two more confirmed problems) ----
+
+test('round 3 problem 1: a call counts only when it can be the helper itself: not a member of another object, not a shadowing local declaration, not a regex literal', async () => {
+  const { testSpans, helperCallers } = await import('../scripts/proof-record.mjs');
+  const js = (body) => { const t = lines('function expectNoRows(rows) {', '  expect(rows).toEqual([]);', '}', "it('refuses', () => {", ...body, '});'); return helperCallers(t, testSpans(t, 'src/rows.test.cjs'), 2).length; };
+  assert.equal(js(['  other.expectNoRows(product.rows());']), 0, 'a member of another object');
+  assert.equal(js(['  other?.expectNoRows(product.rows());']), 0, 'an optional member of another object');
+  assert.equal(js(['  a.b.expectNoRows(product.rows());']), 0, 'a chained member');
+  assert.equal(js(['  make().expectNoRows(product.rows());']), 0, 'a member of a call result');
+  assert.equal(js(['  function expectNoRows() {}', '  expectNoRows(product.rows());']), 0, 'a local function of the same name');
+  assert.equal(js(['  const expectNoRows = () => {};', '  expectNoRows(product.rows());']), 0, 'a local const of the same name');
+  assert.equal(js(['  let expectNoRows = noop;', '  expectNoRows(product.rows());']), 0, 'a local let of the same name');
+  assert.equal(js(['  if (true) /expectNoRows(rows)/.test(x);']), 0, 'a regex literal after if (true)');
+  assert.equal(js(['  while (go()) /expectNoRows(rows)/.test(x);']), 0, 'a regex literal after while (...)');
+  // Must not change: the nearest normal flows still count.
+  assert.equal(js(['  expectNoRows(product.rows());']), 1, 'a plain call');
+  assert.equal(js(['  await expectNoRows(product.rows());']), 1, 'an awaited call');
+  assert.equal(js(['  this.expectNoRows(product.rows());']), 1, 'a call on this');
+  assert.equal(js(['  expect(other.rows()).toEqual([]);', '  expectNoRows(product.rows());']), 1, 'a call after another object member call');
+  assert.equal(js(['  const total = (a + b) / expectNoRows(rows) / 2;']), 1, 'a division is not a regex');
+  assert.equal(js(['  if (ready) expectNoRows(rows);']), 1, 'a call after if (...)');
+  // A shadow in one test does not hide the real call of another test.
+  const two = lines('function expectNoRows(rows) {', '  expect(rows).toEqual([]);', '}', "it('shadows', () => {", '  const expectNoRows = () => {};', '  expectNoRows(rows);', '});', "it('calls', () => {", '  expectNoRows(rows);', '});');
+  assert.deepEqual(helperCallers(two, testSpans(two, 'src/rows.test.cjs'), 2).map(s => s.titles[0]), ['calls']);
+  // C#: another object's method, a local function of the same name; the class itself and this still count.
+  const cs = (body) => { const t = lines('public class RowsTests', '{', '    private static void ExpectNoRows(List<int> rows)', '    {', '        rows.Should().BeEmpty();', '    }', '', '    [Fact]', '    public void Refuses_Unauthorized()', '    {', ...body, '    }', '}'); return helperCallers(t, testSpans(t, 'Api.Tests/RowsTests.cs'), 5).length; };
+  assert.equal(cs(['        Other.ExpectNoRows(rows);']), 0, 'C#: a member of another class');
+  assert.equal(cs(['        helper.ExpectNoRows(rows);']), 0, 'C#: a member of another object');
+  assert.equal(cs(['        void ExpectNoRows(List<int> r) { }', '        ExpectNoRows(rows);']), 0, 'C#: a local function of the same name');
+  assert.equal(cs(['        var ExpectNoRows = (List<int> r) => { };', '        ExpectNoRows(rows);']), 0, 'C#: a local variable of the same name');
+  assert.equal(cs(['        ExpectNoRows(rows);']), 1, 'C#: a plain call');
+  assert.equal(cs(['        RowsTests.ExpectNoRows(rows);']), 1, 'C#: a call on the declaring class');
+  assert.equal(cs(['        this.ExpectNoRows(rows);']), 1, 'C#: a call on this');
+});
+
+test('round 3 problem 2: an inherited test is credited only by a failing test whose class is known to derive from the declaring class, across the files read', async () => {
+  const { survivors, caughtTests, failureReasons } = await import('../scripts/red-proof.mjs');
+  const { testSpans, declaredTests, csClassList } = await import('../scripts/proof-record.mjs');
+  const base = lines('namespace Demo;', 'public abstract class BaseTests', '{', '    [Fact]', '    public void RefusesUnauthorized() { x.Should().BeEmpty(); }', '}');
+  const unrelated = lines('namespace Demo;', 'public class UnrelatedTests', '{', '    [Fact]', '    public void Other() { x.Should().BeEmpty(); }', '}');
+  const sql = lines('namespace Demo;', 'public class SqlTests : BaseTests', '{', '    [Fact]', '    public void Own() { x.Should().BeEmpty(); }', '}');
+  const mid = lines('namespace Demo;', 'public abstract class MidTests : BaseTests', '{', '    [Fact]', '    public void MidOwn() { x.Should().BeEmpty(); }', '}');
+  const leaf = lines('namespace Demo;', 'public class LeafTests : MidTests', '{', '    [Fact]', '    public void LeafOwn() { x.Should().BeEmpty(); }', '}');
+  const fail = (cls) => failureReasons(`  Failed Demo.${cls}.RefusesUnauthorized [12 ms]\n  Error Message:\n   Assert.True() Failure\n`);
+  const decl = (...files) => files.flatMap(([t, f]) => declaredTests(t, f)), spans = (...files) => files.flatMap(([t, f]) => testSpans(t, f));
+  const B = [base, 'Api.Tests/BaseTests.cs'], U = [unrelated, 'Api.Tests/UnrelatedTests.cs'], S = [sql, 'Api.Tests/SqlTests.cs'], M = [mid, 'Api.Tests/MidTests.cs'], L = [leaf, 'Api.Tests/LeafTests.cs'];
+  // The unrelated class: not credited, with another class known (and without).
+  for (const files of [[B, U], [B]]) {
+    assert.equal(survivors(['RefusesUnauthorized'], fail('UnrelatedTests'), [], decl(...files)).length, 1, 'shown: not credited');
+    assert.deepEqual(caughtTests(['RefusesUnauthorized'], fail('UnrelatedTests'), [], spans(...files)), [], 'saved: not credited');
+  }
+  // Derived in another file (it has tests of its own): credited.
+  assert.deepEqual(survivors(['RefusesUnauthorized'], fail('SqlTests'), [], decl(B, S)), []);
+  assert.equal(caughtTests(['RefusesUnauthorized'], fail('SqlTests'), [], spans(B, S)).length, 1);
+  assert.equal(survivors(['RefusesUnauthorized'], fail('UnrelatedTests'), [], decl(B, S, U)).length, 1, 'derived known, but the failing class is not it');
+  // Derived through another class, three files.
+  assert.deepEqual(survivors(['RefusesUnauthorized'], fail('LeafTests'), [], decl(B, M, L)), []);
+  assert.equal(caughtTests(['RefusesUnauthorized'], fail('LeafTests'), [], spans(B, M, L)).length, 1);
+  // A derived class in a file with no test: its class list is passed.
+  const noTests = csClassList('public class SqlTests : BaseTests { }', 'Api.Tests/SqlTests.cs');
+  assert.deepEqual(survivors(['RefusesUnauthorized'], fail('SqlTests'), [], decl(B), noTests), []);
+  assert.equal(caughtTests(['RefusesUnauthorized'], fail('SqlTests'), [], spans(B), noTests).length, 1);
+  // No derived class known at all: the honest path says it cannot be matched and names the base class.
+  const left = survivors(['RefusesUnauthorized'], fail('SqlTests'), [], decl(B));
+  assert.equal(left.length, 1);
+  assert.match(left[0], /cannot be matched/);
+  assert.match(left[0], /BaseTests/);
+  // Must not change: a test of its own class is credited by that class, and nested names still work.
+  assert.deepEqual(survivors(['RefusesUnauthorized'], fail('BaseTests'), [], decl(B)), []);
+  assert.deepEqual(survivors(['RefusesUnauthorized'], failureReasons('  Failed Demo.Outer+SqlTests.RefusesUnauthorized [1 ms]\n  Error Message:\n   x\n'), [], decl(B, S)), []);
+  const plain = lines('public class ServiceTests', '{', '    [Fact]', '    public void Refuses() { x.Should().BeEmpty(); }', '}');
+  assert.deepEqual(survivors(['Refuses'], failureReasons('  Failed Demo.ServiceTests.Refuses [1 ms]\n  Error Message:\n   x\n'), [], declaredTests(plain, 'A.cs')), []);
+});
+
+// ---- Repair round 2026-11-18, round 4 (eight more confirmed problems) ----
+
+test('round 4 problems 1-5: a fake member, a bang member, a destructured or described shadow, a regex after an operator; a factory helper still counts', async () => {
+  const { testSpans, helperCallers } = await import('../scripts/proof-record.mjs');
+  const js = (body, file = 'src/rows.test.cjs') => { const t = lines('function expectNoRows(rows) {', '  expect(rows).toEqual([]);', '}', "it('refuses', () => {", ...body, '});'); return helperCallers(t, testSpans(t, file), 2).length; };
+  // 1: a method written inside the test, a class method, a TS type member.
+  assert.equal(js(['  const other = { expectNoRows(rows) { return rows; } };', '  other.expectNoRows(product.rows());']), 0, 'object method');
+  assert.equal(js(['  class Fake { expectNoRows(rows) { return rows; } }', '  new Fake().expectNoRows(product.rows());']), 0, 'class method');
+  assert.equal(js(['  const other: { expectNoRows(rows: unknown[]): void } = make();', '  other.expectNoRows(product.rows());'], 'src/rows.test.ts'), 0, 'type member');
+  // 2: a bang before the dot.
+  assert.equal(js(['  other!.expectNoRows(product.rows());'], 'src/rows.test.ts'), 0, 'bang member');
+  assert.equal(js(["  'x'.expectNoRows(rows);"]), 0, 'member of a string');
+  // 3: destructuring, later declarator, class, describe-level const.
+  assert.equal(js(['  const { expectNoRows } = fakes;', '  expectNoRows(product.rows());']), 0, 'object pattern');
+  assert.equal(js(['  const [expectNoRows] = fakes;', '  expectNoRows(product.rows());']), 0, 'array pattern');
+  assert.equal(js(['  let a = 1, expectNoRows = noop;', '  expectNoRows(product.rows());']), 0, 'later declarator');
+  assert.equal(js(['  class expectNoRows {}', '  expectNoRows(product.rows());']), 0, 'class');
+  const desc = lines('function expectNoRows(rows) {', '  expect(rows).toEqual([]);', '}', "describe('d', () => {", '  const expectNoRows = () => {};', "  it('refuses', () => {", '    expectNoRows(rows);', '  });', '});');
+  assert.equal(helperCallers(desc, testSpans(desc, 'src/rows.test.cjs'), 2).length, 0, 'describe-level const');
+  // 4: a regex literal after an operator, a brace, or an if head with a paren in a string.
+  for (const l of ["  const s = 'a' + /expectNoRows(rows)/.source;", '  if (true) {} /expectNoRows(rows)/.test(x);', '  const b = 1 < /expectNoRows(rows)/.lastIndex;', "  if (s === ')') /expectNoRows(rows)/.test(x);"]) assert.equal(js([l]), 0, l);
+  // 5: a helper made inside a factory, reached through the result.
+  const fac = (body) => { const t = lines('function setup() {', '  const expectNoRows = () => {', '    expect(product.rows()).toEqual([]);', '  };', '  return { expectNoRows };', '}', "it('refuses', () => {", ...body, '});'); return helperCallers(t, testSpans(t, 'src/rows.test.cjs'), 3).length; };
+  assert.equal(fac(['  const ui = setup();', '  ui.expectNoRows();']), 1, 'member of the factory result');
+  assert.equal(fac(['  setup().expectNoRows();']), 1, 'direct member');
+  assert.equal(fac(['  const expectNoRows = setup().expectNoRows;', '  expectNoRows();']), 1, 'alias');
+  assert.equal(fac(['  const { expectNoRows } = setup();', '  expectNoRows();']), 1, 'destructured');
+  assert.equal(fac(['  other.expectNoRows();']), 0, 'a fake in a test that never calls the factory');
+  // Must not change: plain calls, division, and an honest describe-level helper.
+  assert.equal(js(['  expectNoRows(product.rows());']), 1);
+  assert.equal(js(['  const total = a / expectNoRows(rows) / 2;']), 1);
+  assert.equal(js(['  const ok = a > b ? expectNoRows(rows) : 0;']), 1, 'ternary call is not a member declaration');
+  assert.equal(js(['  const { other } = fakes;', '  expectNoRows(product.rows());']), 1, 'an unrelated pattern');
+  assert.equal(js(['  const { expectNoRows: renamed } = fakes;', '  expectNoRows(product.rows());']), 1, 'a renamed key is no binding');
+  const own = lines("describe('d', () => {", '  const expectNoRows = () => {', '    expect(rows).toEqual([]);', '  };', "  it('refuses', () => {", '    expectNoRows(rows);', '  });', '});');
+  assert.equal(helperCallers(own, testSpans(own, 'src/rows.test.cjs'), 3).length, 1, 'the describe-level helper itself');
+});
+
+test('round 4 problems 3, 6 (C#): any local type shadows; an extension, fixture or base member counts', async () => {
+  const { testSpans, helperCallers } = await import('../scripts/proof-record.mjs');
+  const cs = (body) => { const t = lines('public class RowsTests', '{', '    private static void ExpectNoRows(List<int> rows)', '    {', '        rows.Should().BeEmpty();', '    }', '', '    [Fact]', '    public void Refuses_Unauthorized()', '    {', ...body, '    }', '}'); return helperCallers(t, testSpans(t, 'Api.Tests/RowsTests.cs'), 5).length; };
+  assert.equal(cs(['        bool ExpectNoRows(List<int> r) => true;', '        ExpectNoRows(rows);']), 0, 'bool local function');
+  assert.equal(cs(['        string ExpectNoRows(List<int> r) { return ""; }', '        ExpectNoRows(rows);']), 0, 'string local function');
+  assert.equal(cs(['        Action<List<int>> ExpectNoRows = r => { };', '        ExpectNoRows(rows);']), 0, 'nested generic delegate');
+  assert.equal(cs(['        other!.ExpectNoRows(rows);']), 0, 'bang member of another object');
+  assert.equal(cs(['        var x = await ExpectNoRowsAsync(rows);', '        ExpectNoRows(rows);']), 1, 'must not change: a plain call');
+  assert.equal(cs(['        return ExpectNoRows(rows);']), 1, 'must not change: return keyword is no type');
+  const ext = lines('public static class RowAsserts', '{', '    public static void ShouldHaveNoRows(this List<int> rows)', '    {', '        rows.Should().BeEmpty();', '    }', '}', 'public class RowsTests', '{', '    [Fact]', '    public void Refuses() { rows.ShouldHaveNoRows(); }', '}');
+  assert.equal(helperCallers(ext, testSpans(ext, 'Api.Tests/RowsTests.cs'), 5).length, 1, 'extension method');
+  const fix = lines('public class DbFixture', '{', '    public void ExpectNoRows(List<int> rows)', '    {', '        rows.Should().BeEmpty();', '    }', '}', 'public class RowsTests', '{', '    [Fact]', '    public void Refuses() { _db.ExpectNoRows(rows); }', '}');
+  assert.equal(helperCallers(fix, testSpans(fix, 'Api.Tests/RowsTests.cs'), 5).length, 1, 'fixture member');
+  const bas = lines('public abstract class RowsBase', '{', '    protected void ExpectNoRows(List<int> rows)', '    {', '        rows.Should().BeEmpty();', '    }', '}', 'public class RowsTests : RowsBase', '{', '    [Fact]', '    public void Refuses() { base.ExpectNoRows(rows); }', '}');
+  assert.equal(helperCallers(bas, testSpans(bas, 'Api.Tests/RowsTests.cs'), 5).length, 1, 'base member');
+});
+
+test('round 4 problems 7, 8 (C#): a failure with no class does not credit an inherited test without a derived class; nested brackets in a base call', async () => {
+  const { survivors, caughtTests, failureReasons } = await import('../scripts/red-proof.mjs');
+  const { testSpans, declaredTests } = await import('../scripts/proof-record.mjs');
+  const abs = lines('namespace Demo;', 'public abstract class BaseTests', '{', '    [Fact(DisplayName = "refuses unauthorized")]', '    public void RefusesUnauthorized() { x.Should().BeEmpty(); }', '}');
+  const none = failureReasons('  Failed refuses unauthorized [12 ms]\n  Error Message:\n   Assert.True() Failure\n');
+  const left = survivors(['RefusesUnauthorized'], none, [], declaredTests(abs, 'Api.Tests/BaseTests.cs'));
+  assert.equal(left.length, 1);
+  assert.match(left[0], /cannot be matched/);
+  assert.deepEqual(caughtTests(['RefusesUnauthorized'], none, [], testSpans(abs, 'Api.Tests/BaseTests.cs')), []);
+  // Must not change: a plain class is still credited by a failure that prints no class.
+  const plain = lines('public class ServiceTests', '{', '    [Fact(DisplayName = "refuses it")]', '    public void Refuses() { x.Should().BeEmpty(); }', '}');
+  assert.deepEqual(survivors(['Refuses'], failureReasons('  Failed refuses it [1 ms]\n  Error Message:\n   x\n'), [], declaredTests(plain, 'A.cs')), []);
+  // 8: a derived class whose base call holds nested brackets.
+  const base = lines('namespace Demo;', 'public abstract class BaseTests', '{', '    [Fact]', '    public void RefusesUnauthorized() { x.Should().BeEmpty(); }', '}');
+  const sql = lines('namespace Demo;', 'public class SqlTests(Db db) : BaseTests(db, new Options())', '{', '    [Fact]', '    public void Own() { }', '}');
+  const decl = [...declaredTests(base, 'Api.Tests/BaseTests.cs'), ...declaredTests(sql, 'Api.Tests/SqlTests.cs')];
+  const fail = failureReasons('  Failed Demo.SqlTests.RefusesUnauthorized [12 ms]\n  Error Message:\n   x\n');
+  assert.deepEqual(survivors(['RefusesUnauthorized'], fail, [], decl), []);
+  assert.equal(caughtTests(['RefusesUnauthorized'], fail, [], [...testSpans(base, 'Api.Tests/BaseTests.cs'), ...testSpans(sql, 'Api.Tests/SqlTests.cs')]).length, 1);
+});

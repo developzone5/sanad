@@ -449,3 +449,112 @@ test('check lines: with --lines and --check the first run checks every Check lin
   }
   assert.equal(planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md' }).checks.some((c) => c.name === 'check lines'), false, 'no --check: nothing to read');
 });
+
+// 2026-11-18 (audit finding 1): a changed function with callers that was never searched passed the places check,
+// because nothing compared the size check's changed functions with the list's Names.
+test('finding 1: a changed function with callers that is not on the places list fails the places check; searched, it passes', async () => {
+  const { unsearchedCallers } = await import('../scripts/pre-review.mjs');
+  const sizeOut = 'SIZE: medium (diff) — x\n  callers: ensureDue ×1 [web/src/schedule.ts:2]; lateness ×3 [web/src/r1.ts:2, web/src/r2.ts:2, web/src/r3.ts:2]; quiet ×0 (+1 in tests); rules.ts:both ×2 [a:1]; odd ×? (not resolved: x)\n';
+  assert.deepEqual(unsearchedCallers(sizeOut, ['ensureDue']).names, ['lateness', 'both', 'odd']);
+  assert.deepEqual(unsearchedCallers(sizeOut, ['ensureDue', 'lateness', 'both', 'odd']).names, []);
+  assert.deepEqual(unsearchedCallers('SIZE: tiny (diff) — docs only', []).names, []);
+  assert.equal(unsearchedCallers('  callers: a ×1; (+3 more changed functions, all analysed; rows not printed)', ['a']).more, 3);
+
+  const { repo, git, write } = fixture();
+  write('web/src/rules.ts', 'export function ensureDue(d: number) { return d; }\nexport function lateness(d: number) { return d + 1; }\n');
+  write('web/src/schedule.ts', "import { ensureDue } from './rules';\nexport const s = ensureDue(1);\n");
+  for (const n of [1, 2, 3]) write(`web/src/report${n}.ts`, `import { lateness } from './rules';\nexport const r${n} = lateness(${n});\n`);
+  git('add', '-A'); git('commit', '-qm', 'rules'); git('branch', '-f', 'base');
+  write('web/src/rules.ts', 'export function ensureDue(d: number) { return d + 0; }\nexport function lateness(d: number) { return d + 2; }\n');
+  const siblings = path.join(fs.mkdtempSync(path.join(root, 'notes-')), 'siblings.md');
+  fs.writeFileSync(siblings, '# Siblings\n\nSIBLINGS: none\n\nSAME JOB: none\n');
+  const one = placesFor(repo, 'ensureDue');
+  let r = run(repo, ['--places', one, '--siblings', siblings, '--no-cache']);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /✗ places[^\n]*\n(?:\s+[^\n]*\n)*?\s+OPEN: lateness — changed, not on the places list/);
+  assert.match(r.stdout, /callers: ensureDue ×1[^\n]*lateness ×3/, 'the size check of the same run names them');
+  // Searched as well: the same change passes.
+  const both = placesFor(repo, 'ensureDue,lateness');
+  r = run(repo, ['--places', both, '--siblings', siblings, '--no-cache']);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /✓ places/);
+});
+
+test('finding 7: the siblings check gets the ticket lines and the check lines when pre-review has both', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo } = fixture();
+  const find = (o) => planChecks({ repo, base: 'base', node: process.execPath, remote: null, siblings: 's.md', places: 'p.md', ...o }).checks.find((c) => c.name === 'siblings').args.slice(1);
+  assert.deepEqual(find({ lines: 'l.md', check: 'c.md' }), ['--check', 's.md', '--places', 'p.md', '--lines', 'l.md', '--check-lines', 'c.md']);
+  assert.deepEqual(find({ lines: 'l.md' }), ['--check', 's.md', '--places', 'p.md'], 'one of the two alone: as before');
+});
+
+test('finding 1, must not change: a changed function with no caller, and a change with no function, owe no name on the list', () => {
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 3;\n');
+  const r = run(repo, [...closed(repo), '--no-cache']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+});
+
+// ---- 2026-11-18 (audit, repair round) ----
+const noSiblings = () => {
+  const f = path.join(fs.mkdtempSync(path.join(root, 'notes-')), 'siblings.md');
+  fs.writeFileSync(f, '# Siblings\n\nSIBLINGS: none\n\nSAME JOB: none\n');
+  return f;
+};
+
+test('audit 1: a changed member of an object (assignmentsApi.publishNow) with three caller files is owed on the list; searched by its full name or its last part it passes', async () => {
+  const { unsearchedCallers } = await import('../scripts/pre-review.mjs');
+  const out = 'SIZE: medium (diff) — x\n  callers: assignmentsApi.publishNow ×3 [a.tsx:3, b.tsx:3, c.tsx:3]; lateness ×3 [r1.ts:2, r2.ts:2, r3.ts:2]\n';
+  assert.deepEqual(unsearchedCallers(out, ['label']).names, ['assignmentsApi.publishNow', 'lateness']);
+  assert.deepEqual(unsearchedCallers(out, ['assignmentsApi.publishNow', 'lateness']).names, []);
+  assert.deepEqual(unsearchedCallers(out, ['publishNow', 'lateness']).names, [], 'the last part is searched too');
+  assert.deepEqual(unsearchedCallers('  callers: a ×1; some strange entry', ['a']).unreadable, ['some strange entry'], 'an entry that cannot be read is returned, never skipped');
+
+  const { repo, git, write } = fixture();
+  write('web/src/api/assignments.ts', 'export const assignmentsApi = {\n  create: (body: object) => http.post("/a", body),\n  publishNow: (id: number) => http.post(`/a/${id}/p`, {}),\n};\n');
+  for (const n of [1, 2, 3]) write(`web/src/Page${n}.tsx`, `import { assignmentsApi } from './api/assignments';\nexport const P${n} = () => assignmentsApi.publishNow(${n});\n`);
+  write('web/src/other.ts', 'export function label() { return 1; }\n');
+  git('add', '-A'); git('commit', '-qm', 'api'); git('branch', '-f', 'base');
+  write('web/src/api/assignments.ts', 'export const assignmentsApi = {\n  create: (body: object) => http.post("/a", body),\n  publishNow: (id: number) => http.post(`/a/${id}/publish-now`, {}),\n};\n');
+  let r = run(repo, ['--places', placesFor(repo, 'label'), '--siblings', noSiblings(), '--no-cache']);
+  assert.match(r.stdout, /callers: assignmentsApi\.publishNow ×3/, r.stdout);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /OPEN: assignmentsApi\.publishNow — changed, not on the places list/);
+  r = run(repo, ['--places', placesFor(repo, 'assignmentsApi.publishNow'), '--siblings', noSiblings(), '--no-cache']);
+  assert.equal(r.status, 0, r.stdout);
+});
+
+function forms(handlerBody) {
+  const { repo, git, write } = fixture();
+  for (const n of [1, 2, 3, 4]) {
+    write(`web/src/Form${n}.tsx`, `export function Form${n}() {\n  const dueDate = useDue();\n  const handleSubmit = () => { save(dueDate); };\n  return <form onSubmit={handleSubmit} />;\n}\n`);
+  }
+  git('add', '-A'); git('commit', '-qm', 'forms'); git('branch', '-f', 'base');
+  write('web/src/Form1.tsx', `export function Form1() {\n  const dueDate = useDue();\n  const handleSubmit = () => { ${handlerBody} save(dueDate); };\n  return <form onSubmit={handleSubmit} />;\n}\n`);
+  return { repo, git, write };
+}
+
+test('audit 3: a handler declared inside a component and used only inside it owes no name on the places list', () => {
+  const { repo } = forms('if (!dueDate) return;');
+  const r = run(repo, ['--places', placesFor(repo, 'dueDate'), '--siblings', noSiblings(), '--no-cache']);
+  assert.match(r.stdout, /callers: handleSubmit ×1/, 'the size check names it: ' + r.stdout);
+  assert.equal(r.status, 0, r.stdout);
+});
+
+test('audit 3, must not change: a handler that has a caller outside the function that declares it, or one that is passed on, still owes its name', async () => {
+  const { unsearchedCallers } = await import('../scripts/pre-review.mjs');
+  const { repo, write } = fixture();
+  // The caller (line 6) is after the component's closing brace: shared.
+  write('web/src/Shared.tsx', 'export function Shared() {\n  const handleSubmit = () => { save(1); };\n  return null;\n}\nconst x = 1;\nhandleSubmit();\n');
+  const o = { repo, changed: ['web/src/Shared.tsx'] };
+  assert.deepEqual(unsearchedCallers('  callers: handleSubmit ×1 [Shared.tsx:6]', [], o).names, ['handleSubmit']);
+  // The same name declared twice in the file, or a count that is not all listed: shared.
+  write('web/src/Twice.tsx', 'export function A() {\n  const h = () => 1;\n  return h();\n}\nexport function B() {\n  const h = () => 2;\n  return h();\n}\n');
+  assert.deepEqual(unsearchedCallers('  callers: h ×1 [Twice.tsx:3]', [], { repo, changed: ['web/src/Twice.tsx'] }).names, ['h']);
+  assert.deepEqual(unsearchedCallers('  callers: handleSubmit ×9 [Shared.tsx:3]', [], o).names, ['handleSubmit']);
+  // Inside one component, one caller line: local.
+  write('web/src/Own.tsx', 'export function Own() {\n  const handleSubmit = () => {\n    save(1);\n  };\n  return <form onSubmit={handleSubmit} />;\n}\n');
+  assert.deepEqual(unsearchedCallers('  callers: handleSubmit ×1 [Own.tsx:5]', [], { repo, changed: ['web/src/Own.tsx'] }).names, []);
+  // No repo given: every changed function with callers is owed, as before.
+  assert.deepEqual(unsearchedCallers('  callers: handleSubmit ×1 [Own.tsx:5]', []).names, ['handleSubmit']);
+});
