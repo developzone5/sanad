@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { gitBash, bashEnv } from '../scripts/git-bash.mjs';
 import { buildBrief, buildFreshBrief, buildLaunch, outsideItems, splitOutside, checkLines, decidedItems, checkSources, coverageProblems, chooseSize, sizeFacts, riskFiles, signalFiles, designerReport } from '../scripts/review-brief.mjs';
 
 // 2026-11-08 (user: "check lines should comes from all tickets"): every ticket line has a Check line,
@@ -760,12 +761,17 @@ test('a Codex designer report written where its launch line says counts as saved
 // The remote launcher starts Claude agents only: a Codex task is refused with one line, before any ssh.
 const launcher = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'scripts', 'remote', 'orca-launch.sh');
 test('orca-launch.sh: --engine codex is refused in one line before ssh; claude is accepted; the file parses', () => {
-  const bash = spawnSync('bash', ['-n', launcher], { encoding: 'utf8', windowsHide: true });
+  // Git's own bash, never plain `bash`: on the test machine that name is the WSL launcher, which has no
+  // /bin/bash (2026-11-18: this test failed there and rolled the install back; see scripts/git-bash.mjs).
+  const sh = gitBash().exe;
+  const shEnv = bashEnv();
+  const pathKey = Object.keys(shEnv).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  const bash = spawnSync(sh, ['-n', launcher], { encoding: 'utf8', windowsHide: true, env: shEnv });
   assert.equal(bash.status, 0, bash.stderr);
   // ssh and orca are made to fail loudly: a refusal must never reach them.
   const bin = fs.mkdtempSync(path.join(root, 'bin-'));
   for (const n of ['ssh', 'orca']) fs.writeFileSync(path.join(bin, n), '#!/usr/bin/env bash\necho CALLED-' + n + ' >&2\nexit 99\n', { mode: 0o755 });
-  const run = (...a) => spawnSync('bash', [launcher, ...a], { encoding: 'utf8', windowsHide: true, env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+  const run = (...a) => spawnSync(sh, [launcher, ...a], { encoding: 'utf8', windowsHide: true, env: { ...shEnv, [pathKey]: bin + path.delimiter + (shEnv[pathKey] || '') } });
   for (const args of [['--engine', 'codex', 'env', 'C:/w', 'C:/b.md'], ['--role', 'review', '--engine', 'codex', 'env', 'C:/w', 'C:/b.md'], ['--engine', 'codex', '--role', 'review', 'env', 'C:/w', 'C:/b.md']]) {
     const r = run(...args);
     assert.equal(r.status, 2, args.join(' ') + r.stdout + r.stderr);

@@ -94,9 +94,21 @@ function fixture() {
 
 // The same folder after --brief, with the agent's answer saved as its report. The answer starts with the line
 // that names the brief, as the brief asks; a function gets the id and gives the whole file.
+// 2026-11-18: a REFUTED answer is recorded only for a brief bound to a git repository that holds the files it cites, so
+// these tests brief a small temp repository (made once) that holds the files their answers name.
+let shared = '';
+function citedRepo() {
+  if (shared) return shared;
+  shared = gitRepo();
+  for (const rel of ['src/save.ts', 'src/queue.ts', 'src/a.ts', 'src/b.ts', 'src/export.ts', 'src/other.ts', 'src/pay.ts', 'src/limit.ts', 'src/Roles/SaveRoleHandler.cs', 'tests/roles.test.ts', 'README.md']) {
+    fs.mkdirSync(path.dirname(path.join(shared, rel)), { recursive: true });
+    fs.writeFileSync(path.join(shared, rel), 'x\n');
+  }
+  return shared;
+}
 function briefed(answer) {
   const f = fixture();
-  const b = run(['--brief', '--notes', f.notes, '--reports', f.reports]);
+  const b = run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', citedRepo()]);
   assert.equal(b.status, 0, b.stdout + b.stderr);
   f.id = idOf(f.brief);
   fs.writeFileSync(f.report, typeof answer === 'function' ? answer(f.id) : `BRIEF ${f.id}\n` + answer);
@@ -492,7 +504,7 @@ test('a note longer than the hooks cut reaches the agent whole: its lines from t
       'Bug — src/a.ts:1 a short note',
       '',
     ].join(eol));
-    let r = run(['--brief', '--notes', notes, '--reports', file]);
+    let r = run(['--brief', '--notes', notes, '--reports', file, '--repo', citedRepo()]);
     assert.equal(r.status, 0, r.stdout + r.stderr);
     const rows = fs.readFileSync(brief, 'utf8').split(/\r?\n/);
     const under = (n, kind) => {
@@ -815,11 +827,13 @@ test('7: a REFUTED that cites a prose file (README.md:1) is UNSURE once that pro
   assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · UNSURE \(the code it cites changed/);
 });
 
-test('7: a note that names no file of the repository is not judged by the files (e.g, a path outside it)', () => {
+// Changed 2026-11-18: a refutation whose evidence names no file of the repository used to stand (it was "not judged by the
+// files"); nothing then shows the cited code unchanged, so it is UNSURE now (see R2). The note's own words naming no file are still not judged.
+test('7: a note text that names no file of the repository is not judged by the files, when the evidence cites a real one', () => {
   const f = fixture();
   const repo = gitRepo();
   assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]).status, 0);
-  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — docs/outside.txt:3 (e.g. the vendor copy) holds the guard\n`);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — src/roles.ts:1 (e.g. the vendor copy) holds the guard\n`);
   assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
   assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · REFUTED/);
 });
@@ -866,7 +880,7 @@ test('8: a Gap or Bug that asks the user to decide is asked of the user with the
   const notes = fs.mkdtempSync(path.join(root, 'notes-'));
   const report = path.join(notes, 'review.md');
   fs.writeFileSync(report, 'RECOMMEND: FAIL\n- Gap — src/limit.ts:9 the limit is 50 here and 100 in the ticket: you decide which one.\n- Bug — src/save.ts:12 sends with an empty list\n');
-  assert.equal(run(['--brief', '--notes', notes, '--reports', report]).status, 0);
+  assert.equal(run(['--brief', '--notes', notes, '--reports', report, '--repo', citedRepo()]).status, 0);
   const brief = path.join(notes, 'note-check-brief.md');
   assert.match(fs.readFileSync(brief, 'utf8'), /^K1 · Gap \(asks the user\) · from review\.md · /m);
   assert.match(fs.readFileSync(brief, 'utf8'), /For a Question line/);
@@ -928,4 +942,152 @@ test('4: the brief asks for the run number in the first line, and an answer with
   refused(run(['--record', f.report, '--notes', f.notes]), /names the brief but not the run/);
   assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · CONFIRMED/, 'the newer record is untouched');
   assert.ok(gen(second) > gen(first));
+});
+
+// ---- 2026-11-18 (recheck by the other engine): a REFUTED answer is accepted only when the files it cites are SHOWN unchanged ----
+// A brief with no code state cannot show that, so its REFUTED answers are UNSURE; a bound brief whose cited files cannot
+// be found in the repository cannot show it either. The first test is the reported case, in a folder that is no git repository.
+const NOT_SHOWN = 'UNSURE (the code is not bound to a repository: run --brief again with --repo <the git repository>)';
+test('R1: a brief in a folder with no git repository: a REFUTED answer is UNSURE with the reason, no author line, listed; the source changing later changes nothing', () => {
+  const plain = fs.realpathSync.native(fs.mkdtempSync(path.join(root, 'plain-')));
+  fs.mkdirSync(path.join(plain, 'src'));
+  fs.writeFileSync(path.join(plain, 'src', 'roles.ts'), 'export const canSave = (user) => user.role === "admin";\n');
+  const f = fixture();
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', plain]).status, 0);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — src/roles.ts:1 checks the admin role before saving\nCONFIRMED K2 — src/list.ts:3 loads every row\nUNSURE K4 — the worker code is not in this folder\n`);
+  fs.writeFileSync(path.join(plain, 'src', 'roles.ts'), 'export const canSave = () => true;\n');   // changed after the answer, nothing sees it
+  const r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const rows = kLines(f.list);
+  assert.ok(rows.some((l) => l.startsWith('K1 · ' + NOT_SHOWN + ' · ')), rows.join('\n'));
+  assert.ok(rows.some((l) => l.startsWith('K2 · CONFIRMED · ')) && rows.some((l) => l.startsWith('K4 · UNSURE · ')), 'CONFIRMED and UNSURE are recorded as before');
+  assert.match(r.stdout, /^NOTE CHECK: 5 note\(s\) — 1 confirmed, 0 refuted, \d unsure$/m);
+  assert.doesNotMatch(r.stdout, /ASK THE USER: K1|THE AUTHOR MAY NOW WRITE|^Refuted notes are not fixed now/m);
+  assert.match(r.stdout, /^NOT SHOWN UNCHANGED: K1 — /m, 'listed beside the changed notes');
+  assert.match(r.stderr, /^CODE: NOT BOUND /m, 'the NOT BOUND line stays');
+});
+test('R1: no --repo at all, and a brief whose NOT BOUND line was taken out: the same', () => {
+  for (const strip of [false, true]) {
+    const f = fixture();
+    assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports]).status, 0);
+    if (strip) fs.writeFileSync(f.brief, fs.readFileSync(f.brief, 'utf8').split(/\r?\n/).filter((l) => !l.startsWith('CODE: NOT BOUND')).join('\n'));
+    fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — src/save.ts:12 holds the role check\n`);
+    const r = run(['--record', f.report, '--notes', f.notes]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(kLines(f.list).some((l) => l.startsWith('K1 · ' + NOT_SHOWN + ' · ')), 'strip=' + strip + '\n' + kLines(f.list).join('\n'));
+    assert.match(r.stdout, /0 refuted/);
+  }
+});
+test('R2: a bound brief whose evidence cites no file of the repository cannot show it unchanged: UNSURE', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]).status, 0);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — docs/outside.txt:3 (e.g. the vendor copy) holds the guard\n`);
+  const r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · UNSURE \(no file it cites is in the repository/);
+  assert.match(r.stdout, /0 refuted/);
+  assert.match(r.stdout, /^NOT SHOWN UNCHANGED: K1 — /m);
+});
+test('R3: must not change: a bound brief whose cited file is untouched stays REFUTED, with its ASK line', () => {
+  const f = fixture();
+  const repo = gitRepo();
+  assert.equal(run(['--brief', '--notes', f.notes, '--reports', f.reports, '--repo', repo]).status, 0);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\nREFUTED K1 — src/roles.ts:1 holds the role check\n`);
+  const r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /K1 · REFUTED/);
+  assert.match(r.stdout, /1 refuted/);
+  assert.match(r.stdout, /^ASK THE USER: K1 /m);
+  assert.doesNotMatch(r.stdout, /NOT SHOWN UNCHANGED/);
+});
+
+// ---- 2026-11-18 (repair, a REFUTED answer is accepted only when every cited file is SHOWN unchanged) ----
+// Each case makes its own temp repository (a real path), briefs it, optionally changes a file, and records one answer.
+const wait = (ms) => { const end = Date.now() + ms; while (Date.now() < end); };
+function scenario({ files, ignore, report, answer, change, before }) {
+  const f = fixture();
+  const repo = gitRepo();
+  const put = (rel, text) => { fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true }); fs.writeFileSync(path.join(repo, rel), text); };
+  if (ignore) put('.gitignore', ignore);
+  for (const [rel, text] of Object.entries(files)) put(rel, text);
+  const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', windowsHide: true });
+  git('add', '.gitignore');
+  git('add', 'src', 'tests', 'api', 'docker-compose.yml', 'Dockerfile');
+  git('commit', '-q', '-m', 'more');
+  if (before) before(repo, put);
+  fs.writeFileSync(f.fresh, '﻿' + report);
+  wait(40);
+  const b = run(['--brief', '--notes', f.notes, '--reports', f.fresh, '--repo', repo]);
+  assert.equal(b.status, 0, b.stdout + b.stderr);
+  wait(40);
+  if (change) change(repo, put);
+  fs.writeFileSync(f.report, `BRIEF ${idOf(f.brief)}\n${answer(repo)}\n`);
+  const r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  return r.stdout;
+}
+const ADMIN = 'class P { bool Can() { return user.IsAdmin; } }\n';
+const OPEN = 'class P { bool Can() { return true; } }\n';
+const NOTE = 'Bug — any student can delete a material, there is no role check.\n';
+const refutedCount = (out) => Number(/(\d+) refuted/.exec(out)[1]);
+
+test('R4 (1): a bare file name after ( [ or @ is read: its change turns the answer UNSURE, the untouched one stays REFUTED', () => {
+  const files = { 'src/Policy.cs': ADMIN, 'src/Auth/RoleFilter.cs': 'class F {}\n' };
+  for (const cite of ['the guard (Policy.cs:4) holds', 'the guard [Policy.cs:4] holds', 'see @Policy.cs:4 for the guard']) {
+    const answer = () => `REFUTED K1 — src/Auth/RoleFilter.cs:1 rejects every non-admin, ${cite}`;
+    const changed = scenario({ files, report: NOTE, answer, change: (repo, put) => put('src/Policy.cs', OPEN) });
+    assert.equal(refutedCount(changed), 0, cite + '\n' + changed);
+    assert.match(changed, /unsure/);
+    const same = scenario({ files, report: NOTE, answer });
+    assert.equal(refutedCount(same), 1, cite + '\n' + same);
+    assert.match(same, /^ASK THE USER: K1 /m);
+  }
+});
+test('R4 (2): an honest refutation of an untouched bare-name file in ( ) is REFUTED', () => {
+  const out = scenario({ files: { 'src/Policy.cs': ADMIN }, report: 'Bug — src/Policy.cs:4 lets any user delete a material, there is no role check.\n', answer: () => 'REFUTED K1 — the admin guard is already there (Policy.cs:4) and it blocks a student' });
+  assert.equal(refutedCount(out), 1, out);
+  assert.doesNotMatch(out, /NOT SHOWN UNCHANGED/);
+});
+test('R4 (3): a bare-name fallback is not used for an ignored copy or a path outside the repository', () => {
+  const files = { 'api/Policy.cs': ADMIN, 'build/Policy.cs': ADMIN };
+  const a = scenario({ files, ignore: 'build/\n', report: NOTE, answer: () => 'REFUTED K1 — build/Policy.cs:4 checks the admin role before the delete', change: (repo, put) => put('build/Policy.cs', OPEN) });
+  assert.equal(refutedCount(a), 0, a);
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(root, 'outside-')));
+  fs.mkdirSync(path.join(outside, 'src'));
+  fs.writeFileSync(path.join(outside, 'src', 'Policy.cs'), ADMIN);
+  const b = scenario({ files: { 'src/Policy.cs': ADMIN }, report: NOTE, answer: () => `REFUTED K1 — ${slash(outside)}/src/Policy.cs:4 checks the admin role`, change: () => fs.writeFileSync(path.join(outside, 'src', 'Policy.cs'), OPEN) });
+  assert.equal(refutedCount(b), 0, b);
+});
+test('R4 (4): one cited file that git does not list and that changed makes the answer UNSURE, although another cited file is found', () => {
+  const files = { 'tests/PolicyTests.cs': 'class T {}\n', 'generated/Roles.g.cs': ADMIN };
+  const answer = () => 'REFUTED K1 — generated/Roles.g.cs:4 checks the admin role; covered by tests/PolicyTests.cs:1';
+  const changed = scenario({ files, ignore: 'generated/\n', report: NOTE, answer, change: (repo, put) => put('generated/Roles.g.cs', OPEN) });
+  assert.equal(refutedCount(changed), 0, changed);
+  const same = scenario({ files, ignore: 'generated/\n', report: NOTE, answer });
+  assert.equal(refutedCount(same), 1, 'an untouched ignored file is shown by its modified time:\n' + same);
+});
+test('R4 (5): a file with no extension (Dockerfile) that changed is seen when the answer also cites a file with an extension', () => {
+  const files = { 'Dockerfile': 'FROM x\nUSER app\n', 'docker-compose.yml': 'a: 1\n' };
+  const answer = () => 'REFUTED K1 — Dockerfile:2 sets USER app; see docker-compose.yml:1';
+  const report = 'Bug — the container runs as root (Dockerfile).\n';
+  const changed = scenario({ files, report, answer, change: (repo, put) => put('Dockerfile', 'FROM x\nUSER root\n') });
+  assert.equal(refutedCount(changed), 0, changed);
+  assert.match(changed, /unsure/);
+  const same = scenario({ files, report, answer });
+  assert.equal(refutedCount(same), 1, same);
+});
+test('R4 (6): an honest refutation of an untouched ignored, nested-repository or non-ASCII file is REFUTED', () => {
+  const ign = scenario({ files: { 'generated/Roles.g.cs': ADMIN }, ignore: 'generated/\n', report: NOTE, answer: () => 'REFUTED K1 — generated/Roles.g.cs:4 checks the admin role' });
+  assert.equal(refutedCount(ign), 1, ign);
+  const nested = scenario({
+    files: { 'src/x.cs': 'x\n' }, report: NOTE, answer: () => 'REFUTED K1 — libs/core/Gate.cs:4 checks the admin role before the delete',
+    before: (repo, put) => {
+      put('libs/core/Gate.cs', ADMIN);
+      for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'n']]) assert.equal(spawnSync('git', args, { cwd: path.join(repo, 'libs', 'core'), encoding: 'utf8', windowsHide: true }).status, 0);
+    },
+  });
+  assert.equal(refutedCount(nested), 1, nested);
+  const uni = scenario({ files: { 'src/Política.cs': ADMIN }, report: NOTE, answer: () => 'REFUTED K1 — src/Política.cs:4 checks the admin role before the delete' });
+  assert.equal(refutedCount(uni), 1, uni);
 });

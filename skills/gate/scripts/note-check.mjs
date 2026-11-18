@@ -83,7 +83,13 @@ export const REPORT = 'note-check-report.md';
 // GENERATION holds the counter of the --brief runs and the newest generation recorded.
 export const FILES = 'note-check-files.json';
 export const GENERATION = 'note-check-generation.json';
-export const CHANGED_LABEL = 'UNSURE (the code it cites changed: check again)';
+// 2026-11-18: why a REFUTED answer was set aside when nothing shows the cited files unchanged.
+export const UNBOUND_LABEL = 'UNSURE (the code is not bound to a repository: run --brief again with --repo <the git repository>)';
+export const NO_FILE_LABEL = 'UNSURE (no file it cites is in the repository: nothing shows the cited code unchanged)';
+// 2026-11-18 (repair 3): a cited file with a line is outside the repository, or the repository does not track it and no
+// fingerprint of it exists: its code is not shown unchanged.
+export const UNSHOWN_FILE_LABEL = 'UNSURE (a file it cites is not tracked by this repository or lies outside it: nothing shows that code unchanged)';
+export const CHANGED_LABEL ='UNSURE (the code it cites changed: check again)';
 // The hooks' note parser, from this scripts folder. One parser: a second one here would drift from the hooks,
 // and a note the hooks count would be missing from the check (or the other way round).
 export const PARSER = '../../../hooks/lib/transcript-scan.js';
@@ -293,37 +299,89 @@ export function fileFingerprint(top) {
 // reading as the hooks' citedFiles (hooks/lib/transcript-scan.js), with whether a line number follows.
 // 2026-11-18 (repair 1, 2): a drive prefix ("C:\repos\x\src\Policy.cs:4"), [ ] ( ) + and a space are part of a name, and a leading
 // "/", "./" or "../" and the drive are dropped before names are compared; a match with spaces is also read word by word.
-const CITED_FILE = /((?:[A-Za-z]:)?[\w@.\-\/\\\[\]()+ ]+\.[A-Za-z]\w{0,9})(?![\w])(:\d+)?/g;
-const keyOf = (p) => String(p || '').replace(/\\/g, '/').replace(/[),;]+$/, '').toLowerCase().replace(/^[a-z]:(?=\/)/, '').replace(/^(?:\.{0,2}\/)+/, '').replace(/\.+$/, '');
+// 2026-11-18 (repair 3): letters beyond ASCII are part of a name ("Política.cs"); a word is also read without a leading ( [ @ +.
+const CITED_FILE = /((?:[A-Za-z]:)?[\p{L}\p{N}_@.\-\/\\\[\]()+ ]+\.\p{L}[\p{L}\p{N}_]{0,9})(?![\p{L}\p{N}_])(:\d+)?/gu;
+// A name with no extension and a line ("Dockerfile:2"): read only when a file of the repository has that name.
+const NO_EXT_FILE = /([\p{L}\p{N}_@.\-\/\\]+):(\d+)/gu;
+const EXT_END = /\.\p{L}[\p{L}\p{N}_]{0,9}$/u;
+const rawOf = (p) => String(p || '').replace(/\\/g, '/').replace(/[),;]+$/, '').replace(/^[A-Za-z]:(?=\/)/, '').replace(/^(?:\.{0,2}\/)+/, '').replace(/\.+$/, '');
+const keyOf = (p) => rawOf(p).toLowerCase();
 const baseOf = (k) => k.slice(k.lastIndexOf('/') + 1);
+const isFileOnDisk = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
 // The cited files of the notes' texts that changed since the fingerprint `saved` was made, as their names. A name that
 // matches files (the end of the path, no case) counts changed when any of them is new (not in the fingerprint), gone or
 // unreadable, or has other bytes. A name that matches no file of the repository, then or now, is no file of it (a bare
 // word with a dot such as "e.g", a path outside it) and counts for nothing.
-export function citedChanged(top, saved, texts) {
-  const names = new Map();
+export function citedChanged(top, saved, texts) { return citedState(top, saved, texts).changed; }
+// 2026-11-18: also whether any cited name is a file of the repository (found): a text that names none shows nothing unchanged.
+// 2026-11-18 (repair 3): a citation (one match, with its word spellings) that carries a line number and matches no listed file
+// is `unresolved`: nothing shows that file unchanged (git ignores it, it is in a nested repository, it lies outside the repository).
+// A file that exists under the root but is not listed is judged by its modified time against `since` (when the brief was made);
+// without `since` it is unresolved. The bare-name fallback is not used for such a path, nor for an absolute path outside the root.
+export function citedState(top, saved, texts, since) {
+  const cites = [];
   const prefix = keyOf(top) + '/';
   for (const t of texts) for (const m of String(t || '').matchAll(CITED_FILE)) {
-    for (const w of new Set([m[1], ...m[1].split(/\s+/)])) {
-      let k = keyOf(w);
-      if (!/\.[a-z]\w{0,9}$/.test(k)) continue;
-      if (k.startsWith(prefix)) k = k.slice(prefix.length);
-      if (k) names.set(k, (names.get(k) || false) || !!m[2]);
+    const spellings = [];
+    for (const w of new Set([m[1], ...m[1].split(/\s+/).flatMap((x) => [x, x.replace(/^[(\[@+]+/, '')])])) {
+      let raw = rawOf(w);
+      let k = raw.toLowerCase();
+      if (!EXT_END.test(k)) continue;
+      const abs = /^(?:[A-Za-z]:[\\/]|[\\/])/.test(w);
+      const inRoot = k.startsWith(prefix);
+      if (inRoot) { raw = raw.slice(prefix.length); k = k.slice(prefix.length); }
+      if (!k) continue;
+      spellings.push({ k, raw, outside: abs && !inRoot && !isFileOnDisk(path.join(top, raw)) });
     }
+    if (spellings.length) cites.push({ spellings, lined: !!m[2], rels: null });
   }
-  if (!names.size) return [];
+  const noExt = [];
+  for (const t of texts) for (const m of String(t || '').matchAll(NO_EXT_FILE)) {
+    const k = keyOf(m[1]);
+    if (k && !baseOf(k).includes('.')) noExt.push(k.startsWith(prefix) ? k.slice(prefix.length) : k);
+  }
+  if (!cites.length && !noExt.length) return { changed: [], found: false, unresolved: false };
   const now = listRepoFiles(top);
   const rels = [...new Set([...Object.keys(saved), ...now])];
   const nowSet = new Set(now);
   const changed = [];
-  for (const [name, lined] of names) {
-    let hits = rels.filter((rel) => { const k = rel.toLowerCase(); return k === name || k.endsWith('/' + name); });
-    // 2026-11-18 (repair 2): the full name matched no file (a diff prefix, a folder written another way): the bare file name is read too.
-    if (!hits.length) hits = rels.filter((rel) => baseOf(rel.toLowerCase()) === baseOf(name));
-    if (!hits.length) continue;   // no file of this repository, then or now: the name proves nothing either way
-    if (hits.some((rel) => !(rel in saved) || !nowSet.has(rel) || !saved[rel] || hashRepoFile(top, rel) !== saved[rel])) changed.push(name);
+  let found = false, unresolved = false;
+  const fresh = (hits) => !hits.some((rel) => !(rel in saved) || !nowSet.has(rel) || !saved[rel] || hashRepoFile(top, rel) !== saved[rel]);
+  for (const name of new Set(noExt)) {
+    const hits = rels.filter((rel) => { const k = rel.toLowerCase(); return !baseOf(k).includes('.') && (k === name || k.endsWith('/' + name)); });
+    if (!hits.length) continue;   // "line:4" and the like: no file of that name
+    found = true;
+    if (!fresh(hits)) changed.push(name);
   }
-  return changed;
+  for (const c of cites) {
+    let hits = [...new Set(c.spellings.flatMap((s) => rels.filter((rel) => { const k = rel.toLowerCase(); return k === s.k || k.endsWith('/' + s.k); })))];
+    const name = c.spellings[c.spellings.length - 1].k;
+    if (!hits.length) {
+      // The file is not listed. One that exists under the root (git ignores it, a nested repository) or an absolute path
+      // outside it is no match for a same-named listed file: it is judged by itself or counts as not shown.
+      let barred = false, shown = false, moved = false;
+      for (const s of c.spellings) {
+        if (s.outside) { barred = true; continue; }
+        const file = path.join(top, s.raw);
+        if (!isFileOnDisk(file)) continue;
+        barred = true;
+        if (since === undefined || since === null) continue;
+        shown = true;
+        try { if (fs.statSync(file).mtimeMs > since) moved = true; } catch { moved = true; }
+      }
+      if (barred) {
+        if (shown) { found = true; if (moved) changed.push(name); }
+        else if (c.lined) unresolved = true;
+        continue;
+      }
+      // 2026-11-18 (repair 2): the full name matched no file (a diff prefix, a folder written another way): the bare file name is read too.
+      hits = [...new Set(c.spellings.flatMap((s) => rels.filter((rel) => baseOf(rel.toLowerCase()) === baseOf(s.k))))];
+      if (!hits.length) { if (c.lined) unresolved = true; continue; }   // no file of this repository: nothing is shown for it
+    }
+    found = true;
+    if (!fresh(hits)) changed.push(name);
+  }
+  return { changed, found, unresolved };
 }
 
 function readJson(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } }
@@ -436,11 +494,12 @@ export function writeBrief({ notes, reports, repo, transcript }) {
   // 2026-11-18: every --brief run has its own generation, and a bound one saves the fingerprint of the repository's files.
   const state = readGenerations(notes);
   const generation = state.issued + 1;
+  const at = Date.now();   // 2026-11-18 (repair 3): a file git does not list is shown unchanged by its modified time against this
   const files = code.code ? fileFingerprint(code.top) : null;
   const text = buildBrief({ repo, notes: list, transcript: numbering, code, generation });
   writeGenerations(notes, { issued: generation, recorded: state.recorded });
   fs.writeFileSync(brief, text);
-  if (files) fs.writeFileSync(path.join(notes, FILES), JSON.stringify({ brief: briefIds(text).written, generation, root: code.top, files }));
+  if (files) fs.writeFileSync(path.join(notes, FILES), JSON.stringify({ brief: briefIds(text).written, generation, root: code.top, at, files }));
   return { brief, notes: list, removed, transcript: numbering, unmatched, skipped, bound: !!code.code, generation };
 }
 
@@ -579,7 +638,16 @@ export function recordCheck({ report, notes, now = new Date() }) {
   // stands only when every file the note's line and the evidence name is unchanged since the brief; otherwise the note
   // is UNSURE and gets no author line. Other code that changed (a plainly right note fixed meanwhile) changes nothing.
   const changedNotes = [];
-  if (code) {
+  // 2026-11-18 (recheck by the other engine): a REFUTED answer is accepted only when the cited files are SHOWN unchanged.
+  // Not bound (no code line, whatever else the brief says), or no cited name that is a file of the repository: nothing is shown.
+  const unshown = [];
+  if (!code) {
+    rows = rows.map((r) => {
+      if (r.verdict !== 'REFUTED') return r;
+      unshown.push(tag(r));
+      return { ...r, verdict: 'UNSURE', label: UNBOUND_LABEL };
+    });
+  } else {
     if (!proof) throw usage(`the code fingerprint cannot be loaded (${proofError}): the brief is bound to code, and this install cannot check it. Install the gate scripts of the same release.`);
     const top = proof.toplevelOf(root);
     const side = readJson(path.join(notes, FILES));
@@ -587,7 +655,16 @@ export function recordCheck({ report, notes, now = new Date() }) {
     rows = rows.map((r) => {
       if (r.verdict !== 'REFUTED') return r;
       let changed = !saved || !top;   // no fingerprint of that brief, or no repository now: nothing shows the files unchanged
-      if (!changed) changed = citedChanged(top, saved, [r.text, r.evidence]).length > 0;
+      const since = side && Number.isFinite(side.at) ? side.at : undefined;
+      if (!changed) changed = citedState(top, saved, [r.text, r.evidence], since).changed.length > 0;
+      if (!changed) {
+        // The note's own text may name a line that is gone (a typo, an old line): only the answer's citations must all be shown.
+        const { found, unresolved } = citedState(top, saved, [r.evidence], since);
+        if (!found || unresolved) {
+          unshown.push(tag(r));
+          return { ...r, verdict: 'UNSURE', label: found ? UNSHOWN_FILE_LABEL : NO_FILE_LABEL };
+        }
+      }
       if (!changed) return r;
       changedNotes.push(tag(r));
       return { ...r, verdict: 'UNSURE', label: CHANGED_LABEL };
@@ -596,7 +673,7 @@ export function recordCheck({ report, notes, now = new Date() }) {
   const out = path.join(notes, LIST);
   fs.writeFileSync(out, renderCheck({ brief, report: path.resolve(report), recorded: now.toISOString(), rows }));
   if (generation) writeGenerations(notes, { issued: Math.max(readGenerations(notes).issued, generation), recorded: Math.max(recorded, generation) });
-  return { out, rows, answer, unbound, changedNotes };
+  return { out, rows, answer, unbound, changedNotes, unshown };
 }
 
 // The guards' own reader of a note checker's answer (hooks/lib/transcript-scan.js, REFUTED_RE and readRefutations),
@@ -680,7 +757,7 @@ function main() {
         b.unmatched.map((u) => `NOT AN OPEN NOTE OF THE SESSION (left out of the brief): ${u.kind} · ${oneLine(u.text)}\n`).join('') +
         removed);
     } else {
-      const { out, rows, answer, unbound, changedNotes } = recordCheck({ report: path.resolve(o.record), notes });
+      const { out, rows, answer, unbound, changedNotes, unshown } = recordCheck({ report: path.resolve(o.record), notes });
       const count = (verdict) => rows.filter((r) => r.verdict === verdict).length;
       const refuted = rows.filter((r) => r.verdict === 'REFUTED');
       // 2026-11-18 (user decision): a Question is never refuted: the user sees it with the checker's view and its
@@ -692,6 +769,7 @@ function main() {
       if (unbound) process.stderr.write(NOT_BOUND + '\n');
       process.stdout.write(`NOTE CHECK: ${rows.length} note(s) — ${count('CONFIRMED')} confirmed, ${refuted.length} refuted, ${count('UNSURE')} unsure\n` +
         rows.map(ask).join('') +
+        (unshown.length ? `NOT SHOWN UNCHANGED: ${unshown.join(', ')} — nothing shows the code it cites unchanged since the brief (see the label in the list): its REFUTED does not stand; no author line\n` : '') +
         (changedNotes.length ? `CHANGED SINCE THE BRIEF: ${changedNotes.join(', ')} — the code it cites changed: check again (its REFUTED does not stand; no author line)\n` : '') +
         (refuted.some((r) => !isQuestion(r)) ? REFUTED_RULE + '\n' : '') +
         (rows.length && rows.every((r) => r.guard) ? GUARD_RULE : K_RULE) + '\n' +
