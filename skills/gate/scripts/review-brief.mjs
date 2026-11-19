@@ -58,6 +58,7 @@
 // Run it before the Test designer starts, and again after the proof run, before the reviewers:
 // the second run adds the callers and the proof. Exit 0: written. 2: usage error.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -458,15 +459,36 @@ const shqPath = s => String(s).replace(/\\(?=[\\"$`])|["$`]/g, m => '\\' + m);
 // whole-diff role, whose file tells it to follow the whole-diff scope and the author's Done means (2026-11-18, finding 2).
 const CODEX_ROLE = { designer: 'sanad-practical-expert', fresh: 'sanad-risk-reviewer', risk: 'sanad-risk-reviewer', whole: 'sanad-reviewer' };
 const roleSentence = role => `Your Codex role is ${role}: read ~/.codex/agents/${role}.toml first and follow it.`;
-function codexRun({ repo, out, log, prompt }) {
-  // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
-  return ['```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shq(out)}" "${shq(prompt)}" < /dev/null > "${shq(log)}" 2>&1`, '```', ''];
+// 2026-11-19: every Codex launch runs on the model its role is set to. The model is read from the role's own settings
+// file when the plan is written (<codex home>/agents/<role>.toml, its first `model = "..."` line); no model name stands
+// in this script. A missing file or line gives '' and never throws.
+export function codexRoleModel(role, { codexHome } = {}) {
+  try {
+    const home = codexHome || process.env.SANAD_CODEX_HOME || path.join(os.homedir(), '.codex');
+    const text = fs.readFileSync(path.join(home, 'agents', `${role}.toml`), 'utf8').replace(/^﻿/, '');
+    // Only the role's own top-level setting counts: a `model = "..."` line inside the multi-line instructions
+    // (a text example) or under a [table] is not the role's model (the independent check, 2026-11-19).
+    const top = text.replace(/("""|''')[\s\S]*?\1/g, '""').split(/^[ \t]*\[/m)[0];
+    const m = /^[ \t]*model[ \t]*=[ \t]*(?:"([^"\r\n]*)"|'([^'\r\n]*)')/m.exec(top);
+    return m ? (m[1] ?? m[2]).trim() : '';
+  } catch { return ''; }
 }
-function buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone }) {
+// The launch flag for a role, and the one plain line a plan carries under the seat when the role has no model setting.
+function codexModel(role, codexHome) {
+  const model = codexRoleModel(role, { codexHome });
+  return model
+    ? { flag: ` -m "${shq(model)}"`, note: [] }
+    : { flag: '', note: [`(no model setting found for ${role}: this launch runs on the Codex default model)`, ''] };
+}
+function codexRun({ repo, out, log, prompt, role, codexHome }) {
+  const { flag, note } = codexModel(role, codexHome);
+  return ['```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shq(out)}"${flag} "${shq(prompt)}" < /dev/null > "${shq(log)}" 2>&1`, '```', '', ...note];
+}
+function buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone, codexHome }) {
   const one = ONE_REVIEW[size];
   const dir = path.posix.dirname(String(brief).replace(/\\/g, '/'));
   // The designer's report is saved under the name designerReport() accepts, so its line leaves after it ran (finding 5).
-  const run = (name, prompt) => codexRun({ repo, out: `${dir}/${name === 'designer' ? DESIGNER_REPORTS[0] : `codex-${name}.md`}`, log: `${dir}/codex-${name}.log`, prompt });
+  const run = (name, prompt) => codexRun({ repo, out: `${dir}/${name === 'designer' ? DESIGNER_REPORTS[0] : `codex-${name}.md`}`, log: `${dir}/codex-${name}.log`, prompt, role: CODEX_ROLE[name], codexHome });
   const tail = 'Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.';
   return [
     '# Launch lines (copy as they are)', '',
@@ -490,9 +512,10 @@ function buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, c
   ].join('\n');
 }
 
-export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '', facts = null, changed = [], designerDone = '', engine = 'claude' }) {
+export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = '', facts = null, changed = [], designerDone = '', engine = 'claude', codexHome = '' }) {
   if (!ENGINES.includes(engine)) throw new Error('--engine must be one of ' + ENGINES.join(', '));
-  if (engine === 'codex') return buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone });
+  if (engine === 'codex') return buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone, codexHome });
+  const freshModel = codexModel(CODEX_ROLE.fresh, codexHome);
   const one = ONE_REVIEW[size];
   return [
     '# Launch lines (copy as they are)', '',
@@ -508,11 +531,11 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
       ...riskLaunch({ brief, facts, changed }),
       '## Whole diff (Claude) — Agent routine-reviewer, run_in_background', '',
       `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${WHOLE_DIFF_FULL} Read-only: no builds, no tests, no edits.`, '',
-      // No -m: Codex has no "newest" alias, so its model is named once, in ~/.codex/config.toml (2026-11-10).
+      // -m comes from the fresh-eyes role's settings file (codexRoleModel), read when the plan is written.
       '## Fresh eyes (Codex) — Bash, run_in_background', '',
       // 2026-11-18 (audit finding 5): every value goes through shq, as in the Codex plan. The folder is escaped first and
       // joined after, so an ordinary path keeps the separators it had.
-      '```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shqPath(path.join(path.dirname(brief), 'codex-review.md'))}" "${shq(`You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shqPath(path.join(path.dirname(brief), 'codex.log'))}" 2>&1`, '```', '',
+      '```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shqPath(path.join(path.dirname(brief), 'codex-review.md'))}"${freshModel.flag} "${shq(`You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shqPath(path.join(path.dirname(brief), 'codex.log'))}" 2>&1`, '```', '', ...freshModel.note,
     ]),
   ].join('\n');
 }

@@ -7,7 +7,21 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { gitBash, bashEnv } from '../scripts/git-bash.mjs';
-import { buildBrief, buildFreshBrief, buildLaunch, outsideItems, splitOutside, checkLines, decidedItems, checkSources, coverageProblems, chooseSize, sizeFacts, riskFiles, signalFiles, designerReport } from '../scripts/review-brief.mjs';
+import { buildBrief, buildFreshBrief, buildLaunch, codexRoleModel, outsideItems, splitOutside, checkLines, decidedItems, checkSources, coverageProblems, chooseSize, sizeFacts, riskFiles, signalFiles, designerReport } from '../scripts/review-brief.mjs';
+
+// 2026-11-19: no test reads the machine's real ~/.codex. Every plan reads its role models from a codex home: this file
+// points the default (and the command's child processes) at an EMPTY temp home, and the model tests pass their own.
+const EMPTY_HOME = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-empty-')));
+process.env.SANAD_CODEX_HOME = EMPTY_HOME;
+const ROLES = ['sanad-boss', 'sanad-expert', 'sanad-risk-reviewer', 'sanad-reviewer', 'sanad-practical-expert', 'sanad-worker'];
+function codexHomeWith(models, eol = '\n', bom = '') {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-')));
+  fs.mkdirSync(path.join(home, 'agents'));
+  for (const [role, model] of Object.entries(models)) {
+    fs.writeFileSync(path.join(home, 'agents', `${role}.toml`), `${bom}name = "${role}"${eol}model = "${model}"${eol}model_reasoning_effort = "xhigh"${eol}`);
+  }
+  return home;
+}
 
 // 2026-11-08 (user: "check lines should comes from all tickets"): every ticket line has a Check line,
 // every Check line names its source, and cases outside the ticket are EXTRA TEST lines for the user.
@@ -626,10 +640,12 @@ const stripEngine = t => t.replace(/^Engine: [^\n]*\n\n/m, '');
 
 // MUST NOT CHANGE (fails only on the engine line on the old code): the Claude plan is byte for byte today's.
 test('the Claude plan is unchanged except its engine line', () => {
-  const gold = { small: 'e63e00d983b7d592c25f66b326c13151bef8daebcc6dd02d892f86b4e8d90caf', medium: 'f14462e6112ef3469d1bab02d8f4c97d456fd358f5f43662e9bf072e9db6a09a', big: '8eb4a517fcf9b9101897ba02e9aa19b19dbc7e1db59aeeed23253d6a2f9b5256' };
+  const gold = { small: 'e63e00d983b7d592c25f66b326c13151bef8daebcc6dd02d892f86b4e8d90caf', medium: 'f14462e6112ef3469d1bab02d8f4c97d456fd358f5f43662e9bf072e9db6a09a', big: 'b7555de1e041891584586b65b6b96b96c46b7118e7f698b959ab87c33dcd2ac6' };
+  // 2026-11-19: small and medium hashes are untouched (those plans hold no Codex line). The big hash was updated once: it is
+  // built with an EMPTY codex home, and the Big plan's Codex line then carries the "no model setting found" note line.
   for (const size of ['small', 'medium', 'big']) {
-    assert.equal(sha(stripEngine(buildLaunch({ ...engArgs, size, engine: 'claude' }))), gold[size], size);
-    assert.equal(buildLaunch({ ...engArgs, size }), buildLaunch({ ...engArgs, size, engine: 'claude' }), size + ': claude is the default');
+    assert.equal(sha(stripEngine(buildLaunch({ ...engArgs, size, engine: 'claude', codexHome: EMPTY_HOME }))), gold[size], size);
+    assert.equal(buildLaunch({ ...engArgs, size, codexHome: EMPTY_HOME }), buildLaunch({ ...engArgs, size, engine: 'claude', codexHome: EMPTY_HOME }), size + ': claude is the default');
   }
 });
 
@@ -932,4 +948,101 @@ test('a --outside file that does not exist is a usage error naming the path; an 
   r = run('--outside', real);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /1 known item/);
+});
+
+// 2026-11-19: every Codex launch line runs on the model its role is set to, read from the role's file when the plan is written.
+const modelsA = Object.fromEntries(ROLES.map(r => [r, `m-${r}-a`]));
+const codexLines = t => t.split('\n').filter(l => l.includes('codex exec'));
+const lineOf = (t, file) => codexLines(t).find(l => l.includes(`/${file}"`));
+const MODEL_NOTE = role => `(no model setting found for ${role}: this launch runs on the Codex default model)`;
+
+test('codexRoleModel reads the first model line: spaces, quotes, CRLF, a BOM; missing file or line gives empty and never throws', () => {
+  const home = codexHomeWith({ 'sanad-reviewer': 'a-1' }, '\r\n', '\uFEFF');
+  assert.equal(codexRoleModel('sanad-reviewer', { codexHome: home }), 'a-1');
+  fs.writeFileSync(path.join(home, 'agents', 'sanad-worker.toml'), "name = 'w'\n  model   =   'single-quoted'  \nmodel = \"second\"\n");
+  assert.equal(codexRoleModel('sanad-worker', { codexHome: home }), 'single-quoted');
+  fs.writeFileSync(path.join(home, 'agents', 'sanad-boss.toml'), 'name = "b"\n# model = "commented"\n');
+  assert.equal(codexRoleModel('sanad-boss', { codexHome: home }), '');
+  assert.equal(codexRoleModel('sanad-expert', { codexHome: home }), '', 'missing file');
+  assert.equal(codexRoleModel('sanad-expert', { codexHome: path.join(home, 'nope') }), '', 'missing folder');
+});
+
+// The independent check (2026-11-19): only the role's own top-level setting is its model.
+test('codexRoleModel ignores a model line inside the instructions text or under a table', () => {
+  const home = codexHomeWith({});
+  const file = r => path.join(home, 'agents', r + '.toml');
+  fs.writeFileSync(file('sanad-reviewer'), 'name = "r"\ndeveloper_instructions = """\nExample:\nmodel = "example-in-text"\n"""\nmodel = "real"\n');
+  assert.equal(codexRoleModel('sanad-reviewer', { codexHome: home }), 'real', 'the line after the instructions, not the example inside them');
+  fs.writeFileSync(file('sanad-worker'), 'name = "w"\ndeveloper_instructions = """\nmodel = "example-in-text"\n"""\n');
+  assert.equal(codexRoleModel('sanad-worker', { codexHome: home }), '', 'only an example in the text: no model');
+  fs.writeFileSync(file('sanad-boss'), 'name = "b"\n[agents]\nmodel = "inner"\n');
+  assert.equal(codexRoleModel('sanad-boss', { codexHome: home }), '', 'a model under a table is not the role model');
+  fs.writeFileSync(file('sanad-expert'), 'name = "e"\nmodel = "top"\n[agents]\nmodel = "inner"\n');
+  assert.equal(codexRoleModel('sanad-expert', { codexHome: home }), 'top');
+});
+
+test('a Codex plan: every launch line carries the model of its own role, and a changed role file changes the line', () => {
+  const home = codexHomeWith(modelsA);
+  for (const size of ['small', 'medium']) {
+    const launch = buildLaunch({ ...engArgs, size, engine: 'codex', codexHome: home });
+    assert.match(lineOf(launch, 'codex-fresh.md'), / -m "m-sanad-risk-reviewer-a" /, size);
+    assert.doesNotMatch(launch, /no model setting found/, size);
+  }
+  const big = buildLaunch({ ...engArgs, size: 'big', engine: 'codex', facts: riskFacts, changed: riskChanged, codexHome: home });
+  assert.equal(codexLines(big).filter(l => l.includes('claude -p')).length, 0);
+  const want = { 'test-designer.md': 'sanad-practical-expert', 'codex-fresh.md': 'sanad-risk-reviewer', 'codex-risk.md': 'sanad-risk-reviewer', 'codex-whole.md': 'sanad-reviewer' };
+  for (const [file, role] of Object.entries(want)) {
+    const line = lineOf(big, file);
+    assert.ok(line, file);
+    assert.ok(line.includes(` -m "m-${role}-a" `), `${file}: ${role}`);
+    assert.equal((line.match(/ -m "/g) || []).length, 1, file);
+  }
+  const home2 = codexHomeWith({ ...modelsA, 'sanad-reviewer': 'changed-model', 'sanad-practical-expert': 'cheap-model' });
+  const big2 = buildLaunch({ ...engArgs, size: 'big', engine: 'codex', facts: riskFacts, changed: riskChanged, codexHome: home2 });
+  assert.ok(lineOf(big2, 'codex-whole.md').includes(' -m "changed-model" '));
+  assert.ok(lineOf(big2, 'test-designer.md').includes(' -m "cheap-model" '));
+  assert.ok(lineOf(big2, 'codex-risk.md').includes(' -m "m-sanad-risk-reviewer-a" '));
+});
+
+test('the Claude Big plan Codex line carries the fresh-eyes role model; small and medium Claude plans hold no Codex line', () => {
+  const home = codexHomeWith(modelsA);
+  const big = buildLaunch({ ...engArgs, size: 'big', engine: 'claude', codexHome: home });
+  const lines = codexLines(big);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes(' -m "m-sanad-risk-reviewer-a" '), lines[0]);
+  assert.doesNotMatch(big, /no model setting found/);
+  const home2 = codexHomeWith({ ...modelsA, 'sanad-risk-reviewer': 'new-one' });
+  assert.ok(codexLines(buildLaunch({ ...engArgs, size: 'big', codexHome: home2 }))[0].includes(' -m "new-one" '));
+  for (const size of ['small', 'medium']) assert.equal(codexLines(buildLaunch({ ...engArgs, size, codexHome: home })).length, 0, size);
+});
+
+test('with an empty codex home no Codex line has -m, and each seat carries the one plain note line for its role', () => {
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-none-')));
+  const big = buildLaunch({ ...engArgs, size: 'big', engine: 'codex', facts: riskFacts, changed: riskChanged, codexHome: home });
+  for (const l of codexLines(big)) assert.doesNotMatch(l, / -m "/);
+  assert.equal((big.match(/\(no model setting found for /g) || []).length, 4);
+  for (const [seat, role] of [['Test designer', 'sanad-practical-expert'], ['Fresh eyes (Codex)', 'sanad-risk-reviewer'], ['Risk files (Codex)', 'sanad-risk-reviewer'], ['Whole diff (Codex)', 'sanad-reviewer']]) {
+    const section = big.split(/^## /m).find(s => s.startsWith(seat));
+    assert.ok(section.includes('\n' + MODEL_NOTE(role) + '\n'), seat);
+  }
+  const claudeBig = buildLaunch({ ...engArgs, size: 'big', codexHome: home });
+  assert.doesNotMatch(codexLines(claudeBig)[0], / -m "/);
+  assert.equal(claudeBig.split(/^## /m).find(s => s.startsWith('Fresh eyes (Codex)')).split('\n').filter(l => l === MODEL_NOTE('sanad-risk-reviewer')).length, 1);
+  // Only one role missing: only its seat carries the note.
+  const part = codexHomeWith({ 'sanad-reviewer': 'only-this' });
+  const small = buildLaunch({ ...engArgs, size: 'small', engine: 'codex', codexHome: part });
+  assert.match(small, /no model setting found for sanad-risk-reviewer/);
+  assert.doesNotMatch(small, / -m "/);
+});
+
+test('a role file with CRLF line ends and a BOM is read by the plan', () => {
+  const home = codexHomeWith(modelsA, '\r\n', '\uFEFF');
+  const launch = buildLaunch({ ...engArgs, size: 'small', engine: 'codex', codexHome: home });
+  assert.ok(lineOf(launch, 'codex-fresh.md').includes(' -m "m-sanad-risk-reviewer-a" '));
+});
+
+test('a model value with shell characters cannot break out of its quotes', () => {
+  const home = codexHomeWith({ 'sanad-risk-reviewer': 'x$(id)`y`' });
+  const line = lineOf(buildLaunch({ ...engArgs, size: 'small', engine: 'codex', codexHome: home }), 'codex-fresh.md');
+  assert.ok(line.includes(String.raw` -m "x\$(id)\`y\`" `), line);
 });

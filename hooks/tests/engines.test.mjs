@@ -15,20 +15,22 @@ const codexRoot = candidate ? path.join(staged, 'codex') : bundle ? path.join(cl
 const installer = path.resolve(here, '../../scripts/workflow-install.sh');
 const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash';
 const noCodex = fs.existsSync(path.join(codexRoot, 'agents/sanad-boss.toml')) ? false : 'Sanad Codex roles are not installed';
+// 2026-11-19: the family of each role is pinned, never the version: the exact model lives only in the role file,
+// so a new Codex model is an edit of the settings and of nothing else (no test, no rule file, no script).
 const models = {
-  'sanad-boss': 'gpt-6-astra',
-  'sanad-risk-reviewer': 'gpt-6-astra',
-  'sanad-reviewer': 'gpt-6.1-sol',
-  'sanad-expert': 'gpt-6-astra',
-  'sanad-practical-expert': 'gpt-6.1-sol',
-  'sanad-worker': 'gpt-6-luna'
+  'sanad-boss': 'astra',
+  'sanad-risk-reviewer': 'astra',
+  'sanad-reviewer': 'sol',
+  'sanad-expert': 'astra',
+  'sanad-practical-expert': 'sol',
+  'sanad-worker': 'sol'
 };
 
 test('every installed Codex role pins xhigh and its assigned Codex model', {skip:noCodex}, () => {
   for (const [name, model] of Object.entries(models)) {
     const text = fs.readFileSync(path.join(codexRoot, 'agents', name + '.toml'), 'utf8').replaceAll('\r\n','\n');
     assert.match(text, new RegExp(`^name = "${name}"$`, 'm'));
-    assert.match(text, new RegExp(`^model = "${model.replaceAll('.', '\\.')}"$`, 'm'));
+    assert.match(text, new RegExp(`^model = "gpt-[0-9.]+-${model}"$`, 'm'), name + ' runs a ' + model + ' model');
     assert.match(text, /^model_reasoning_effort = "xhigh"$/m, name);
     assert.match(text, /developer_instructions = """\n[\s\S]+\n"""/);
     assert.match(text, /\[agents\]\nenabled = false/, 'A delegated role cannot grow another panel');

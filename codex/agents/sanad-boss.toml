@@ -1,6 +1,6 @@
 name = "sanad-boss"
 description = "Sanad routing boss and final braintrust reviewer. Judges only; does not implement."
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 developer_instructions = """
