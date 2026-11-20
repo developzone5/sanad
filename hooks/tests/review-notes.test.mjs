@@ -260,7 +260,7 @@ test('an incremental scan equals a from-zero scan with notes and outcomes spread
 
 const transcriptPath = 'C:/virtual/notes.jsonl';
 // A transcript where a real session keeps it: the start time and the stop's block counter apply there.
-const SESSION = 'C:/Users/Asus/.claude/projects/p/session.jsonl';
+const SESSION = os.homedir().split(path.sep).join('/') + '/.claude/projects/p/session.jsonl';   // 2026-11-21: the real home folder (PC 2 and CI have another one)
 const source = (name) => fs.readFileSync(path.join(hooks, name), 'utf8');
 // The hooks' state folder, in memory (options.files, kept across calls when the test passes one).
 const stateKey = (p) => String(p).replace(/\\/g, '/').toLowerCase();
@@ -338,7 +338,7 @@ test('a stop with REVIEW: PASS and an open note is blocked with the list', () =>
   assert.match(r.reason, /^NOTE 1 \(Gap\): Gap — Upload\.cs:9 — the error text is not translated$/m);
   assert.match(r.reason, /^NOTE 2 \(Bug\): /m);
   // 2026-11-16: the instruction also says the NOTE lines go in a message with no tool call.
-  assert.match(r.reason, /Answer each one in your next message, on its own line: `NOTE 1: fixed — <what changed and its test>` \(only after a code change and a passing test that follow the note\), `NOTE 1: refuted — <the note check's evidence>` \(only a note the note check refuted, never a Blocker\) or `NOTE 1: user — "<the user's exact words>"`\. The NOTE lines go in a message with no tool call \(text in a message that also runs a tool may never reach the record\)\. A note is never closed by the author's own judgement\.$/);
+  assert.match(r.reason, /Answer each one in your next message, on its own line: `NOTE 1: fixed — <what changed and its test>` \(only after a code change and a passing test that follow the note\), `NOTE 1: refuted — <the note check's evidence>` \(only a note the note check refuted, never a Blocker\) or `NOTE 1: user — "<the user's exact words>"`\. The NOTE lines go in a message with no tool call \(text in a message that also runs a tool may never reach the record\)\. A note is never closed by the author's own judgement\. \(SG-NOTES\)$/);
   assert.equal(stop([...report(), say('GATE: PASS', 5)], 'GATE: PASS').decision, 'block', 'GATE: PASS too');
   const handed = stop([...report()], 'Run this to push:\n```bash\ngit -C C:/repos/example push -u origin fix/upload\n```');
   assert.equal(handed.decision, 'block', 'a push command handed to the user');

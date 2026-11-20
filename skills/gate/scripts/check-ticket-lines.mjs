@@ -17,11 +17,19 @@
 // A line is covered when a test file quotes it — the whole line, or each of its sentences — in a
 // test name or in a comment that ends at most 12 lines above a test declaration. Quotes, case,
 // comment markers and line breaks do not matter.
+// 2026-11-19: a ticket line the user dropped stays in the lines file at its own number (lines.mjs --drop writes
+// `T3. [dropped by the user: "<the user's words>"] <the line>`), so no other line gets a new number. The report
+// shows it as dropped, with the words, and asks no test for it.
 // Exit 0: every line is covered. 1: a line has no test. 2: usage error.
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { isMain } from './is-main.mjs';
+
+// One check line per text line: blanks and # lines dropped, list marks and the C<n>. label removed.
+export function checkLines(text) {
+  return String(text).split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => l.replace(/^(?:[-*•]|\d+[.)])\s+/, '').replace(/^C\d+\.\s+/, ''));
+}
 
 export const TEST_FILE = /(?:[._](?:test|spec)\.[cm]?[jt]sx?$|Tests?\.cs$|(?:^|\/)[\w-]*\.Tests?\/.+\.cs$|(?:^|\/)tests?\/.+\.(?:[cm]?[jt]sx?|cs|py|go)$|_test\.(?:go|py)$|(?:^|\/)test_[^/]*\.py$)/i;
 export const TEST_DECL = /(?:^|[^\w.])(?:it|test|describe)(?:\.\w+)*\s*\(|\[(?:Fact|Theory)\b|\bdef test_|\bfunc Test|@Test\b/;
@@ -44,6 +52,18 @@ export function sentences(line) {
 export function readLines(text) {
   return String(text).split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'))
     .map(l => l.replace(/^(?:[-*•]|\d+[.)])\s+/, '').replace(/^["“«]+|["”»]+$/g, '').replace(/^(T\d+)\.\s+/i, '$1: ').trim()).filter(Boolean);
+}
+
+// 2026-11-19 (a dropped line renumbered the rest, and every check line and test quote was typed again): a dropped
+// line keeps its place. `line` is one string of readLines; { words, text } when the user dropped it, else null.
+export const DROPPED = /^(?:T\d+\s*[:.]\s*)?\[dropped by the user: "(.*?)"\]\s*(.*)$/i;
+export function droppedOf(line) {
+  const m = DROPPED.exec(String(line).trim());
+  return m ? { words: m[1], text: m[2].trim() } : null;
+}
+// The numbers of the dropped lines of a lines file: positions as readLines counts them, T1 first.
+export function droppedLines(text) {
+  return readLines(text).flatMap((l, i) => (droppedOf(l) ? [i + 1] : []));
 }
 
 // One file as a single normalized string, with each source line's start offset in it.
@@ -126,12 +146,18 @@ export function report(lines, files) {
   const withBase = files.some(f => f.changed !== null);
   const fresh = withBase ? files.filter(f => f.changed) : files;
   const rows = lines.map((line, i) => {
+    const dropped = droppedOf(line);
+    if (dropped) return { n: i + 1, line, dropped, hits: null, older: null };
     const hits = cover(line, fresh);
     return { n: i + 1, line, hits, older: !hits && withBase ? cover(line, files) : null };
   });
-  const covered = rows.filter(r => r.hits).length;
-  const out = [`TICKET LINES: ${covered} of ${rows.length} covered`];
+  const live = rows.filter(r => !r.dropped);
+  const covered = live.filter(r => r.hits).length;
+  const gone = rows.length - live.length;
+  const out = [`TICKET LINES: ${covered} of ${live.length} covered${gone ? ` · ${gone} dropped by the user` : ''}`];
   for (const r of rows) {
+    // A dropped line asks no test, and a test that still quotes it is no failure.
+    if (r.dropped) { out.push(`  – T${r.n} dropped by the user: "${r.dropped.words}"`); continue; }
     const shown = r.line.length > 110 ? r.line.slice(0, 107) + '…' : r.line;
     if (!r.hits && r.older) {
       const where = r.older.filter(h => !h.changed).map(h => `${h.file}:${h.line}`).join(', ');
@@ -142,7 +168,7 @@ export function report(lines, files) {
     const where = r.hits.map(h => `${h.file}:${h.line}${h.changed ? ' (changed)' : ''}`).join(', ');
     out.push(`  ✓ L${r.n} "${shown}" → ${where}`);
   }
-  return { text: out.join('\n'), missing: rows.length - covered };
+  return { text: out.join('\n'), missing: live.length - covered, dropped: rows.filter(r => r.dropped).map(r => r.n) };
 }
 
 function args(argv) {
@@ -161,6 +187,7 @@ if (isMain(import.meta.url)) {
     const o = args(process.argv.slice(2));
     const lines = readLines(fs.readFileSync(o.lines, 'utf8'));
     if (!lines.length) throw new Error('The lines file holds no ticket line.');
+    if (lines.every(l => droppedOf(l))) throw new Error('Every ticket line is dropped: the task has no line left to prove.');
     const { text, missing } = report(lines, testFiles(path.resolve(o.repo), o.base));
     process.stdout.write(text + '\n');
     process.exitCode = missing ? 1 : 0;

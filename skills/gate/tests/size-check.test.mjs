@@ -1184,3 +1184,214 @@ test('Must not change: a current-user value that is only read, not compared, sta
   const r = lineIn(none, none + '\n        var who = GetCurrentUserId();\n        var name = _currentUserService.Name;');
   assert.equal(r.size, 'small', JSON.stringify(r.signals));
 });
+
+// ── 2026-11-19: the size check as data ──────────────────────────────────────────────────────────────────────────
+const cli = (repo, ...more) => spawnSync(process.execPath, [script, '--repo', repo, ...more], { encoding: 'utf8', env: process.env });
+const gitIn = (repo) => (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+
+// Another session's folder sat untracked in the repository: 1,498 files, each read line by line, 852 s for one
+// check. The change set answers FOREIGN? from git's listing alone, and the run ends with that line.
+test('2026-11-19: 1,500 untracked files end the run with the FOREIGN? line in under 5 seconds, nothing sized', async () => {
+  const page = 'export function Page() {\n  return 1;\n}\n';
+  const repo = change({ 'src/Page.tsx': page }, { 'src/Page.tsx': page.replace('return 1;', 'return 2;') });
+  fs.mkdirSync(path.join(repo, 'other-session', 'src'), { recursive: true });
+  for (let i = 0; i < 1500; i++) fs.writeFileSync(path.join(repo, 'other-session', 'src', `f${i}.ts`), `export const v${i} = ${i};\n`);
+  const started = Date.now();
+  const run = cli(repo, '--base', 'base');
+  const took = Date.now() - started;
+  assert.equal(run.status, 2, run.stdout + run.stderr);
+  assert.match(run.stdout, /^FOREIGN\? other-session\/ holds 1500 untracked files: add it to \S*info\/exclude if it is another session's, else commit it\n$/);
+  assert.doesNotMatch(run.stdout, /SIZE:/, 'no size is printed for a change that was not read');
+  assert.match(run.stderr, /^SIZE: FOREIGN\? other-session\/ holds 1500 untracked files/);
+  assert.doesNotMatch(run.stderr, /Usage:/, 'it is no usage error');
+  assert.ok(took < 5000, `took ${took} ms`);
+  const { ForeignError } = await import('../scripts/size-check.mjs');
+  assert.throws(() => size(repo), (e) => e instanceof ForeignError && e.foreign.length === 1 && e.foreign[0].count === 1500);
+  // With --json the answer is the same line, never a half answer.
+  assert.match(cli(repo, '--base', 'base', '--json').stdout, /^FOREIGN\? other-session\//);
+});
+
+test('Must not change (2026-11-19): a few untracked files are still read as part of the change', () => {
+  const repo = change({ 'src/a.ts': 'export const a = 1;\n' }, { 'src/new.ts': 'export function fresh() {\n  return 1;\n}\n', 'pic.bin': Buffer.from([1, 0, 2]) }, { commit: false });
+  const r = size(repo);
+  assert.equal(r.size, 'small');
+  assert.equal(r.files, 1);
+  assert.deepEqual(r.binary, ['pic.bin']);
+});
+
+const roleService = (assign, extra = '') => [
+  'public class RoleService',
+  '{',
+  '    private readonly AppDbContext _context;',
+  '    private readonly ICoreApiClient _coreApiClient;',
+  '    private readonly HttpClient _http;',
+  '',
+  '    public async Task AssignAsync(int id, CancellationToken ct)',
+  '    {',
+  ...assign.map(l => '        ' + l),
+  '    }',
+  '',
+  '    public async Task PingAsync(int id, CancellationToken ct)',
+  '    {',
+  '        var note = 1;',
+  '        await _coreApiClient.SyncRolesAsync(id, ct);',
+  '    }',
+  extra,
+  '}',
+  '',
+].join('\n');
+
+test('2026-11-19: a changed function that saves and then calls another system raises afterSave; the size stays', () => {
+  const forms = {
+    'a typed client': 'await _coreApiClient.SyncRolesAsync(id, ct);',
+    'an HTTP client': 'await _http.PostAsJsonAsync(url, user, ct);',
+    'a queue send': 'await _bus.PublishAsync(new RoleChanged(id), ct);',
+  };
+  for (const [form, call] of Object.entries(forms)) {
+    const body = (n) => [`var user = await _context.Users.FindAsync(id);`, `user.Level = ${n};`, 'await _context.SaveChangesAsync(ct);', call];
+    const repo = change({ 'Api/Services/RoleService.cs': roleService(body(1)) }, { 'Api/Services/RoleService.cs': roleService(body(2)) });
+    const r = size(repo);
+    assert.deepEqual(r.signals.afterSave, ['RoleService.cs'], `${form}: ` + JSON.stringify(r.signals));
+    assert.equal(r.size, 'small', `${form}: the signal never raises the size`);
+    assert.ok(r.roles.some(x => /After-save checks/.test(x)), r.roles.join('; '));
+    // The printed reason says what the signal cannot see.
+    assert.match(cli(repo, '--base', 'base').stdout, /^SIZE: small \(diff\) — a call to another system after a save \(a call inside an unchanged helper is not seen\) \(RoleService\.cs\)$/m);
+  }
+});
+
+test('2026-11-19: only calling, calling before the save, or a call inside an unchanged helper does not raise afterSave', () => {
+  const saved = (n) => ['var user = await _context.Users.FindAsync(id);', `user.Level = ${n};`, 'await _context.SaveChangesAsync(ct);'];
+  // The changed function only calls the other system: no save in it.
+  const calling = roleService(saved(1)).replace('var note = 1;', 'var note = 2;');
+  const onlyCalls = size(change({ 'Api/Services/RoleService.cs': roleService(saved(1)) }, { 'Api/Services/RoleService.cs': calling }));
+  assert.equal(onlyCalls.signals.afterSave, undefined, JSON.stringify(onlyCalls.signals));
+  assert.equal(onlyCalls.size, 'small');
+  // The call comes first, the save after it.
+  const first = (n) => ['await _coreApiClient.SyncRolesAsync(id, ct);', ...saved(n)];
+  const before = size(change({ 'Api/Services/RoleService.cs': roleService(first(1)) }, { 'Api/Services/RoleService.cs': roleService(first(2)) }));
+  assert.equal(before.signals.afterSave, undefined, JSON.stringify(before.signals));
+  // The call sits in a helper the change does not touch: not seen, and the data says so.
+  const helper = '\n    private Task NotifyAsync(int id) => _coreApiClient.SyncRolesAsync(id, default);';
+  const hidden = (n) => roleService([...saved(n), 'await NotifyAsync(id);'], helper);
+  const r = size(change({ 'Api/Services/RoleService.cs': hidden(1) }, { 'Api/Services/RoleService.cs': hidden(2) }));
+  assert.equal(r.signals.afterSave, undefined, JSON.stringify(r.signals));
+  assert.equal(r.limits.length, 1);
+  assert.match(r.limits[0], /afterSave .*inside a helper the change does not touch is not seen/);
+});
+
+test('2026-11-19: a plan that names a function which saves and then calls another system raises afterSave too', () => {
+  const body = ['var user = await _context.Users.FindAsync(id);', 'user.Level = 1;', 'await _context.SaveChangesAsync(ct);', 'await _coreApiClient.SyncRolesAsync(id, ct);'];
+  const repo = change({ 'Api/Services/RoleService.cs': roleService(body) }, {});
+  const r = sizeTask({ repo, files: ['Api/Services/RoleService.cs'], names: ['AssignAsync'] });
+  assert.deepEqual(r.signals.afterSave, ['RoleService.cs:AssignAsync'], JSON.stringify(r.signals));
+  const ping = sizeTask({ repo, files: ['Api/Services/RoleService.cs'], names: ['PingAsync'] });
+  assert.equal(ping.signals.afterSave, undefined, JSON.stringify(ping.signals));
+  assert.equal(r.size, ping.size, 'the signal never raises the size');
+  assert.equal(r.limits.length, 1);
+});
+
+test('2026-11-19: a page that saves a form and fetches is not afterSave', () => {
+  const page = (n) => `export function Form() {\n  const submit = async () => {\n    form.save();\n    await fetch(url + ${n});\n  };\n  return submit;\n}\n`;
+  const r = size(change({ 'web/src/Form.tsx': page(1) }, { 'web/src/Form.tsx': page(2) }));
+  assert.equal(r.signals.afterSave, undefined, JSON.stringify(r.signals));
+});
+
+test('2026-11-19: a change of test files only has testsOnly true and the tiny line says "tests only"', () => {
+  const spec = (n) => `import { it, expect } from 'vitest';\nit('adds', () => {\n  expect(1 + 1).toBe(${n});\n});\n`;
+  const cs = (n) => `public class RuleTests\n{\n    [Fact]\n    public void Adds()\n    {\n        Assert.Equal(${n}, 1 + 1);\n    }\n}\n`;
+  const base = { 'src/rule.ts': 'export const rule = 1;\n', 'src/rule.test.ts': spec(3), 'Api.Tests/RuleTests.cs': cs(3) };
+  const repo = change(base, { 'src/rule.test.ts': spec(2), 'Api.Tests/RuleTests.cs': cs(2) });
+  const r = size(repo);
+  assert.equal(r.testsOnly, true, JSON.stringify(r.testsUsedBy));
+  assert.equal(r.size, 'tiny', 'the size is as before');
+  assert.match(cli(repo, '--base', 'base').stdout, /^SIZE: tiny \(diff\) — tests only$/m);
+  // One product comment line added: no longer tests only.
+  const withComment = size(change(base, { 'src/rule.test.ts': spec(2), 'src/rule.ts': '// why\nexport const rule = 1;\n' }));
+  assert.equal(withComment.testsOnly, false);
+  // Tests and a doc: not tests only, and the tiny line is the one printed before.
+  const withDoc = change(base, { 'src/rule.test.ts': spec(2), 'docs/a.md': 'x\n' });
+  assert.equal(size(withDoc).testsOnly, false);
+  assert.match(cli(withDoc, '--base', 'base').stdout, /^SIZE: tiny \(diff\) — docs, tests, texts or styles only$/m);
+  // No change at all is not "tests only".
+  assert.equal(size(change(base, {})).testsOnly, false);
+});
+
+test('2026-11-19: product code in a file named like a test is not tests only, and the file that uses it is named', () => {
+  const hidden = (n) => `export function price(a) {\n  return a * ${n};\n}\n`;
+  const app = "import { price } from './rules.test';\nexport const total = price(2);\n";
+  const r = size(change({ 'src/rules.test.ts': hidden(1), 'src/app.ts': app }, { 'src/rules.test.ts': hidden(2) }));
+  assert.equal(r.testsOnly, false);
+  assert.deepEqual(r.testsUsedBy, ['src/rules.test.ts ← src/app.ts']);
+  // C#: a class in a file named like a test that product code names.
+  const cs = (n) => `public class PriceTests\n{\n    public static int Rate() { return ${n}; }\n}\n`;
+  const user = 'public class Billing\n{\n    public int Total() { return PriceTests.Rate(); }\n}\n';
+  const c = size(change({ 'Api/PriceTests.cs': cs(1), 'Api/Billing.cs': user }, { 'Api/PriceTests.cs': cs(2) }));
+  assert.equal(c.testsOnly, false);
+  assert.deepEqual(c.testsUsedBy, ['Api/PriceTests.cs ← Api/Billing.cs']);
+  // Must not change: a test helper that only tests import stays tests only (another file of the same base name does not count).
+  const helper = (n) => `export const sample = ${n};\n`;
+  const t = "import { sample } from './helpers';\nit('x', () => { expect(sample).toBe(1); });\n";
+  const other = "import { own } from './helpers';\nexport const z = own;\n";
+  const h = size(change({ 'src/tests/helpers.ts': helper(1), 'src/tests/a.test.ts': t, 'src/lib/helpers.ts': 'export const own = 1;\n', 'src/lib/use.ts': other }, { 'src/tests/helpers.ts': helper(2) }));
+  assert.equal(h.testsOnly, true, JSON.stringify(h.testsUsedBy));
+  // Must not change: a setup file that only the test runner's config names is still a test file.
+  const config = "export default { test: { setupFiles: ['./src/tests/setup.ts'] } };\n";
+  const s = size(change({ 'src/tests/setup.ts': helper(1), 'vitest.config.ts': config }, { 'src/tests/setup.ts': helper(2) }));
+  assert.equal(s.testsOnly, true, JSON.stringify(s.testsUsedBy));
+  // The same path named by product code is a use.
+  const p = size(change({ 'src/tests/setup.ts': helper(1), 'src/main.ts': "import './tests/setup';\n" }, { 'src/tests/setup.ts': helper(2) }));
+  assert.deepEqual(p.testsUsedBy, ['src/tests/setup.ts ← src/main.ts']);
+});
+
+test('2026-11-19: the range form reads only what differs between two exact commits, also for an amend', () => {
+  const fn = (name, n) => `export function ${name}(a) {\n  return a + ${n};\n}\n`;
+  const repo = change({ 'src/a.ts': fn('alpha', 1), 'src/b.ts': fn('beta', 1), 'src/c.ts': fn('gamma', 1) }, { 'src/a.ts': fn('alpha', 2), 'src/b.ts': fn('beta', 2) });
+  const git = gitIn(repo);
+  const first = git('rev-parse', 'HEAD').trim();
+  fs.writeFileSync(path.join(repo, 'src/b.ts'), fn('beta', 3));
+  git('commit', '-qam', 'fix');
+  const second = git('rev-parse', 'HEAD').trim();
+  // The base form is the whole change; the range form is the fix alone.
+  assert.deepEqual(size(repo).allCallers.map(c => c.name).sort(), ['alpha', 'beta']);
+  const r = sizeTask({ repo, range: { from: first, at: second } });
+  assert.equal(r.mode, 'diff');
+  assert.equal(r.files, 1);
+  assert.deepEqual(r.allCallers.map(c => c.name), ['beta']);
+  assert.deepEqual(r.range, { from: first, at: second, ancestor: true, workFolder: true });
+  // An untracked file is no part of a range between two commits.
+  fs.writeFileSync(path.join(repo, 'src/new.ts'), fn('fresh', 1));
+  assert.equal(sizeTask({ repo, range: { from: first, at: second } }).files, 1);
+  fs.rmSync(path.join(repo, 'src/new.ts'));
+  // The fix is amended: the new commit is not a child of the old one, and the two are still compared.
+  fs.writeFileSync(path.join(repo, 'src/c.ts'), fn('gamma', 2));
+  git('add', '-A'); git('commit', '-q', '--amend', '-m', 'fix, amended');
+  const amended = git('rev-parse', 'HEAD').trim();
+  const a = sizeTask({ repo, range: { from: second, at: amended } });
+  assert.deepEqual(a.allCallers.map(c => c.name), ['gamma']);
+  assert.equal(a.range.ancestor, false);
+  const out = cli(repo, '--from', second, '--at', amended);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /^ {2}range: \w{10} → \w{10} \(the first is not an ancestor of the second: the two trees are compared\)$/m);
+  assert.match(out.stdout, /^ {2}files: 1 \(1 code, 2 code lines changed\)$/m);
+});
+
+test('2026-11-19: the range form refuses a name that is no commit, half a range, and a changed file that is not at the commit', () => {
+  const fn = (n) => `export function alpha(a) {\n  return a + ${n};\n}\n`;
+  const repo = change({ 'src/a.ts': fn(1) }, { 'src/a.ts': fn(2) });
+  const head = gitIn(repo)('rev-parse', 'HEAD').trim();
+  const bad = cli(repo, '--from', 'no-such-commit', '--at', head);
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /^SIZE: --from no-such-commit is not a commit in this repository/);
+  assert.equal(cli(repo, '--from', 'base').status, 2, 'half a range');
+  assert.equal(cli(repo, '--from', 'base', '--at', head, '--files', 'src/a.ts').status, 2, 'a range and planned files');
+  // The brief's re-check passes its --base too: the range is what is read.
+  const both = cli(repo, '--base', 'base', '--json', '--from', 'base', '--at', head);
+  assert.equal(both.status, 0, both.stderr);
+  assert.equal(JSON.parse(both.stdout).range.at, head);
+  assert.match(cli(repo, '--from', '--upload-pack=x', '--at', head).stderr, /^SIZE: /);
+  // The changed file is edited after the commit: its lines are no longer the commit's.
+  fs.writeFileSync(path.join(repo, 'src/a.ts'), '// moved down\n' + fn(2));
+  const moved = cli(repo, '--from', 'base', '--at', head);
+  assert.equal(moved.status, 2);
+  assert.match(moved.stderr, /^SIZE: the work folder is not at \w{10} for src\/a\.ts: check that commit out/);
+});

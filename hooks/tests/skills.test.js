@@ -55,9 +55,14 @@ test('the loop is one short page: six rules, three sizes, every step, no bug lis
     '4. **Tests, lint, types and the suite pass on the final code.**', '5. **A second AI reviews.', '6. **The user checks in the browser and pushes.**']) assert.ok(loop.includes(rule), rule);
   for (const size of ['- **Small**', '- **Medium**', '- **Big**']) assert.ok(loop.includes(size), size);
   for (const step of ['## Step 1 —', '## Step 1.5 —', '## Step 2 —', '## Step 3 —', '## Step 3.5 —', '## Step 4 —', '## Step 5 —']) assert.ok(loop.includes(step), step);
-  for (const tool of ['places.mjs', 'red-proof.mjs', 'pre-review.mjs', 'review-brief.mjs', 'size-check.mjs', '--places <notes>/places.md']) assert.ok(loop.includes(tool), tool);
+  // The typed path lists became one option (--notes <notes>); the page names the printed steps and the notes tool.
+  for (const tool of ['places.mjs', 'red-proof.mjs', 'pre-review.mjs', 'review-brief.mjs', 'size-check.mjs', 'sanad.mjs next', 'notes.mjs answer', 'breaks.mjs',
+    'pre-review.mjs --was <size> --notes <notes>', 'review-brief.mjs --pin --notes <notes>']) assert.ok(loop.includes(tool), tool);
+  assert.ok(!loop.includes('--places <notes>/places.md'), 'the path list is not typed any more');
   assert.match(loop, /NOTE <n>: fixed — /);
   assert.match(loop, /NOTE <n>: user — "/);
+  assert.match(loop, /NOTE <n>: refuted — /);
+  assert.match(loop, /in a message with no tool call/);
   assert.match(loop, /^ {3}`REVIEW: PASS\|FAIL — bugs <found>\/<fixed>, goals tested <k>\/<k> ✓, untested <n>, open: <none\|list>`$/m);
   assert.doesNotMatch(loop, /missed-bug|20\d\d-\d\d-\d\d/i, 'no bug list and no dated history in the loop');
   for (const file of ['review-checklist.md', 'loop-rare-cases.md']) {
@@ -85,11 +90,16 @@ test('review template and evidence rules carry entry points, metric meaning, hyg
   const checklist = fs.readFileSync(path.join(canonicalRoot, 'sanad/reference/review-checklist.md'), 'utf8');
   for (const line of ['ENTRY POINTS:', 'MEANING:', 'HYGIENE:', 'CI-SKIPPED:', 'USERS FOUND BY SEARCH:']) assert.ok(checklist.includes('- `' + line + '`'), line);
   assert.match(checklist, /one unit = <before> → <after>/);
+  for (const line of ['BEST DESIGN:', 'OLD CODE TOO:']) assert.ok(checklist.includes('- `' + line + '`'), line);
+  assert.match(checklist, /EXTRA TEST: /);
+  assert.ok(checklist.includes('`RECOMMEND: PASS|FAIL`'), 'the report shape is in the checklist');
   for (const name of ['independent-reviewer', 'routine-reviewer']) {
     const text = fs.readFileSync(path.join(agentRoot, name + '.md'), 'utf8');
-    assert.match(text, /CALLERS, ENTRY POINTS, REMOVED, WRITERS, MEANING, FAILURES \/ LOCALES, HYGIENE, CI-SKIPPED, USERS FOUND BY SEARCH/, name);
+    // The agent files keep the role and the limits. The checklist is the one item list and the one report
+    // shape: three copies of the list had 27, 24 and 20 items.
     assert.match(text, /sanad\/reference\/review-checklist\.md/, name);
-    assert.match(text, /EXTRA TEST: /, name);
+    assert.doesNotMatch(text, /CALLERS, ENTRY POINTS|COVERAGE, MISSED/, name + ' holds no checklist item list');
+    assert.match(text, /check the reason of every `none:` place/, name);
     // The workflow no longer reads a list of old bugs (user 2026-11-12).
     assert.doesNotMatch(text, /missed-bug/i, name);
   }

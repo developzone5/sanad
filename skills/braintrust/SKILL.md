@@ -132,6 +132,8 @@ Collect each specialist's completed report and preserve its evidence. Pass the f
 
 ## Step 6 — Boss reviews each expert and decides
 
+When the user chooses between two competing designs (Sanad [loop.md](../sanad/reference/loop.md) Step 2 is the rule's home; only with `git config sanad.designChoice true`), the boss does not pick alone: it returns both designs with its recommendation, and the executor shows them to the user in six lines before code.
+
 Resume the existing separate Sanad routing **Boss** (the engine-mapped boss at xhigh, verified in run metadata). If standalone braintrust has no routing boss, spawn ONE separate boss, even when the main session already uses the boss model. If the original agent cannot resume, report that limitation and transfer its saved assessment/evidence to one replacement; do not redo routing or leave duplicate bosses active. Give it the original request verbatim, the evidence pack, the seated-role list, every specialist's full report, the guidance each expert received and any existing targeted follow-up answers. The boss is read-only: it may inspect cited source to validate claims, but cannot edit, implement or publish.
 
 The boss must review each seated expert, including every seated auditor:

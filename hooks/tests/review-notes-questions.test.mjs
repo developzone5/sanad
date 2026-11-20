@@ -260,5 +260,5 @@ test('an incremental scan equals a from-zero scan with an expert run and a dialo
 test('the open-notes message says the NOTE lines go in a message with no tool call', () => {
   const m = scan.openNotesMessage([{ n: 3, kind: 'Question', text: 'Keep the old label? You decide.', outcome: null }]);
   assert.match(m, /^NOTE 3 \(Question\): Keep the old label\? You decide\.$/m);
-  assert.match(m, /`NOTE 3: fixed — <what changed and its test>` \(only after a code change and a passing test that follow the note\), `NOTE 3: refuted — <the note check's evidence>` \(only a note the note check refuted, never a Blocker\) or `NOTE 3: user — "<the user's exact words>"`\. The NOTE lines go in a message with no tool call \(text in a message that also runs a tool may never reach the record\)\. A note is never closed by the author's own judgement\.$/);
+  assert.match(m, /`NOTE 3: fixed — <what changed and its test>` \(only after a code change and a passing test that follow the note\), `NOTE 3: refuted — <the note check's evidence>` \(only a note the note check refuted, never a Blocker\) or `NOTE 3: user — "<the user's exact words>"`\. The NOTE lines go in a message with no tool call \(text in a message that also runs a tool may never reach the record\)\. A note is never closed by the author's own judgement\. \(SG-NOTES\)$/);
 });

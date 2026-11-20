@@ -5,12 +5,12 @@ What a reviewer checks in Sanad Step 3.5 ([loop.md](loop.md)). The whole-diff an
 ## Report
 
 1. `RECOMMEND: PASS|FAIL`
-2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. A confirmed defect, a rare one included, is a Blocker or a Bug. A `Question` is only for what the quoted ticket lines leave open, and it quotes that line.
+2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. A confirmed defect, a rare one included, is a Blocker or a Bug, never "info" or "accepted"; one open Blocker or Bug means FAIL. A rare case (no ticket line covers it, and no effect on access, security or saved data) ends its line with `(RARE)`: it stays a counted note, and the user answers all of them in one list, fix now or a known limit in the PR text. A `Question` is only for what the quoted ticket, QA and spec lines leave open, and it quotes that line; a question those lines already answer is not listed: check the change against that answer.
 3. A test for a case this change does not touch, that the ticket does not name: `EXTRA TEST: <the product change the tests would let through> — <the test that should fail>`. A missing test for a correctness or security rule this change adds, widens or newly exposes (access, tenant, a concurrent or repeated request, a rollback, a failure path) is a `Gap`, whatever the ticket says.
-4. The checklist below, one short line each: `✓`, `✗ <what>` or `– n/a <why>`.
-5. `NOT VERIFIED:` one line. `OUTSIDE PR:` defects on paths the change neither touches, shows nor makes reachable, one line each. A defect on a path the change adds, changes, shows or makes reachable is a finding in item 2, even when the line is older than the branch.
+4. The checklist below, one short line each: `✓`, `✗ <what>` or `– n/a <why>`. On a re-check: only the lines the changed files touch, and the state of every earlier note.
+5. `NOT VERIFIED:` one line. `OUTSIDE PR:` defects on paths the change neither touches, shows nor makes reachable, one line each; the main session puts each to the user before the push. A defect on a path the change adds, changes, shows or makes reachable is a finding in item 2, even when the line is older than the branch.
 
-Every line of items 2 and 3 is a note. The author must fix it or bring the user's own words; the author cannot close it alone. No praise, no restating the diff. Caps: 60 tool uses, 600 words.
+Every line of items 2 and 3 is a note. The author must fix it or bring the user's own words; the author cannot close it alone. No praise, no restating the diff. Caps: the tool-use budget the brief gives (60 when it gives none), 600 words.
 
 ## Every change
 

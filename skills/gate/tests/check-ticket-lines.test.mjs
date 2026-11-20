@@ -193,3 +193,46 @@ test('helpers: quotes, case and comment markers are ignored; list markers are dr
   assert.equal(findQuote(f, 'selecting it again clears it'), 1);
   assert.ok(TEST_FILE.test('src/pages/x.test.tsx') && TEST_FILE.test('App.Tests/Foo.cs') && !TEST_FILE.test('src/pages/x.tsx'));
 });
+
+// 2026-11-19: a ticket line the user dropped keeps its number and asks no test.
+import { droppedLines, droppedOf, report } from '../scripts/check-ticket-lines.mjs';
+
+test("a dropped line is shown as dropped with the user's words, asks no test, and the report passes", () => {
+  const { repo } = fixture({ 'src/list.test.tsx': "it('The list shows every subject', () => {});\nit('A late hand-in is marked late', () => {});\n" });
+  const lines = 'T1. The list shows every subject\nT2. [dropped by the user: "leave the drafts rule for now"] Drafts stay hidden\nT3. A late hand-in is marked late\n';
+  const r = run(repo, lines);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /^TICKET LINES: 2 of 2 covered · 1 dropped by the user$/m);
+  assert.match(r.out, /^  – T2 dropped by the user: "leave the drafts rule for now"$/m);
+  assert.match(r.out, /✓ L3 "T3: A late hand-in is marked late"/, 'T3 keeps its number');
+  assert.deepEqual(droppedLines(lines), [2]);
+  assert.deepEqual(droppedOf(readLines(lines)[1]), { words: 'leave the drafts rule for now', text: 'Drafts stay hidden' });
+  assert.equal(droppedOf(readLines(lines)[0]), null);
+});
+
+test('a test that still quotes a dropped line does not fail the check; a line that is not dropped still needs its test', () => {
+  const { repo } = fixture({ 'src/list.test.tsx': "it('The list shows every subject', () => {});\nit('Drafts stay hidden', () => {});\n" });
+  const ok = run(repo, 'T1. The list shows every subject\nT2. [dropped by the user: "leave the drafts rule for now"] Drafts stay hidden\n');
+  assert.equal(ok.code, 0, ok.out);
+  const missing = run(repo, 'T1. The list shows every subject\nT2. [dropped by the user: "leave the drafts rule for now"] Drafts stay hidden\nT3. A late hand-in is marked late\n');
+  assert.equal(missing.code, 1, missing.out);
+  assert.match(missing.out, /^TICKET LINES: 1 of 2 covered · 1 dropped by the user$/m);
+  assert.match(missing.out, /✗ L3 /);
+  const r = report(['one line here'], []);
+  assert.deepEqual(r.dropped, []);
+  assert.equal(r.missing, 1);
+});
+
+test('a lines file where every line is dropped is refused: nothing is left to prove', () => {
+  const { repo } = fixture({});
+  const r = run(repo, 'T1. [dropped by the user: "leave the drafts rule for now"] Drafts stay hidden\n');
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /Every ticket line is dropped/);
+});
+
+test('checkLines is exported here and review-brief re-exports the same function', async () => {
+  const mod = await import('../scripts/check-ticket-lines.mjs');
+  const rb = await import('../scripts/review-brief.mjs');
+  assert.equal(rb.checkLines, mod.checkLines);
+  assert.deepEqual(mod.checkLines('# h\n\n- C1. one\n2) two\nthree'), ['one', 'two', 'three']);
+});

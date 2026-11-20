@@ -1,3 +1,4 @@
+import './neutral-git-config.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -7,8 +8,11 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'pre-review.mjs');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pre-review-'));
+// 2026-11-22: the long name of the temp folder (CI's temp is a short 8.3 name, RUNNER~1, and a kept check result named the long one).
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'pre-review-')));
 const env = { ...process.env, SANAD_STATE_DIR: path.join(root, 'state') };
+// The checks this file runs in its own process keep their state in the same temp folder, never in the real one.
+process.env.SANAD_STATE_DIR = env.SANAD_STATE_DIR;
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 // A repo with one web package whose eslint and tsc are tiny fakes that pass, or fail when a
@@ -182,7 +186,8 @@ test('--before-proof passes the flag to the test asserts check only, and labels 
   const after = planChecks({ repo, base: 'base', node: process.execPath, remote: null }).checks;
   assert.ok(!after.find(c => c.name === 'test asserts').args.includes('--before-proof'));
   const r = run(repo, ['--before-proof']);
-  assert.match(r.stdout, /^PRE-REVIEW \(before the proof\): /);
+  // 2026-11-19: each check's lines are printed when it ends, so the summary is the last line.
+  assert.match(r.stdout.trimEnd().split(/\r?\n/).at(-1), /^PRE-REVIEW \(before the proof\): /);
 });
 
 // 2026-11-10 (PR #767): two C# files from an earlier commit failed CI's format check after the push.
@@ -233,7 +238,9 @@ test('ticket lines run when a lines file is given, and --was fails a grown chang
   write('web/src/a.ts', 'export const a = 4;\n');
   const lines = path.join(root, 'lines.md');
   fs.writeFileSync(lines, '- The total shows once\n');
-  const ok = run(repo, ['--lines', lines, '--was', 'small', ...closed(repo)]);
+  // 2026-11-19: a new test needs evidence in the run after the proof (check-test-asserts.mjs); this run is the one
+  // before the proof, where that part is left to the later run.
+  const ok = run(repo, ['--before-proof', '--lines', lines, '--was', 'small', ...closed(repo)]);
   assert.equal(ok.status, 0, ok.stdout);
   assert.match(ok.stdout, /✓ ticket lines/);
   write('Api/Migrations/20260101_X.cs', 'public class X : Migration { }\n');
@@ -247,7 +254,7 @@ test('it checks the repository it is given, not another one, and refuses a non-r
   const { repo, write } = fixture();
   write('web/src/a.ts', 'export const a = 5;\n');
   const inside = spawnSync(process.execPath, [script, '--base', 'base'], { cwd: path.join(repo, 'web'), encoding: 'utf8', env });
-  assert.ok(inside.stdout.split(/\r?\n/)[0].endsWith(path.basename(repo)), 'the current folder is the default: ' + inside.stdout);
+  assert.ok(inside.stdout.trimEnd().split(/\r?\n/).at(-1).endsWith(path.basename(repo)), 'the current folder is the default (the summary, the last line, names it): ' + inside.stdout);
   assert.equal(spawnSync(process.execPath, [script, '--repo', root], { encoding: 'utf8', env }).status, 2);
 });
 
@@ -320,7 +327,7 @@ test('a part left out for a missing option is named as skipped, and is not a fai
   write('web/src/a.ts', 'export const a = 7;\n');
   const r = run(repo, closed(repo));
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PRE-REVIEW: 8 of 8 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
+  assert.match(r.stdout.trimEnd().split(/\r?\n/).at(-1), /^PRE-REVIEW: 8 of 8 checks passed · 3 skipped: ticket lines, test labels, size growth · 1 changed file\(s\) · /);
   assert.match(r.stdout, /\n {2}– ticket lines: skipped \(no --lines\)\n {2}– test labels: skipped \(no --check\)\n {2}– size growth: skipped \(no --was\)/);
   const all = planChecks({ repo, base: 'base', node: process.execPath, remote: null, lines: 'l.md', check: 'c.md', was: 'small', places: 'p.md' });
   assert.deepEqual(all.skipped, [], 'every option given: nothing skipped');
@@ -484,8 +491,10 @@ test('finding 7: the siblings check gets the ticket lines and the check lines wh
   const { planChecks } = await import('../scripts/pre-review.mjs');
   const { repo } = fixture();
   const find = (o) => planChecks({ repo, base: 'base', node: process.execPath, remote: null, siblings: 's.md', places: 'p.md', ...o }).checks.find((c) => c.name === 'siblings').args.slice(1);
-  assert.deepEqual(find({ lines: 'l.md', check: 'c.md' }), ['--check', 's.md', '--places', 'p.md', '--lines', 'l.md', '--check-lines', 'c.md']);
-  assert.deepEqual(find({ lines: 'l.md' }), ['--check', 's.md', '--places', 'p.md'], 'one of the two alone: as before');
+  // 2026-11-19 (owner decision 8): the second look is tied to the ticket lines only; the check lines are not passed.
+  assert.deepEqual(find({ lines: 'l.md', check: 'c.md' }), ['--check', 's.md', '--places', 'p.md', '--lines', 'l.md']);
+  assert.deepEqual(find({ lines: 'l.md' }), ['--check', 's.md', '--places', 'p.md', '--lines', 'l.md'], 'the ticket lines alone are enough');
+  assert.deepEqual(find({ check: 'c.md' }), ['--check', 's.md', '--places', 'p.md'], 'no ticket lines: none passed');
 });
 
 test('finding 1, must not change: a changed function with no caller, and a change with no function, owe no name on the list', () => {
@@ -636,4 +645,162 @@ test('text only (audit): logic in a locale script is asked for tests; plain loca
   assert.ok(!plain.checks.some(c => c.name === 'ticket lines'), 'plain text stays text only');
   const bundleText = await planFor(f => f.write('web/src/locales/index.ts', "import en from './en.json';\nexport function t(key) { return en[key] ?? key; }\n// note (see docs)\n"));
   assert.ok(!bundleText.checks.some(c => c.name === 'ticket lines'), 'a comment is text');
+});
+
+// ---- 2026-11-19 (speed batch) ----
+
+// Another session's folder sat untracked in the repository: 1,498 "changed" files, and one check took 852 s.
+test('a folder with 1,500 untracked files: one failed check with the FOREIGN? line, in under 5 seconds, and no other check starts', () => {
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 8;\n');
+  fs.mkdirSync(path.join(repo, 'other-session', 'src'), { recursive: true });
+  for (let i = 0; i < 1500; i++) fs.writeFileSync(path.join(repo, 'other-session', 'src', `f${i}.ts`), 'export const x = 1;\n');
+  const started = Date.now();
+  const r = run(repo);
+  const took = Date.now() - started;
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.ok(took < 5000, `it took ${took} ms`);
+  assert.match(r.stdout, /✗ changed files[^\n]*\n\s+FOREIGN\? other-session\/ holds 1500 untracked files: add it to \S*info\/exclude if it is another session's, else commit it/);
+  assert.match(r.stdout.trimEnd().split(/\r?\n/).at(-1), /^PRE-REVIEW: 0 of 1 checks passed/);
+  assert.doesNotMatch(r.stdout, /lint|types|size|commits/, 'no other check ran');
+});
+
+// The size check's printed rows are capped; pre-review read the row "(+N more … rows not printed)" as a function
+// name once, and the author added each missing name by hand.
+test('15 changed functions: every caller row is read from the size check\'s data; one that is not on the list is added to it as an open place, and the places check fails with its name', async () => {
+  const { preReview } = await import('../scripts/pre-review.mjs');
+  const { repo, write, git } = fixture();
+  const names = Array.from({ length: 15 }, (_, i) => 'rule' + (i + 1));
+  write('web/src/rules.ts', names.map(n => `export function ${n}(d: number) { return d; }\n`).join(''));
+  write('web/src/use.ts', "import * as r from './rules';\n" + names.map(n => `export const u_${n} = r.${n}(1);\n`).join(''));
+  git('add', '-A'); git('commit', '-qm', 'rules'); git('branch', '-f', 'base');
+  write('web/src/rules.ts', names.map(n => `export function ${n}(d: number) { return d + 1; }\n`).join(''));
+  // The list searched 14 of the 15 names; rule15 is the one past the printed rows.
+  const places = placesFor(repo, names.slice(0, 14).join(','));
+  const row = (n, i) => ({ name: n, file: 'web/src/rules.ts', count: 1, tests: 0, unresolved: [], where: [`web/src/use.ts:${i + 2}`] });
+  const all = names.map(row);
+  const sizeJson = JSON.stringify({ mode: 'diff', size: 'small', stack: null, signals: {}, roles: ['one review: fresh eyes'], callers: all.slice(0, 12), moreSymbols: 3, moved: [], files: 1, codeFiles: 1, lines: 15, renamed: [], binary: [], names: null, read: [], unread: [], allCallers: all });
+  const ran = [];
+  const fakeRun = (c) => {
+    ran.push(c.name);
+    if (c.name === 'size') return Promise.resolve({ ...c, code: 0, out: sizeJson, ms: 1 });
+    if (c.name === 'places') { const r = spawnSync(process.execPath, c.args, { cwd: c.cwd, encoding: 'utf8', windowsHide: true }); return Promise.resolve({ ...c, code: r.status, out: r.stdout + r.stderr, ms: 1 }); }
+    return Promise.resolve({ ...c, code: 0, out: '', ms: 1 });
+  };
+  const r = await preReview({ repo, base: 'base', node: process.execPath, remote: null, noCache: true, places, run: fakeRun });
+  assert.equal(r.ok, false, r.text);
+  assert.match(r.text, /✓ size[^\n]*\n\s+SIZE: small \(diff\)[^\n]*\n\s+roles:[^\n]*\n\s+callers: rule1 ×1[^\n]*\(\+3 more changed functions, all analysed; rows not printed\)/, 'the size text is shown as size-check prints it');
+  assert.match(r.text, /✗ places[^\n]*\n(?:\s+[^\n]*\n)*?\s+OPEN: rule15 — changed, not on the places list: it has callers; it is added to the list now/);
+  assert.doesNotMatch(r.text, /rows not printed[^\n]*not on the places list|callers entry not readable|more changed function\(s\) are not named/, 'no row is lost and none is read as a name');
+  assert.doesNotMatch(r.text, /OPEN: rule(?:[1-9]|1[0-4]) —/, 'the 14 searched names are not named');
+  assert.match(fs.readFileSync(places, 'utf8'), /^Names: .*\brule15\b/m, 'the name is on the list now');
+  assert.match(r.text, /OPEN[^\n]*use\.ts/, 'and its place shows as open: ' + r.text);
+  assert.equal(ran.filter(n => n === 'places').length, 2, 'the places check ran again on the new list');
+  // The next run finds every name on the list: nothing is added, and only the open place fails it.
+  const again = await preReview({ repo, base: 'base', node: process.execPath, remote: null, noCache: true, places, run: fakeRun });
+  assert.doesNotMatch(again.text, /not on the places list/);
+});
+
+test('--notes fills the list options from the notes folder; an option that names another file is a usage error', async () => {
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 9;\n');
+  const places = placesFor(repo), notes = path.dirname(places);
+  siblingsFor(places);
+  fs.writeFileSync(path.join(notes, 'lines.md'), '- The total shows once\n');
+  const filled = run(repo, ['--notes', notes, '--before-proof']);
+  assert.match(filled.stdout, /✓ places/, filled.stdout + filled.stderr);
+  assert.match(filled.stdout, /✓ siblings/);
+  assert.match(filled.stdout, /ticket lines \(\d/, 'lines.md of the notes folder is used: ' + filled.stdout);
+  assert.match(filled.stdout, /– test labels: skipped \(no --check\)/, 'a file that is not in the folder is not made up');
+  // The same file given by hand is fine; another one is refused.
+  assert.notEqual(run(repo, ['--notes', notes, '--places', places, '--before-proof']).status, 2);
+  const other = path.join(fs.mkdtempSync(path.join(root, 'other-')), 'places.md');
+  fs.copyFileSync(places, other);
+  const refused = run(repo, ['--notes', notes, '--places', other]);
+  assert.equal(refused.status, 2, refused.stdout);
+  assert.match(refused.stderr, /PRE-REVIEW: --places \S+ is not the notes folder's file/);
+  assert.equal(refused.stdout, '', 'nothing ran');
+  assert.equal(run(repo, ['--notes', path.join(root, 'no-such-notes')]).status, 2);
+  assert.equal(run(repo, ['--part', 'all']).status, 2, '--part takes lists or code only');
+});
+
+test('--before-proof with the notes folder\'s break list: a bad break fails the break plan check and is named; no test command, and it is named as skipped', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { writeTask } = await import('../scripts/notes-dir.mjs');
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 10;\n');
+  const places = placesFor(repo), notes = path.dirname(places);
+  siblingsFor(places);
+  fs.writeFileSync(path.join(notes, 'breaks.json'), JSON.stringify([{ name: 'value broken', file: 'web/src/a.ts', find: 'NOT IN THE FILE', put: 'x', mustFail: ['the value'] }]));
+  const noCommand = run(repo, ['--notes', notes, '--before-proof']);
+  assert.match(noCommand.stdout, /– break plan: skipped \(no test command in the notes folder \(task\.json\)\)/, noCommand.stdout + noCommand.stderr);
+  writeTask(notes, { repo, base: 'base', sides: [{ name: 'web', cwd: '', testCommand: [process.execPath, '-e', '0'] }] });
+  const bad = run(repo, ['--notes', notes, '--before-proof']);
+  assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+  assert.match(bad.stdout, /✗ break plan[^\n]*\n(?:\s+[^\n]*\n)*?[^\n]*value broken/, bad.stdout);
+  // Without --before-proof the proof has run: no break plan check.
+  assert.doesNotMatch(run(repo, ['--notes', notes]).stdout, /break plan/);
+  const plan = planChecks({ repo, base: 'base', node: process.execPath, remote: null, beforeProof: true, breaks: 'b.json', proof: ['npm', 'test'], proofCwd: 'web' }).checks.find(c => c.name === 'break plan');
+  assert.deepEqual(plan.args.slice(1), ['--repo', repo, '--breaks', 'b.json', '--base', 'base', '--cwd', 'web', '--check-plan', '--', 'npm', 'test']);
+});
+
+test('checkStatus says which checks are a kept pass for the code as it is, and runs nothing; tscInfoFile names the type check\'s build-info file', async () => {
+  const { checkStatus, planChecks, tscInfoFile } = await import('../scripts/pre-review.mjs');
+  const { repo, write } = fixture();
+  write('web/src/a.ts', 'export const a = 11;\n');
+  const opts = { repo, base: 'base', node: process.execPath, remote: null };
+  const before = checkStatus(opts);
+  assert.equal(before.foreign, '');
+  assert.deepEqual(before.checks.filter(c => c.kept).map(c => c.name), [], 'nothing is kept before the first run');
+  assert.equal(before.checks.find(c => c.name === 'test asserts').keyed, false, 'a check that is never kept says so');
+  assert.equal(run(repo, closed(repo)).status, 0);
+  const after = checkStatus(opts);
+  for (const name of ['lint web (1 file)', 'types web', 'size']) assert.equal(after.checks.find(c => c.name === name).kept, true, name);
+  assert.match(after.checks.find(c => c.name === 'types web').at, /^\d{4}-\d\d-\d\dT/);
+  assert.equal(after.checks.find(c => c.name === 'one job').kept, false);
+  write('web/src/a.ts', 'export const a = 12;\n');
+  assert.deepEqual(checkStatus(opts).checks.filter(c => c.kept).map(c => c.name), [], 'an edit: no pass is kept for this code');
+  const types = planChecks(opts).checks.find(c => c.name === 'types web');
+  assert.equal(types.args.at(-1), tscInfoFile(path.join(repo, 'web'), 'tsconfig.app.json'));
+  assert.match(path.basename(tscInfoFile(path.join(repo, 'web'), 'tsconfig.app.json')), /^sanad-tsc-[0-9a-f]{12}\.tsbuildinfo$/);
+  assert.notEqual(tscInfoFile(path.join(repo, 'web'), 'tsconfig.app.json'), tscInfoFile(path.join(repo, 'web'), 'tsconfig.node.json'));
+});
+
+// 2026-11-19 (owner yes): the tests-only light path. With `sanad.testsOnlyLane true`, a tests-only change leaves out the
+// new-test evidence part. Switch off, or a change that is not tests only: the check is planned as before.
+test('tests-only lane: the switch on and a tests-only change skip the evidence; the switch off keeps it', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const laneOf = (repo) => planChecks({ repo, base: 'base', node: process.execPath, remote: null }).checks.find(c => c.name === 'test asserts').args.includes('--tests-only-lane');
+  const { repo, git, write } = fixture();
+  write('web/src/a.test.ts', "it('x', () => { expect(1).toBe(1); });\n");
+  assert.equal(laneOf(repo), false, 'the switch is off');
+  git('config', 'sanad.testsOnlyLane', 'true');
+  assert.equal(laneOf(repo), true, 'the switch is on and the change is tests only');
+  git('config', 'sanad.testsOnlyLane', 'false');
+  assert.equal(laneOf(repo), false, 'the switch is off again');
+});
+
+test('tests-only lane (must not change): the switch on with product code in the change keeps the evidence', async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const { repo, git, write } = fixture();
+  write('web/src/a.test.ts', "it('x', () => { expect(1).toBe(1); });\n");
+  write('web/src/a.ts', 'export const a = 9;\n');
+  git('config', 'sanad.testsOnlyLane', 'true');
+  assert.equal(planChecks({ repo, base: 'base', node: process.execPath, remote: null }).checks.find(c => c.name === 'test asserts').args.includes('--tests-only-lane'), false);
+});
+
+test('Y2: a passing test-asserts check shows its warning rows under its own line', () => {
+  const { repo, git, write } = fixture();
+  git('config', 'sanad.strictEvidence', 'false');
+  write('web/src/form.test.ts', "it('shows the count once', () => { expect(n).toBe(1); });\n");
+  const r = run(repo, closed(repo));
+  assert.match(r.stdout, /✓ test asserts[^\n]*\n\s+NOT PROVEN TEST: web\/src\/form\.test\.ts:1 shows the count once\n\s+→ the missing-run-evidence rows/, r.stdout + r.stderr);
+});
+
+test('Y2: with no strictEvidence setting, the missing-run-evidence row fails the check', () => {
+  const { repo, write } = fixture();
+  write('web/src/form.test.ts', "it('shows the count once', () => { expect(n).toBe(1); });\n");
+  const r = run(repo, closed(repo));
+  assert.match(r.stdout, /✗ test asserts/, r.stdout + r.stderr);
+  assert.match(r.stdout, /NOT PROVEN TEST: web\/src\/form\.test\.ts:1 shows the count once/, r.stdout + r.stderr);
 });

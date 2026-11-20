@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { transcriptCandidates } from '../scripts/note-check.mjs';
 
 const scripts = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts');
 const script = path.join(scripts, 'note-check.mjs');
@@ -370,4 +371,74 @@ test('R1: an unbound brief with the guards\' numbers: a REFUTED answer prints no
   assert.doesNotMatch(r.stdout, /THE AUTHOR MAY NOW WRITE|ASK THE USER: NOTE 2/);
   assert.match(r.stdout, /^NOT SHOWN UNCHANGED: NOTE 2 — /m);
   assert.match(fs.readFileSync(f.list, 'utf8'), /NOTE 2 · UNSURE \(the code is not bound to a repository/);
+});
+
+// 2026-11-19 (groups): with a session log the brief uses the guards' NOTE numbers, lists the groups, and --record
+// gives the ready answer for every refuted NOTE number of a group. A split group gets two verdicts.
+test('a brief of two groups with a session log: NOTE numbers, both texts of each group, a split gives two verdicts', () => {
+  const f = fixture();
+  const A = ['RECOMMEND: FAIL', '', 'Bug — src/save.ts:12 saveRole() sends the request when the role list is empty', 'Bug — src/queue.ts:40 two workers can take the same row'].join('\n');
+  const B = ['RECOMMEND: FAIL', '', 'Bug — src/save.ts:12 the role list is read before it is loaded', 'Gap — src/queue.ts:40 no test takes one row from two workers'].join('\n');
+  const a = path.join(f.notes, 'review-a.md'), b = path.join(f.notes, 'review-b.md');
+  fs.writeFileSync(a, A + '\n');
+  fs.writeFileSync(b, B + '\n');
+  fs.writeFileSync(f.transcript, lines([...reviewerRun('rev1', A, 1), ...reviewerRun('rev2', B, 4)]));
+  const r = run(['--brief', '--notes', f.notes, '--reports', a + ',' + b, '--transcript', f.transcript, '--repo', f.git]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const text = fs.readFileSync(f.brief, 'utf8').split(/\r?\n/);
+  assert.deepEqual(text.filter((l) => /^G\d/.test(l)), ['G1 · src/save.ts:12 · NOTE 1, NOTE 3', 'G2 · src/queue.ts:40 · NOTE 2, NOTE 4']);
+  assert.deepEqual(kLines(f.brief), [
+    'NOTE 1 · Bug · Bug — src/save.ts:12 saveRole() sends the request when the role list is empty',
+    'NOTE 2 · Bug · Bug — src/queue.ts:40 two workers can take the same row',
+    'NOTE 3 · Bug · Bug — src/save.ts:12 the role list is read before it is loaded',
+    'NOTE 4 · Gap · Gap — src/queue.ts:40 no test takes one row from two workers',
+  ]);
+  assert.doesNotMatch(text.join('\n'), /^K\d/m);
+
+  fs.writeFileSync(f.answer, `BRIEF ${idOf(f.brief)}\nREFUTED 1 — src/save.ts:1 returns before the request when the list is empty\nCONFIRMED 3 — src/save.ts:12 reads the list before the load\nREFUTED 2 — src/queue.ts:1 takes the row with a guarded UPDATE\nREFUTED 4 — tests/roles.test.ts:1 takes one row from two workers\n`);
+  const rec = run(['--record', f.answer, '--notes', f.notes]);
+  assert.equal(rec.status, 0, rec.stdout + rec.stderr);
+  const out = rec.stdout.split(/\r?\n/).filter(Boolean);
+  assert.equal(out[0], 'NOTE CHECK: 4 note(s) — 1 confirmed, 3 refuted, 0 unsure');
+  assert.ok(out.includes('GROUP G1 · src/save.ts:12 · NOTE 1 REFUTED, NOTE 3 CONFIRMED — split: the checker judged these texts differently; answer every number of the group by its own verdict'), rec.stdout);
+  assert.ok(out.includes('GROUP G2 · src/queue.ts:40 · NOTE 2 REFUTED, NOTE 4 REFUTED — one verdict; answer every number of the group by its own verdict'), rec.stdout);
+  // The ready answer for every refuted NOTE number of a group; the confirmed text of the split group gets none.
+  assert.deepEqual(out.filter((l) => l.startsWith('THE AUTHOR MAY NOW WRITE: ')).map((l) => l.slice(26, 43)), ['NOTE 1: refuted —', 'NOTE 2: refuted —', 'NOTE 4: refuted —']);
+  // The rule line no longer says to ask the user about refuted notes together.
+  assert.ok(out.some((l) => l.startsWith('Refuted notes are not fixed: a note the note check refuted is closed by its own line `NOTE <n>: refuted — ')), rec.stdout);
+  assert.doesNotMatch(rec.stdout, /ask the user about them together/);
+});
+
+test('the session log of these notes with every note closed: nothing to check, never a K brief of closed notes', () => {
+  const f = fixture();
+  fs.writeFileSync(f.transcript, lines([
+    ...reviewerRun('rev1', REPORT_1, 1),
+    userSays('leave the empty list as it is, and leave the two roles case too', 5),
+    say('NOTE 1: user — "leave the empty list as it is"\nNOTE 2: user — "leave the two roles case too"', 6),
+  ]));
+  const r = run(['--brief', '--notes', f.notes, '--reports', f.report, '--transcript', f.transcript]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const out = r.stdout.split(/\r?\n/).filter(Boolean);
+  assert.equal(out[0], 'NOTE CHECK: no note to check');
+  assert.deepEqual(out.filter((l) => l.startsWith('NOT AN OPEN NOTE OF THE SESSION (already closed there): ')).length, 2);
+  assert.equal(fs.existsSync(f.brief), false, 'no brief of closed notes under K numbers');
+});
+
+test('transcriptCandidates: the session the host names is the only candidate, not the newest file', () => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-sid-'));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-sid-repo-'));
+  const folder = path.join(projects, path.resolve(repo).replace(/[^A-Za-z0-9]/g, '-'));
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, 'mine.jsonl'), '');
+  fs.writeFileSync(path.join(folder, 'other.jsonl'), '');
+  const old = { p: process.env.SANAD_PROJECTS_DIR, s: process.env.CLAUDE_CODE_SESSION_ID };
+  process.env.SANAD_PROJECTS_DIR = projects;
+  try {
+    process.env.CLAUDE_CODE_SESSION_ID = 'mine';
+    assert.deepEqual(transcriptCandidates(repo).map((f) => path.basename(f)), ['mine.jsonl']);
+    process.env.CLAUDE_CODE_SESSION_ID = 'unknown';
+    assert.equal(transcriptCandidates(repo).length, 2, 'an unknown id falls back to the folder');
+  } finally {
+    for (const [k, v] of [['SANAD_PROJECTS_DIR', old.p], ['CLAUDE_CODE_SESSION_ID', old.s]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 });

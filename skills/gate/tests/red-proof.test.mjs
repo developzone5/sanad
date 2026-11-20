@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'red-proof.mjs');
+const script = process.env.RED_PROOF_TEST_SCRIPT || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'red-proof.mjs');
 
 // Every fixture's kept copies (--parallel keeps one copy per slot for the next proof) are removed
 // when the file is done.
@@ -390,9 +390,10 @@ test('--parallel: copies are kept for the next proof with their build outputs, a
     'if (!require("./rule.cjs").blocks) { console.log([" FAIL  src/a.test.cjs > form > saves nothing", "AssertionError: expected 1 to be 0"].join(String.fromCharCode(10))); process.exit(1); }', ''].join('\n'));
   fs.writeFileSync(path.join(repo, 'stale.cjs'), '// only in the first proof\n');
   writeBreaks(breaks, ['saves nothing']);
+  // --fresh: the same tree again would resume its caught break and run less (2026-11-19).
   const proof = (n) => {
     const log = path.join(repo, '..', path.basename(repo) + `-${n}.log`);
-    const r = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--then-green', '--parallel', '2', '--log', log, '--', process.execPath, 'check.cjs']);
+    const r = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--then-green', '--parallel', '2', '--log', log, ...(n === 3 ? ['--fresh'] : []), '--', process.execPath, 'check.cjs']);
     assert.equal(r.status, 0, r.stdout);
     return fs.readFileSync(log, 'utf8');
   };
@@ -485,19 +486,20 @@ function builtFixture() {
   return { repo, breaks, git, log };
 }
 
-test('a dotnet proof builds once: every run shares the copy the compile check built, and builds only what its change touched', () => {
+test('a dotnet proof builds its cold copies itself, side by side, and every copy then takes runs (2026-11-19)', () => {
   const { repo, breaks, log } = builtFixture();
   const result = dotnetRun(repo, ['--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs', '--breaks', breaks, '--then-green', '--parallel', '3'], log);
   assert.equal(result.status, 0, result.stdout);
   assert.match(result.stdout, /RED-PROOF: PROVED ✓ — red on the old code, 1 break\(s\) caught, green on the fix/);
+  assert.match(result.stdout, /building 2 cold copies side by side before the runs/);
+  assert.match(result.stdout, /3 run\(s\), 3 at a time, each in its own copy; green first/);
+  assert.doesNotMatch(result.stdout, /sit out/);
+  assert.match(result.stdout, /done 0 of 3/);
+  assert.match(result.stdout, /done 3 of 3, about 0 min left/);
   const seen = builds(log);
-  assert.deepEqual(seen.map(b => [b.list ? 'compile check' : 'run', b.state]),
-    [['compile check', 'cold'], ['run', 'up to date'], ['run', 'incremental'], ['run', 'incremental']], 'one whole build, then green and the red runs: ' + JSON.stringify(seen));
-  assert.equal(new Set(seen.map(b => b.cwd)).size, 1, 'every run in the copy that built: ' + seen.map(b => b.cwd).join(' | '));
-  assert.ok(seen[2].newer.includes('app.cjs'), 'the old code was compiled into the run that tested it');
-  assert.ok(seen[3].newer.includes('rule.cjs'), 'the break was newer than the output, so it was compiled into its run');
+  assert.equal(seen.filter(b => b.list && b.state === 'cold').length, 3, 'the compile check and the two cold copies built once each: ' + JSON.stringify(seen));
+  assert.equal(new Set(seen.filter(b => !b.list).map(b => b.cwd)).size, 3, 'the three runs went to three copies');
   assert.ok(seen.every(b => b.srcRev === 'false'), 'a copy builds without the commit id, so a new commit recompiles nothing');
-  assert.match(result.stdout, /2 copies never built here sit out/);
 });
 
 test('--warm builds each copy once; a later proof runs in all of them at once; a frontend command leaves them alone', () => {
@@ -719,6 +721,7 @@ test('a fix file that only adds names the tests use stays at the fix for the old
   const tests = 'Assert.Equal(AttemptMessages.ExamAttemptsBelowUsed.Code, result.Code);';
   assert.deepEqual(addedNames(['@@ -10,0 +11 @@', decl].join('\n'), 'class AttemptMessages { }', tests, 'AttemptMessages.cs'), ['ExamAttemptsBelowUsed']);
   assert.deepEqual(addedNames(['@@ -10 +10 @@', '-    old line', decl].join('\n'), '', tests, 'AttemptMessages.cs'), [], 'a file that also changes a line may hold the fix');
+  assert.deepEqual(addedNames(['--- a/file', '+++ b/file', '@@ -10 +10 @@', '---count;', decl].join('\n'), '', tests, 'AttemptMessages.cs'), [], 'a deleted line starting with two dashes is not a diff header');
   assert.deepEqual(addedNames(['@@ -3,0 +4 @@', '+  if (code == AttemptMessages.ExamAttemptsBelowUsed.Code) return 409;'].join('\n'), '', tests, 'Controller.cs'), [], 'a use is not a declaration');
   assert.deepEqual(addedNames(['@@ -10,0 +11 @@', decl].join('\n'), 'ExamAttemptsBelowUsed', tests, 'AttemptMessages.cs'), [], 'a name the old file had is not new');
 
@@ -801,6 +804,239 @@ test('a fix file whose new name only a test comment, block comment or title hold
   assert.equal(kept.status, 0, kept.stdout);
   assert.match(kept.stdout, /names\.cjs stays at the fix for the old-code run: it only adds lines, and the tests use its new names \(NEW_NAME\)/);
   assert.match(kept.stdout, /RED ✓ — the tests fail on HEAD for app\.cjs \(/);
+});
+
+// 2026-11-20: a kept implementation no longer matched its reverted interface.
+test('the old-code run keeps additive declarations and callers of a new name with its implementation', () => {
+  const { repo, git } = fixture();
+  const put = (file, text) => fs.writeFileSync(path.join(repo, file), text);
+  put('Lookup.cs', 'class Lookup {\n}\n');
+  put('ILookup.cs', 'interface ILookup {\n  int Read();\n}\n');
+  put('Caller.cs', 'class Caller {\n  int Run(ILookup lookup) => lookup.Read();\n}\n');
+  git('add', 'Lookup.cs', 'ILookup.cs', 'Caller.cs');
+  git('commit', '-qm', 'old lookup');
+  put('Lookup.cs', 'class Lookup {\n  public int Read(bool includeStaff = false) => 1;\n}\n');
+  put('ILookup.cs', 'interface ILookup {\n  int Read();\n  int Read(bool includeStaff);\n}\n');
+  put('Caller.cs', 'class Caller {\n  int Run(ILookup lookup) => lookup.Read();\n  int RunStaff(ILookup lookup) => lookup.Read(includeStaff: true);\n}\n');
+  put('App.Tests.cs', 'class AppTests {\n  [Fact]\n  public void ReadsStaff() { new Lookup().Read(includeStaff: true); }\n}\n');
+  put('check.cjs', [
+    'const fs = require("node:fs");',
+    'if (["Lookup.cs", "ILookup.cs", "Caller.cs"].some(f => !fs.readFileSync(f, "utf8").includes("includeStaff"))) {',
+    '  console.log("Lookup.cs(2,2): error CS0535: Lookup does not implement interface member\\nBuild FAILED."); process.exit(1);',
+    '}',
+    'if (require("./app.cjs") === 1) { console.log("  Failed AppTests.ReadsStaff [1 ms]\\nAssert.Equal() Failure"); process.exit(1); }',
+  ].join('\n'));
+  const r = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs,Lookup.cs,ILookup.cs,Caller.cs', '--then-green', '--parallel', '1', '--', process.execPath, 'check.cjs']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const file of ['Lookup.cs', 'ILookup.cs', 'Caller.cs']) assert.ok(r.stdout.includes(file + ' stays at the fix'), r.stdout);
+  assert.match(r.stdout, /RED ✓ — the tests fail on HEAD for app\.cjs \(/);
+});
+
+// 2026-11-20: keeping a related file with edited lines hid the real old behavior.
+for (const { title, check, status, verdict } of [
+  { title: 'a broad test still passes', check: 'value.length > 0', status: 1, verdict: 'NOT RED ✗' },
+  { title: 'the test sees the actual fix', check: 'value === "yy"', status: 0, verdict: 'RED ✓' },
+]) {
+  test(`the old-code run reverts a mixed edit: ${title}`, () => {
+    const { repo, git } = fixture();
+    const put = (file, text) => fs.writeFileSync(path.join(repo, file), text);
+    put('names.cjs', 'module.exports = {\n  OLD_NAME: 1,\n};\n');
+    put('core.cjs', 'module.exports = { render: () => "x" };\n');
+    put('service.cjs', 'const core = require("./core.cjs");\nmodule.exports = () => core.render();\n');
+    git('add', 'names.cjs', 'core.cjs', 'service.cjs');
+    git('commit', '-qm', 'old service');
+    put('names.cjs', 'module.exports = {\n  OLD_NAME: 1,\n  NEW_NAME: 2,\n};\n');
+    put('core.cjs', 'module.exports = { render: () => "x", renderAll: (n) => "y".repeat(n) };\n');
+    // In the second case the fixed caller passes even with the old core.
+    const fallback = status === 1 ? '""' : '"yy"';
+    const fixedService = `const core = require("./core.cjs");\nconst n = require("./names.cjs");\nmodule.exports = () => core.renderAll ? core.renderAll(n.NEW_NAME) : ${fallback};\n`;
+    put('service.cjs', fixedService);
+    put('service.test.cjs', `it('${title}', () => { void require('./names.cjs').NEW_NAME; const value = require('./service.cjs')(); expect(${check}).toBe(true); });\n`);
+    put('check.cjs', [
+      'const value = require("./service.cjs")();',
+      `if (!(${check})) { console.log(" FAIL  service.test.cjs > ${title}\\nAssertionError: expected false to be true"); process.exit(1); }`,
+    ].join('\n'));
+    const r = run(['--repo', repo, '--base', 'HEAD', '--old', 'HEAD', '--files', 'names.cjs,service.cjs,core.cjs', '--then-green', '--parallel', '1', '--', process.execPath, 'check.cjs']);
+    assert.equal(r.status, status, r.stdout + r.stderr);
+    assert.ok(r.stdout.includes(`RED-PROOF: ${verdict}`), r.stdout);
+    assert.match(r.stdout, /names\.cjs stays at the fix/);
+    assert.doesNotMatch(r.stdout, /service\.cjs stays at the fix/);
+    assert.equal(fs.readFileSync(path.join(repo, 'service.cjs'), 'utf8'), fixedService);
+  });
+}
+
+// 2026-11-20: a test using a new named argument could not compile on the old code.
+test('only build errors for new product names in the tests count as old-code red', () => {
+  const { repo, git } = fixture();
+  const put = (file, text) => fs.writeFileSync(path.join(repo, file), text);
+  const oldLookup = 'class Lookup { public int Read() => 0; }\n';
+  put('Lookup.cs', oldLookup);
+  git('add', 'Lookup.cs');
+  git('commit', '-qm', 'old lookup');
+  put('Lookup.cs', 'class Lookup { public void Read(bool includeStaff, out int result) => result = includeStaff ? 1 : 0; }\n');
+  const testLine = '  public void ReadsStaff() { new Lookup().Read(includeStaff: true, result: out var status); ReadOther(out var other); }';
+  put('App.Tests.cs', `class AppTests {\n  [Fact]\n${testLine}\n  private static void ReadOther(out int x) => x = 0;\n}\n`);
+  put('check.cjs', [
+    'if (process.env.FAIL_GREEN && require("./app.cjs") === 2) { console.log("  Failed AppTests.ReadsStaff [1 ms]\\nAssert.Equal() Failure"); process.exit(1); }',
+    'if (require("./app.cjs") === 3) { console.log("  Failed AppTests.ReadsStaff [1 ms]\\nAssert.Equal() Failure"); process.exit(1); }',
+    'if (!require("node:fs").readFileSync("Lookup.cs", "utf8").includes("includeStaff")) {',
+    '  console.log(process.env.BUILD_ERROR + "\\nBuild FAILED."); process.exit(1);',
+    '}',
+  ].join('\n'));
+  const breaks = path.join(repo, '.git', 'breaks.json');
+  const breakList = [{ name: 'reads staff', file: 'app.cjs', find: 'exports = 2', put: 'exports = 3', mustFail: ['ReadsStaff'] }];
+  fs.writeFileSync(breaks, JSON.stringify(breakList));
+  const args = ['--repo', repo, '--base', 'HEAD', '--old', 'HEAD', '--files', 'app.cjs,Lookup.cs', '--breaks', breaks, '--then-green', '--parallel', '1', '--', process.execPath, 'check.cjs'];
+  const at = (word, line = 3) => `C:\\work\\App.Tests.cs(${line},${testLine.indexOf(word) + 1})`;
+  const missing = `${at('includeStaff')}: error CS1739: The best overload for 'Read' does not have a parameter named 'includeStaff' [App.Tests.csproj]`;
+  const infer = (word, line) => `${at(word, line)}: error CS8197: Cannot infer the type of implicitly-typed out variable '${word}' [App.Tests.csproj]`;
+  const proved = run(args, { BUILD_ERROR: missing + '\n' + missing + '\nPassed! - Failed: 0, Passed: 1, Total: 1' });
+  assert.equal(proved.status, 0, proved.stdout + proved.stderr);
+  assert.match(proved.stdout, /red by build: the old code has no includeStaff/);
+  assert.match(proved.stdout, /BREAK ✓ reads staff/);
+  assert.match(proved.stdout, /RED-PROOF: PROVED ✓/);
+  const followOn = run(args, { BUILD_ERROR: infer('status') + '\n' + missing });
+  assert.equal(followOn.status, 0, followOn.stdout + followOn.stderr);
+  assert.match(followOn.stdout, /red by build: the old code has no includeStaff/);
+  const plan = path.join(repo, '.git', 'proof-plan.json');
+  fs.writeFileSync(plan, JSON.stringify({
+    old: [{ file: 'Lookup.cs', content64: Buffer.from(oldLookup).toString('base64') }],
+    oldMissingNames: ['includeStaff'], testFiles: ['App.Tests.cs'], breaks: breakList, green: true,
+  }));
+  const worker = ['--repo', repo, '--local', '--plan', plan, '--parallel', '2', '--', process.execPath, 'check.cjs'];
+  const remote = run(worker, { BUILD_ERROR: missing });
+  assert.equal(remote.status, 0, remote.stdout + remote.stderr);
+  assert.match(remote.stdout, /red by build: the old code has no includeStaff/);
+  const failed = run(worker, { FAIL_GREEN: '1', BUILD_ERROR: missing });
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+  for (const error of [
+    missing + '\nLookup.cs(1,1): error CS1002: ; expected',
+    'Lookup.cs(1,1): error CS1002: ; expected\n  Failed OtherTests.Reads [1 ms]\nAssert.Equal() Failure',
+    missing.replace('App.Tests.cs', 'Lookup.cs'),
+    missing.replace("'includeStaff'", "'otherName'"),
+  ]) {
+    const setup = run(args, { BUILD_ERROR: error });
+    assert.equal(setup.status, 3, setup.stdout + setup.stderr);
+    assert.match(setup.stdout, /SETUP ✗/);
+    assert.doesNotMatch(setup.stdout, /red by build|PROVED ✓/);
+  }
+  for (const error of [
+    'CSC : fatal error CS0042: Unexpected error creating debug information',
+    'src/other.ts:1:5 - error TS2322: Type string is not assignable to type number.',
+    'C:\\work\\App.Tests.cs(3,10): error CS1002: ; expected [App.Tests.csproj]',
+    infer('other'),
+    infer('status', 4),
+  ]) {
+    const mixed = run(args, { BUILD_ERROR: missing + '\n' + error });
+    assert.equal(mixed.status, 3, mixed.stdout + mixed.stderr);
+    assert.match(mixed.stdout, /SETUP ✗/);
+    assert.doesNotMatch(mixed.stdout, /red by build|PROVED ✓/);
+  }
+});
+
+function oldBuildFixture() {
+  const { repo, git } = fixture();
+  const put = (file, text) => fs.writeFileSync(path.join(repo, file), text);
+  const oldLookup = 'class Lookup { public int Read() => 0; }\n';
+  put('Lookup.cs', oldLookup);
+  git('add', 'Lookup.cs');
+  git('commit', '-qm', 'old lookup');
+  put('Lookup.cs', 'class Lookup { public int Read(bool includeStaff = false) => includeStaff ? 1 : 0; }\n');
+  put('App.Tests.cs', 'class AppTests {\n  [Fact]\n  public void ReadsStaff() { new Lookup().Read(includeStaff: true); }\n}\n');
+  put('Member.Tests.cs', 'class MemberTests {\n  [Fact]\n  public void ReadsMember() { Assert.Equal(2, App.Value()); }\n}\n');
+  put('check.cjs', [
+    'if (!require("node:fs").readFileSync("Lookup.cs", "utf8").includes("includeStaff")) {',
+    '  console.log(process.env.BUILD_ERROR + "\\nBuild FAILED."); process.exit(1);',
+    '}',
+    'if (require("./app.cjs") === 3) { console.log("  Failed MemberTests.ReadsMember [1 ms]\\nAssert.Equal() Failure"); process.exit(1); }',
+    'console.log(process.env.GREEN_OUTPUT || "Passed!  - Failed: 0, Passed: 2, Skipped: 0, Total: 2");',
+  ].join('\n'));
+  const missing = "App.Tests.cs(3,47): error CS1739: The best overload for 'Read' does not have a parameter named 'includeStaff' [App.Tests.csproj]";
+  const args = (extra = []) => ['--repo', repo, '--base', 'HEAD', '--old', 'HEAD', '--files', 'Lookup.cs', '--then-green', '--parallel', '1', ...extra, '--', process.execPath, 'check.cjs'];
+  const worker = (breaks) => {
+    const plan = path.join(repo, '.git', 'proof-plan.json');
+    const buildTests = [{ file: 'App.Tests.cs', line: 3, titles: ['ReadsStaff'] },
+      { file: 'Member.Tests.cs', line: 3, titles: ['ReadsMember'] }];
+    fs.writeFileSync(plan, JSON.stringify({
+      old: [{ file: 'Lookup.cs', content64: Buffer.from(oldLookup).toString('base64') }],
+      oldMissingNames: ['includeStaff'], testFiles: buildTests.map(t => t.file), buildTests, breaks, green: true,
+    }));
+    return ['--repo', repo, '--local', '--plan', plan, '--parallel', '1', '--', process.execPath, 'check.cjs'];
+  };
+  return { repo, missing, args, worker };
+}
+
+// 2026-11-20: a build failure gave an unproven test a passing proof.
+test('red by build needs a caught break naming each new test', () => {
+  const { repo, missing, args, worker } = oldBuildFixture();
+  for (const green of ['Passed!  - Failed: 0, Passed: 2, Skipped: 0, Total: 2',
+    'Passed!  - Failed: 0, Passed: 0, Skipped: 2, Total: 2']) {
+    const r = run(args(), { BUILD_ERROR: missing, GREEN_OUTPUT: green });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /TEST NOT PROVEN ✗ ReadsStaff/);
+    assert.match(r.stdout, /RED-PROOF: NOT PROVED ✗/);
+    assert.doesNotMatch(r.stdout, /PROVED ✓/);
+  }
+  const breaks = path.join(repo, '.git', 'breaks.json');
+  const breakList = [
+    { name: 'reads member', file: 'app.cjs', find: 'exports = 2', put: 'exports = 3', mustFail: ['ReadsMember'] },
+  ];
+  fs.writeFileSync(breaks, JSON.stringify(breakList));
+  for (const command of [args(['--breaks', breaks]), worker(breakList)]) {
+    const other = run(command, { BUILD_ERROR: missing });
+    assert.equal(other.status, 1, other.stdout + other.stderr);
+    assert.match(other.stdout, /TEST ✓ ReadsMember: break reads member/);
+    assert.match(other.stdout, /TEST NOT PROVEN ✗ ReadsStaff/);
+    assert.match(other.stdout, /RED-PROOF: NOT PROVED ✗/);
+  }
+});
+
+// 2026-11-20: another project's missing name hid a named assertion failure.
+test('a named assertion still proves old-code red alongside expected build errors', () => {
+  const { missing, args } = oldBuildFixture();
+  const named = '  Failed MemberTests.ReadsMember [1 ms]';
+  const failure = 'Assert.Equal() Failure: Values differ';
+  for (const lines of [[missing, named, failure], [named, missing, failure]]) {
+    const r = run(args(), { BUILD_ERROR: lines.join('\n') });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /RED-PROOF: RED ✓ — the tests fail on HEAD/);
+    assert.match(r.stdout, /TEST ✓ ReadsMember: old code RED/);
+    assert.doesNotMatch(r.stdout, /SETUP ✗|red by build/);
+  }
+  const other = run(args(), { BUILD_ERROR: [missing, named, failure, 'Lookup.cs(1,1): Error CS1002: ; expected'].join('\n') });
+  assert.equal(other.status, 3, other.stdout + other.stderr);
+  assert.match(other.stdout, /SETUP ✗/);
+});
+
+// 2026-11-20: a shared break file holds both the page and server plans.
+test('--cwd runs only the breaks inside this proof folder', () => {
+  const { repo } = fixture();
+  const page = path.join(repo, 'page');
+  fs.mkdirSync(page);
+  fs.mkdirSync(path.join(repo, 'page-server'));
+  const put = (file, content) => fs.writeFileSync(path.join(repo, file), content);
+  put('page/rule.cjs', 'module.exports = true;\n');
+  put('page-server/rule.cjs', 'module.exports = true;\n');
+  put('page/check.cjs', [
+    'if (!require("../page-server/rule.cjs")) throw new Error("a server break was applied");',
+    'if (!require("./rule.cjs")) { console.log(" FAIL  page/a.test.cjs > page rule\\nAssertionError: expected true"); process.exitCode = 1; }',
+  ].join('\n'));
+  const own = { name: 'page behavior', file: 'page\\rule.cjs', find: 'true', put: 'false', mustFail: ['page rule'] };
+  const other = { name: 'server behavior', file: 'page-server/rule.cjs', find: 'true', put: 'false', mustFail: ['server rule'] };
+  const breaks = path.join(repo, '.git', 'breaks.json');
+  fs.writeFileSync(breaks, JSON.stringify([own, other]));
+  const args = ['--repo', repo, '--base', 'HEAD', '--cwd', page, '--breaks', breaks, '--then-green', '--parallel', '1', '--', process.execPath, 'check.cjs'];
+  const mixed = run(args);
+  assert.equal(mixed.status, 0, mixed.stdout + mixed.stderr);
+  assert.match(mixed.stdout, /server behavior.*page-server\/rule\.cjs.*another proof/);
+  assert.match(mixed.stdout, /PROVED ✓ — 1 break\(s\) caught/);
+  assert.doesNotMatch(mixed.stdout, /BREAK [✓✗].*server behavior/);
+  fs.writeFileSync(breaks, JSON.stringify([{ ...other, find: 'not in that file' }]));
+  const outside = run(args);
+  assert.equal(outside.status, 0, outside.stdout + outside.stderr);
+  assert.match(outside.stdout, /server behavior.*another proof/);
+  assert.match(outside.stdout, /GREEN ✓/);
+  assert.doesNotMatch(outside.stdout, /break\(s\) caught/);
 });
 
 // 2026-11-10: the first proof of a task found its copies cold; each run built the whole solution.

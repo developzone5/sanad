@@ -25,6 +25,14 @@
  *    code is unverified, failed or pending, also on a second stop, while a helper or a background check runs, and
  *    after a declared probe (5 in a row at most; see claimBlock). A text that claims nothing keeps the old exits.
  *
+ *  - one block per unverified change (2026-11-19): the gate remembers the change it blocked. A later stop with
+ *    the same unverified change only warns (the claim lock still holds a pass claim or a push command). A new
+ *    edit or a new failure blocks once again. No memory (it cannot be read or written): block as before.
+ *  - a block reason of this file ends with its rule id in round brackets: (SG-UNVERIFIED), (SG-FAILED),
+ *    (SG-PENDING), (SG-CLAIM). The guard report counts blocks by these ids. The open-notes list ends with its id
+ *    (SG-NOTES); review-notes.test.mjs pins the end of that text. It is known by its first words, and when it
+ *    joins another block it comes after that block's id.
+ *
  * Deterministic, no LLM. Fail-OPEN: any error → allow silently.
  *
  * Author: Eng. Mohammed Almutairi - Developzone.net
@@ -158,7 +166,7 @@ function claimBlock(why) {
       decision: 'block',
       reason: 'The final text claims a pass (REVIEW/GATE: PASS) or hands over a push command, but ' + why + '. ' +
         'Do not claim a pass or hand over a push command yet: get the build/test to pass on the final code first, then say it. ' +
-        'To report where things stand without a claim, send a text with no verdict line and no push command.',
+        'To report where things stand without a claim, send a text with no verdict line and no push command. (SG-CLAIM)',
     });
   } catch (e) { /* the lock is an extra; the stop goes on */ }
 }
@@ -338,7 +346,8 @@ if (!failedAfterEdit && pendingAfterEdit && !stuckAfterEdit) {
   out({ systemMessage: 'A build/test for this work is still running in the background: `' + shown(r.lastPendingVerifyStopCommand) + '`. Not verified yet; this check runs again when it finishes.' });
 }
 
-if (input.stop_hook_active) {
+// The exit of a stop that is not blocked again: the claim lock first, then the warning.
+function warnUnverified() {
   claimBlock(failedAfterEdit ? 'the last build/test after your code edit failed' : pendingAfterEdit ? 'a verification command\'s result was never collected' : 'code changed after the last passing build/test');
   out({
     systemMessage: failedAfterEdit
@@ -347,6 +356,60 @@ if (input.stop_hook_active) {
       : '⛔ Gate NOT verified: code changed after the last passing build/test. Run /gate before shipping.',
   });
 }
+if (input.stop_hook_active) warnUnverified();
+
+// One block per unverified change (2026-11-19). The block below came back on every new stop while the same
+// change stayed unverified: 21 identical blocks hit question turns in one day. The gate now remembers the
+// change it blocked: the session, the transcript, the last edit's number and file, the state (failed, pending
+// or none) and that check's number and command. The memory is kept in the count file of the notes lock, under
+// a third suffix ('#once'). The same change again takes the exit above: the claim lock still holds a pass claim
+// or a push command, any other text passes with the warning. A new edit, a new failed run or a new lost check
+// is another change and blocks once again.
+// The memory can never open the gate by mistake: a file that cannot be read or written, a broken entry, or a
+// transcript with no state folder (a test transcript) gives no memory, and the gate blocks as before.
+const ONCE_SUFFIX = '#once', ONCE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+function onceKey() { return String(input.session_id || transcriptPath).toLowerCase() + ONCE_SUFFIX; }
+// The unverified change as one text; any difference is another change. '' when it has no number to name it.
+function unverifiedChange() {
+  const state = failedAfterEdit ? 'failed' : pendingAfterEdit ? 'pending' : 'none';
+  const check = failedAfterEdit ? [r.lastFailedVerifyStop ?? r.lastFailedVerify, r.lastFailedVerifyStopCommand]
+    : pendingAfterEdit ? [r.lastStuckVerifyStop, r.lastStuckVerifyStopCommand] : [-1, ''];
+  if (!Number.isFinite(lastEdit) || !Number.isFinite(check[0])) return '';   // a number may hold a fraction (10.001)
+  return JSON.stringify([path.resolve(transcriptPath).toLowerCase(), lastEdit, String(owed || ''), state, check[0], String(check[1] || '')]);
+}
+// True only when this session was already blocked for exactly this change.
+function blockedBefore(change) {
+  try {
+    if (!change || typeof scan.claimsReview !== 'function' || !scan.stateAllowed(transcriptPath)) return false;
+    const kept = JSON.parse(fs.readFileSync(path.join(scan.stateFolder(), NOTES_BLOCKS_FILE), 'utf8'))[onceKey()];
+    return !!kept && typeof kept === 'object' && kept.change === change;
+  } catch (e) { return false; }
+}
+// Keeps the change this stop is blocked for. Any error keeps nothing, so the next stop blocks again.
+function rememberBlock(change) {
+  try {
+    if (!change || !scan.stateAllowed(transcriptPath)) return;
+    const stateFile = path.join(scan.stateFolder(), NOTES_BLOCKS_FILE), now = Date.now();
+    let all = {};
+    try { all = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch (e) { all = {}; }
+    if (!all || typeof all !== 'object' || Array.isArray(all)) all = {};
+    // The memory of a session that ended long ago is dropped, so the file stays small.
+    for (const k of Object.keys(all)) if (k.endsWith(ONCE_SUFFIX) && !(all[k] && now - all[k].at < ONCE_KEEP_MS)) delete all[k];
+    all[onceKey()] = { change, at: now };
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    fs.writeFileSync(stateFile, JSON.stringify(all));
+  } catch (e) { /* no memory: the next stop blocks again */ }
+}
+const change = unverifiedChange();
+// A stop that claims a pass or hands over a push command never uses the memory: it takes the main block every time.
+function claimsNow() {
+  try {
+    const text = typeof input.last_assistant_message === 'string' ? input.last_assistant_message : null;
+    return text !== null ? scan.claimsReview(text) : r.turnClaim === true;
+  } catch (e) { return true; }
+}
+if (!claimsNow() && blockedBefore(change)) warnUnverified();
+rememberBlock(change);
 
 out({
   decision: 'block',
@@ -356,9 +419,10 @@ out({
       'If it genuinely cannot pass here, say exactly what is failing and why instead of claiming success. ' +
       'The failed check: `' + shown(r.lastFailedVerifyStopCommand) + '`. ' +
       'If every failure is a timeout under machine load (not the code), rerun only the failed tests; to clear this run, send this line alone in a text-only message, with your rerun command filled in, then run that command exactly, which must pass: ' +
-      'CHECK RETIRED: ' + JSON.stringify({ failed: r.lastFailedVerifyStopCommand || '<the failed command>', replacement: '<the rerun command>', reason: '<why>' })
-    : pendingAfterEdit ? 'A build/test finished or was launched but its result was never collected' + file + ': `' + shown(r.lastStuckVerifyStopCommand) + '`. Read its TaskOutput, or rerun it in the foreground, fix any failure, then run /gate. Starting a background command is not a passing result.'
+      // The rule id goes on its own last line here: the CHECK RETIRED line must stay alone on its line.
+      'CHECK RETIRED: ' + JSON.stringify({ failed: r.lastFailedVerifyStopCommand || '<the failed command>', replacement: '<the rerun command>', reason: '<why>' }) + '\n(SG-FAILED)'
+    : pendingAfterEdit ? 'A build/test finished or was launched but its result was never collected' + file + ': `' + shown(r.lastStuckVerifyStopCommand) + '`. Read its TaskOutput, or rerun it in the foreground, fix any failure, then run /gate. Starting a background command is not a passing result. (SG-PENDING)'
     : 'Code files were edited this session' + file + ' but no build/test has run since the last edit. ' +
       'Apply the Definition-of-Done at the cheapest correct rung (CLAUDE.md "Verify fast"): run the build and the relevant tests now, quote their real output, then stop again. ' +
-      'If verification is genuinely impossible here (no toolchain, needs the user), say exactly what is unverified and why instead of claiming success.',
+      'If verification is genuinely impossible here (no toolchain, needs the user), say exactly what is unverified and why instead of claiming success. (SG-UNVERIFIED)',
 });

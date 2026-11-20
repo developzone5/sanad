@@ -18,8 +18,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { readRecord, writeEntry, testFileHashes } from '../scripts/proof-record.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { canonicalTop, codeFingerprint, readRecord, recordKey, writeBreakResult, writeEntry, writeRunFacts, testFileHashes } from '../scripts/proof-record.mjs';
 import { gitBash } from '../scripts/git-bash.mjs';
 
 const scripts = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts');
@@ -62,6 +62,22 @@ function repoWith(base, work = {}) {
   return { repo, git, write, ran, proof, check, entries };
 }
 const lines = (...l) => l.join('\n') + '\n';
+// The record file of a repository, found by the folder it names.
+function recordFileOf(repo) {
+  const folder = path.join(state, 'proof'), want = canonicalTop(repo);
+  return fs.readdirSync(folder).filter(x => x.endsWith('.json')).map(x => path.join(folder, x))
+    .find(p => { try { return canonicalTop(JSON.parse(fs.readFileSync(p, 'utf8')).top) === want; } catch { return false; } });
+}
+// The test check with only the proof's ENTRY in the record (2026-11-19). The record now also keeps one result per
+// break; a break caught by an earlier run on this exact tree, with a passing run on it, stays proof when a later
+// run stops (proof-record-breaks.test.mjs, red-proof-resume.test.mjs). What a stopped proof's entry proves is still
+// the rule of 2026-11-17: nothing. So the results kept beside the entries are set aside for this check, then put back.
+function checkByEntryAlone(f) {
+  const file = recordFileOf(f.repo), kept = fs.readFileSync(file, 'utf8');
+  const { perBreak, runs, ...entriesOnly } = JSON.parse(kept);
+  fs.writeFileSync(file, JSON.stringify(entriesOnly, null, 2));
+  try { return f.check(); } finally { fs.writeFileSync(file, kept); }
+}
 
 // ---- Finding 1: the audit's fixture. The product writes an unauthorized row whatever it is asked. ----
 const CALC = lines('module.exports = {', '  value: () => 2,', "  write: (rows) => { rows.push('unauthorized write'); },", '};');
@@ -310,7 +326,7 @@ test('finding 2: a prose edit, a commit of the same files and a reworded commit 
 test('finding 2: a later run of the same proof on the same code that ends NOT PROVED takes the earlier success back; a run that ends PROVED gives it again', () => {
   const f = rowsRepo();
   proved(f);
-  const missed = f.proof([ALLOW], full, { PROOF_MISS: '1' });
+  const missed = f.proof([ALLOW], [...full, '--fresh'], { PROOF_MISS: '1' });
   assert.equal(missed.status, 1, missed.stdout + missed.stderr);
   assert.match(missed.stdout, /BREAK ✗ allow unauthorized rows/);
   let [entry] = f.entries();
@@ -327,21 +343,23 @@ test('finding 2: a later run of the same proof on the same code that ends NOT PR
 test('finding 2: a proof that stops on the machine, or is killed mid-run, leaves no earlier success either', () => {
   const f = rowsRepo();
   proved(f);
-  const down = f.proof([ALLOW], full, { PROOF_ENV_DOWN: '1' });
+  const down = f.proof([ALLOW], [...full, '--fresh'], { PROOF_ENV_DOWN: '1' });
   assert.equal(down.status, 6, down.stdout + down.stderr);
   let [entry] = f.entries();
   assert.equal(entry.ok, false);
   assert.match(entry.reason, /RED-PROOF: ENVIRONMENT ✗/);
-  assert.equal(f.check().status, 1);
+  // 2026-11-19, changed on purpose: the entry of the stopped proof gives no success, as before. The test check as a
+  // whole may still pass now, on the earlier run's own break results of this exact tree (see checkByEntryAlone).
+  assert.equal(checkByEntryAlone(f).status, 1);
   proved(f);
   // Killed while a break runs in its own copy: no line of its own is said, and no exit handler runs.
-  const killed = f.proof([ALLOW], ['--base', 'main', '--then-green', '--parallel', '2'], { PROOF_KILL: '1' });
+  const killed = f.proof([ALLOW], ['--base', 'main', '--then-green', '--parallel', '2', '--fresh'], { PROOF_KILL: '1' });
   assert.notEqual(killed.status, 0, killed.stdout + killed.stderr);
   assert.doesNotMatch(killed.stdout, /PROVED|BREAK [✓✗]/, 'it never reached a result');
   [entry] = f.entries();
   assert.equal(entry.ok, false);
   assert.match(entry.reason, /the proof started and did not end/);
-  assert.equal(f.check().status, 1);
+  assert.equal(checkByEntryAlone(f).status, 1);
   assert.equal(f.git('status', '--porcelain', '--', 'product.cjs'), 'M product.cjs', 'the working folder was never touched: only the fix differs from main');
 });
 
@@ -946,4 +964,62 @@ test('round g problems 1, 2: a .md under a source folder or SKILL/CLAUDE/AGENTS/
   const keep = codeFingerprint(top);
   f.write({ 'docs/guide.md': 'more\n', 'README.md': 'r\n' });
   assert.equal(codeFingerprint(top), keep, 'docs and README keep the id');
+});
+
+// ---- 2026-11-19: one result per break (proof-record-breaks.test.mjs holds the record's own cases) ----
+
+test("2026-11-19: the test check counts a break's own result only on today's tree with a passing run on it, and not after an edit of other code", () => {
+  const f = repoWith({ 'calc.cjs': CALC, 'check.cjs': CHECK_RULES, 'dep.cjs': 'module.exports = 1;\n' }, { 'src/rules.test.cjs': rulesTest(C1_QUIET) });
+  const first = f.check();
+  assert.equal(first.status, 1, first.stdout + first.stderr);
+  assert.match(first.stdout, /UNPROVEN: src\/rules\.test\.cjs:5 /);
+  assert.doesNotMatch(first.stdout, /break\(s\) hold a caught result/, 'no break note while the record holds no break result');
+
+  const tree = codeFingerprint(f.repo), key = recordKey([process.execPath, 'check.cjs'], '');
+  writeBreakResult(f.repo, key, VALUE_WRONG, { state: 'caught', tree, run: 'run-1', caught: [{ file: 'src/rules.test.cjs', line: 2, title: '[C1] returns the correct value' }] });
+  const noRun = f.check();
+  assert.equal(noRun.status, 1, noRun.stdout + noRun.stderr);
+  assert.match(noRun.stdout, /UNPROVEN: src\/rules\.test\.cjs:5 /, 'caught, but no passing run is known for this tree');
+  assert.match(noRun.stdout, /1 break\(s\) hold a caught result on today's code, 0 still must run/);
+  assert.match(noRun.stdout, /the passing run did not pass on today's code/);
+
+  writeRunFacts(f.repo, key, { tree, run: 'run-1', green: true });
+  const proven = f.check();
+  assert.equal(proven.status, 0, proven.stdout + proven.stderr);
+  assert.doesNotMatch(proven.stdout, /UNPROVEN/);
+
+  f.write({ 'dep.cjs': 'module.exports = 2;\n' });
+  const stale = f.check();
+  assert.equal(stale.status, 1, stale.stdout + stale.stderr);
+  assert.match(stale.stdout, /UNPROVEN: src\/rules\.test\.cjs:5 /, 'an edit of code the break does not name voids the result');
+  assert.match(stale.stdout, /0 break\(s\) hold a caught result on today's code, 1 still must run/);
+});
+
+test('2026-11-19: a writer that cannot take the lock writes nothing and says "record busy" (before: after 200 tries it wrote with no lock)', () => {
+  const f = repoWith({ 'calc.cjs': CALC });
+  writeEntry(f.repo, 'mine', { ok: false, reason: 'first' });
+  const file = recordFileOf(f.repo), lock = file + '.lock';
+  // A live writer holds the lock for longer than the second writer waits: this process.
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'pid'), String(process.pid));
+  const before = fs.readFileSync(file, 'utf8');
+  const code = [
+    `import { writeEntry } from ${JSON.stringify(pathToFileURL(path.join(scripts, 'proof-record.mjs')).href)};`,
+    "try { writeEntry(process.argv[1], 'mine', { ok: true, reason: 'second' }); console.log('WROTE'); }",
+    "catch (e) { console.log([e.name, e.code, e.message].join(' / ')); process.exit(3); }"].join('\n');
+  const second = () => spawnSync(process.execPath, ['--input-type=module', '-e', code, f.repo], { encoding: 'utf8', windowsHide: true, timeout: 60000, env: env() });
+  const started = Date.now();
+  const r = second();
+  try {
+    assert.equal(r.status, 3, r.stdout + r.stderr);
+    assert.match(r.stdout, /^RecordBusy \/ RECORD_BUSY \/ record busy: /);
+    assert.doesNotMatch(r.stdout, /WROTE/);
+    assert.ok(Date.now() - started >= 4000, 'it waited for the lock first');
+    assert.equal(fs.readFileSync(file, 'utf8'), before, 'the record is as it was, to the letter');
+    assert.ok(fs.existsSync(lock), 'the live writer still holds its lock');
+  } finally { fs.rmSync(lock, { recursive: true, force: true }); }
+  // The lock is free: the same write goes through.
+  const again = second();
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.equal(readRecord(f.repo).entries.mine.reason, 'second');
 });

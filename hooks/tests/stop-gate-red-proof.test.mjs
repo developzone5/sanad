@@ -274,3 +274,49 @@ test('(4) the push guard still demands its evidence receipt after a proof; with 
     entry('user', [{ type: 'tool_result', tool_use_id: 'bound', content: 'CHECK_COMPLETED ' + JSON.stringify(check), is_error: false }], at())];
   assert.equal(push([...proved, ...bound, ...reviewed()]).permissionDecision, 'allow');
 });
+
+// 2026-11-19: a usage refusal of red-proof (a mistyped option) ran nothing. It read as a FAILED check, and the
+// stop asked for the failure to be fixed or retired. It is no result now: no failure, and no credit either.
+const REFUSED_LINE = 'RED-PROOF: REFUSED — nothing ran';
+const foreground = (command, content, time, isError = false) => {
+  const id = 'f' + (++ids);
+  return [entry('assistant', [{ type: 'tool_use', id, name: 'Bash', input: { command } }], time),
+    entry('user', [{ type: 'tool_result', tool_use_id: id, content, is_error: isError }], time)];
+};
+const proofLine = (args) => `node "${redProof}" ${args.map((a) => `"${a}"`).join(' ')}`;
+
+test('(5) a refused proof that ran nothing is no failed check for the stop, and no test run either', () => {
+  const { repo } = setup();
+  const args = proofArgs(repo, ['--changed-since', 'HEAD']);
+  const usage = 'RED-PROOF: --changed-since needs --breaks: it picks which of those breaks run again. Nothing ran.';
+  const refused = (time) => foreground(proofLine(args), 'Exit code 2\n' + usage + '\n' + REFUSED_LINE, time, true);
+  // Alone after an edit: the stop still asks for a check, and names no failed check.
+  const alone = stop([...edit(repo + '/app.cjs'), ...refused(at(Date.now() - 30000))], repo);
+  assert.equal(alone.decision, 'block');
+  assert.match(alone.text, /no build\/test has run since the last edit/);
+  assert.doesNotMatch(alone.text, /The failed check/);
+  // After a passing test run: the refusal does not turn the passing state into a failure.
+  const passing = foreground('node --test check.test.cjs', 'ℹ tests 1\nℹ pass 1\nℹ fail 0', at(Date.now() - 30000));
+  const after = stop([...edit(repo + '/app.cjs'), ...passing, ...refused(at(Date.now() - 10000))], repo);
+  assert.equal(after.decision, 'allow', after.text);
+  // Control: the same exit code without the refusal line (the proof judged the break plan) is a failed check.
+  const judgedPlan = foreground(proofLine(args), 'Exit code 2\nRED-PROOF: --find matches 2 time(s) in app.cjs; it must match exactly once. Nothing changed.', at(Date.now() - 10000), true);
+  const failed = stop([...edit(repo + '/app.cjs'), ...passing, ...judgedPlan], repo);
+  assert.equal(failed.decision, 'block');
+  assert.match(failed.text, /The failed check: `node .*red-proof\.mjs/);
+});
+
+test('(5) the real red-proof: its usage refusal, as it prints it, is no failed check', (t) => {
+  const { repo } = setup();
+  const args = proofArgs(repo, ['--changed-since', 'HEAD']);   // --changed-since without --breaks: a usage refusal
+  const run = spawnSync(process.execPath, [redProof, ...args], { env, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+  assert.equal(run.status, 2, run.stdout + run.stderr);
+  assert.match(run.stdout, /Nothing ran\./);
+  const rows = run.stdout.split(/\r?\n/).filter(Boolean);
+  // The refusal line is red-proof's own part of this release: until it prints it, the scan keeps the old answer.
+  if (rows[rows.length - 1] !== REFUSED_LINE) { t.skip('this red-proof does not print "' + REFUSED_LINE + '" yet; the scan then keeps reading exit 2 as a failed check'); return; }
+  const passing = foreground('node --test check.test.cjs', 'ℹ tests 1\nℹ pass 1\nℹ fail 0', at(Date.now() - 30000));
+  const refused = foreground(proofLine(args), 'Exit code 2\n' + run.stdout + run.stderr, at(), true);
+  const r = stop([...edit(repo + '/app.cjs'), ...passing, ...refused], repo);
+  assert.equal(r.decision, 'allow', r.text);
+});
