@@ -49,7 +49,46 @@ function refused(r, reason) {
 
 const INSTRUCTIONS = "Before any fix. Each K line below is one note from a code review. Try to DISPROVE each note from the code: open the file and line the note names, and what calls it, and look for what makes the claim false (a guard, a caller that never sends that input, a test that already covers it). Answer with the BRIEF line given below first, then one line per note, and nothing else: 'CONFIRMED K<n> — <file:line and the input that shows it>', 'REFUTED K<n> — <file:line that makes the claim false>' or 'UNSURE K<n> — <what could not be checked>'. A note you cannot disprove with a file and line is CONFIRMED or UNSURE, never REFUTED. Read-only, about 3 minutes; do not edit.";
 const K_RULE = 'K numbers belong to this brief, not to NOTE numbers: close each note under its own NOTE <n>, found by its text.';
-const REFUTED_RULE = 'Refuted notes are not fixed now: ask the user about them together, with this evidence and a recommended answer; their words close each one (rule 5).';
+// 2026-11-19: the K text no longer says "ask the user about them together": the user is asked when the answer arrives.
+const REFUTED_RULE = 'Refuted notes are not fixed now: ask the user now, with this evidence and a recommended answer; their words close each one (rule 5).';
+
+// 2026-11-19 (groups): notes that name the same file and line are one group in the brief. Every text stays a K line
+// of its own, and the checker may give two notes of a group different verdicts.
+test('a K brief of two groups lists both texts of each group, and the checker\'s split gives two verdicts', () => {
+  const notes = fs.mkdtempSync(path.join(root, 'groups-'));
+  const a = path.join(notes, 'review-a.md'), b = path.join(notes, 'review-b.md');
+  fs.writeFileSync(a, 'RECOMMEND: FAIL\n\nBug — src/save.ts:12 saveRole() sends the request when the role list is empty\nBug — src/queue.ts:40 two workers can take the same row\n');
+  fs.writeFileSync(b, 'RECOMMEND: FAIL\n\nBug — src/save.ts:12 the role list is read before it is loaded\nGap — src/queue.ts:40 no test takes one row from two workers\nGap — no test covers a user with two roles\n');
+  const r = run(['--brief', '--notes', notes, '--reports', a + ',' + b]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const brief = path.join(notes, 'note-check-brief.md');
+  const text = fs.readFileSync(brief, 'utf8').split(/\r?\n/);
+  assert.deepEqual(text.filter((l) => /^G\d/.test(l)), ['G1 · src/save.ts:12 · K1, K3', 'G2 · src/queue.ts:40 · K2, K4']);
+  assert.ok(text.indexOf('## Groups') > 0 && text.indexOf('## Groups') < text.indexOf('## Notes'), 'the groups stand above the notes');
+  assert.ok(text.some((l) => l.includes('You may split a group')), 'the checker is told it may split a group');
+  // Both texts of each group are K lines of their own; the note with no place is in no group.
+  assert.deepEqual(kLines(brief).map((l) => l.replace(/ · from review-[ab]\.md/, '')), [
+    'K1 · Bug · Bug — src/save.ts:12 saveRole() sends the request when the role list is empty',
+    'K2 · Bug · Bug — src/queue.ts:40 two workers can take the same row',
+    'K3 · Bug · Bug — src/save.ts:12 the role list is read before it is loaded',
+    'K4 · Gap · Gap — src/queue.ts:40 no test takes one row from two workers',
+    'K5 · Gap · Gap — no test covers a user with two roles',
+  ]);
+  const answer = path.join(notes, 'note-check-report.md');
+  fs.writeFileSync(answer, `BRIEF ${idOf(brief)}\nCONFIRMED K1 — src/save.ts:12 sends with an empty list\nUNSURE K3 — the load order could not be read\nCONFIRMED K2 — src/queue.ts:40 has no lock\nCONFIRMED K4 — no such test in tests/queue.test.ts:1\nCONFIRMED K5 — no such test\n`);
+  const rec = run(['--record', answer, '--notes', notes]);
+  assert.equal(rec.status, 0, rec.stdout + rec.stderr);
+  assert.deepEqual(starting(rec.stdout, 'GROUP '), [
+    'GROUP G1 · src/save.ts:12 · K1 CONFIRMED, K3 UNSURE — split: the checker judged these texts differently; answer every number of the group by its own verdict',
+    'GROUP G2 · src/queue.ts:40 · K2 CONFIRMED, K4 CONFIRMED — one verdict; answer every number of the group by its own verdict',
+  ]);
+  // A brief with no two notes at one place has no Groups part.
+  const single = fs.mkdtempSync(path.join(root, 'nogroup-'));
+  const one = path.join(single, 'review.md');
+  fs.writeFileSync(one, 'RECOMMEND: FAIL\n\nBug — src/save.ts:12 saveRole() sends the request when the role list is empty\n');
+  assert.equal(run(['--brief', '--notes', single, '--reports', one]).status, 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(single, 'note-check-brief.md'), 'utf8'), /## Groups|^G\d/m);
+});
 
 // Two reviewer reports. The first has CRLF lines and a byte order mark; the second is UTF-16. Between them:
 // one note of each kind, a line that asks the user to decide (a Question to the hooks), the same Bug in both

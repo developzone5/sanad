@@ -4,14 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // 2026-11-15 (role-sync task), two proof time losses:
 // 1. One break kept a lock held, so its run waited the full 15 minutes while its peers had each finished in about
 //    4. A red run still going at twice the slowest finished red run (never under a fifth of the limit) is stuck now.
-// 2. The database on the test machine had stopped, and the proof found out only from its first run. A dotnet proof
-//    there now runs remote-preflight.sh --db first, when git config sanad.remoteDbContainer is set.
-const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'red-proof.mjs');
+const script = process.env.RED_PROOF_TEST_SCRIPT || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'red-proof.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'red-proof-stuck-db-'));
 const repos = [];
 test.after(() => {
@@ -90,14 +88,14 @@ test('without two finished red runs there is no stuck stop: only the time limit 
 });
 
 // A home folder with stand-in remote scripts: the preflight and the sync each note their call, then answer.
-function fakeHome(preflight) {
+function fakeHome(preflight, sync = 'echo "FAILED: stand-in sync, the test stops here"\nexit 1') {
   const home = fs.mkdtempSync(path.join(root, 'home-'));
   const dir = path.join(home, '.claude', 'scripts', 'remote');
   fs.mkdirSync(dir, { recursive: true });
   const calls = path.join(home, 'calls.txt');
   const note = (name) => `echo "${name} $*" >> '${calls.replace(/\\/g, '/')}'`;
   fs.writeFileSync(path.join(dir, 'remote-preflight.sh'), `#!/usr/bin/env bash\n${note('preflight')}\n${preflight}\n`);
-  fs.writeFileSync(path.join(dir, 'remote-sync.sh'), `#!/usr/bin/env bash\n${note('sync')}\necho "FAILED: stand-in sync, the test stops here"\nexit 1\n`);
+  fs.writeFileSync(path.join(dir, 'remote-sync.sh'), `#!/usr/bin/env bash\n${note('sync')}\n${sync}\n`);
   return { home, calls: () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split(/\r?\n/).map((l) => l.trim()) : []) };
 }
 function remoteFixture() {
@@ -115,28 +113,185 @@ function wslFirst() {
 }
 const atHome = (home) => ({ HOME: home, USERPROFILE: home, ...wslFirst() });
 
-test('a dotnet proof on the test machine checks the database first: a database that does not come up stops it before anything is sent', () => {
-  const { repo, breaks } = remoteFixture();
-  const h = fakeHome('echo "DB-DOWN eq-mysql is not healthy after 240 s"\nexit 7');
-  const r = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, ...dotnet], atHome(h.home));
-  assert.equal(r.status, 6, r.stdout + r.stderr);
-  assert.match(r.stdout, /RED-PROOF: ENVIRONMENT ✗ — the database on the test machine is not ready \(DB-DOWN eq-mysql is not healthy after 240 s\); nothing ran/);
-  assert.deepEqual(h.calls(), ['preflight --db'], 'no sync: nothing was sent');
+// 2026-11-20: skipped tests passed before Docker was ready. Run the real worker with a fake runner and fake SSH.
+const transport = path.join(root, 'fake-transport.mjs');
+fs.writeFileSync(transport, `
+import cp from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { syncBuiltinESMExports } from 'node:module';
+const spawn = cp.spawn, spawnSync = cp.spawnSync;
+const dbDown = 'DOCKER-DOWN the container engine did not start';
+const ready = 'READY pc-test docker 27.1 db eq-mysql healthy';
+const scenario = process.env.PROOF_SCENARIO;
+const events = process.env.PROOF_EVENTS;
+const note = line => fs.appendFileSync(events, line + '\\n');
+const isPreflight = (args) => args.some(a => a.includes('remote-preflight.sh'));
+let db, plan, log;
+const fake = () => Object.assign(new EventEmitter(), {
+  stdout: new PassThrough(), stderr: new PassThrough(), kill() {},
+  finish(status, text) { this.stdout.end(text + '\\n'); this.stderr.end(); this.emit('close', status); }
+});
+cp.spawnSync = (file, args, opts) => {
+  if (isPreflight(args)) return { status: 6, stdout: dbDown };
+  if (args.some(a => a.includes('remote-sync.sh'))) {
+    const id = ref => spawnSync('git', ['rev-parse', ref], { ...opts, encoding: 'utf8' }).stdout.trim();
+    return { status: 0, stdout: 'SYNCED pc-test ' + id('HEAD') + ' tree ' + id('HEAD^{tree}') };
+  }
+  if (file === 'scp' && args[args.length - 2].includes('/proof-')) return { status: 0 };
+  if (file === 'scp') {
+    const name = args.find(arg => /^plan-.*\\.json$/.test(arg));
+    plan = path.join(opts.cwd, name);
+    log = path.join(opts.cwd, name.replace(/^plan-/, 'proof-').replace(/\\.json$/, '.log'));
+  }
+  if (file === 'ssh' || file === 'scp') return { status: 0 };
+  return spawnSync(file, args, opts);
+};
+cp.spawn = (file, args, opts) => {
+  if (isPreflight(args)) { note('preflight started'); db = fake(); return db; }
+  if (file === 'dotnet') {
+    const test = fake();
+    setImmediate(() => {
+      if (args.includes('--list-tests')) { note('compile'); test.finish(0, 'The following Tests are available:'); return; }
+      const on = index => fs.readFileSync(path.join(opts.cwd, 'r' + index + '.cjs'), 'utf8').includes('true');
+      if (!on(1) || !on(2)) {
+        note(on(1) ? 'old' : 'break');
+        if (scenario === 'break-survives') { test.finish(0, 'Passed! - Passed: 1, Skipped: 0, Total: 1'); return; }
+        const reason = scenario === 'break-db-down' ? 'MySqlException: Unable to connect to any of the specified MySQL hosts' : 'AssertionError: expected true';
+        test.finish(1, ' FAIL  src/a.test.cjs > rules > rule one holds\\n' + reason);
+        return;
+      }
+      const readyNow = fs.readFileSync(events, 'utf8').includes('database ready');
+      note(readyNow ? 'green ready' : 'green pending');
+      if (scenario === 'code-failure' || (!readyNow && scenario === 'green-fails-first')) {
+        test.finish(1, ' FAIL  src/a.test.cjs > rules > rule one holds\\nAssertionError: expected true'); return;
+      }
+      if (scenario === 'unknown-count' || scenario === 'ready-first') { test.finish(0, 'Tests 1 passed'); return; }
+      if (scenario === 'only-skipped' || (scenario === 'skipped-then-ready' && !readyNow)) {
+        test.finish(0, 'Passed! - Failed: 0, Passed: 0, Skipped: 1, Total: 1'); return;
+      }
+      if (scenario === 'vitest-count') { test.finish(0, '      Tests  1 passed | 0 skipped (1)'); return; }
+      if (scenario === 'skipped-bang') {
+        test.finish(0, 'Passed! - Failed: 0, Passed: 1, Skipped: 0, Total: 1\\nSkipped! - Failed: 0, Passed: 0, Skipped: 2, Total: 2'); return;
+      }
+      if (scenario === 'mixed-counts') {
+        test.finish(0, 'Passed! - Passed: 1, Skipped: 0, Total: 1\\nPassed! - Passed: 0, Skipped: 1, Total: 1'); return;
+      }
+      test.finish(0, 'Passed! - Failed: 0, Passed: 1, Skipped: 0, Total: 1');
+    });
+    return test;
+  }
+  if (file !== 'ssh') return spawn(file, args, opts);
+  const dbReady = () => { note('database ready'); db?.finish(0, ready); };
+  if (scenario === 'ready-first') dbReady();
+  if (['only-skipped', 'unknown-count', 'mixed-counts', 'skipped-bang', 'break-db-down'].includes(scenario)) db?.finish(6, dbDown);
+  const session = spawn(process.execPath, [process.env.PROOF_SCRIPT, '--repo', process.env.PROOF_REPO, '--local',
+    '--plan', plan, '--parallel', process.env.PROOF_PARALLEL, '--log', log, '--', 'dotnet', 'test', 'A.Tests/A.Tests.csproj'], opts);
+  let stdout = '';
+  session.stdout.on('data', chunk => {
+    stdout += chunk;
+    if (!stdout.includes('RED-PROOF-DB-WAIT:')) return;
+    stdout = '';
+    setImmediate(dbReady);
+  });
+  return session;
+};
+syncBuiltinESMExports();
+`);
+function fakeProof(scenario, parallel = 2, green = true) {
+  const { repo, git, breaks } = remoteFixture();
+  fs.writeFileSync(breaks, JSON.stringify(JSON.parse(fs.readFileSync(breaks, 'utf8')).slice(0, 1)));
+  git('add', '.'); git('commit', '-qm', 'tests');
+  fs.writeFileSync(path.join(repo, 'r2.cjs'), 'module.exports = { on: false };\n');
+  git('add', 'r2.cjs'); git('commit', '-qm', 'buggy old code');
+  const old = git('rev-parse', 'HEAD');
+  git('revert', '--no-edit', old);
+  const log = path.join(root, scenario + '.log');
+  const events = path.join(root, path.basename(repo) + '.events');
+  fs.writeFileSync(events, '');
+  const result = run(['--repo', repo, '--base', 'HEAD', '--old', old, '--files', 'r2.cjs', '--breaks', breaks, ...(green ? ['--then-green'] : []), '--log', log, ...dotnet], {
+    NODE_OPTIONS: '--import=' + pathToFileURL(transport).href,
+    PROOF_SCENARIO: scenario, PROOF_SCRIPT: script, PROOF_REPO: repo, PROOF_EVENTS: events, PROOF_PARALLEL: String(parallel),
+  });
+  return { ...result, log: fs.readFileSync(log, 'utf8'), events: fs.readFileSync(events, 'utf8').trim().split('\n').filter(Boolean) };
+}
+
+test('green with zero skips proves while the database is still starting', () => {
+  for (const scenario of ['zero-skips', 'vitest-count']) {
+    const r = fakeProof(scenario);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(r.events.indexOf('compile') < r.events.indexOf('green pending'), r.events.join(', '));
+    assert.equal(r.events[0], 'preflight started');
+    assert.equal(r.events.includes('database ready'), false);
+    assert.deepEqual(r.events.filter(e => e === 'old' || e === 'break').sort(), ['break', 'old']);
+    assert.match(r.stdout, /RED-PROOF: PROVED ✓/);
+  }
 });
 
-test('a ready database lets the proof go on to the sync; a test machine that does not answer is REMOTE-DOWN', () => {
+test('skipped or unreadable test counts cannot prove anything while the database stays down', () => {
+  for (const scenario of ['only-skipped', 'unknown-count', 'mixed-counts', 'skipped-bang']) {
+    const r = fakeProof(scenario);
+    assert.equal(r.status, 6, r.stdout + r.stderr);
+    assert.match(r.stdout, /RED-PROOF: ENVIRONMENT ✗.*DOCKER-DOWN/);
+    assert.doesNotMatch(r.stdout, /RED-PROOF: PROVED|RED-PROOF-DB-/);
+    assert.match(r.log, /RED-PROOF: ENVIRONMENT ✗/);
+    assert.doesNotMatch(r.log, /RED-PROOF: PROVED/);
+    assert.ok(r.events.includes('green pending'));
+    assert.ok(!r.events.includes('old') && !r.events.includes('break'));
+  }
+});
+
+test('skipped or failed green reruns when the database becomes ready', () => {
+  for (const [scenario, parallel] of [['skipped-then-ready', 2], ['green-fails-first', 1]]) {
+    const r = fakeProof(scenario, parallel);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(r.events.filter(e => /^(green|database ready)/.test(e)), ['green pending', 'database ready', 'green ready']);
+    assert.ok(r.events.indexOf('green ready') < Math.min(r.events.indexOf('old'), r.events.indexOf('break')));
+    assert.match(r.stdout, /RED-PROOF: PROVED ✓/);
+  }
+});
+
+test('a code failure after the database becomes ready stays a code failure', () => {
+  const r = fakeProof('code-failure');
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.deepEqual(r.events.filter(e => /^(green|database ready|old|break)/.test(e)), ['green pending', 'database ready', 'green ready']);
+  assert.match(r.stdout, /RED-PROOF: NOT PROVED ✗ — the fixed tree fails/);
+  assert.doesNotMatch(r.stdout, /RED-PROOF: ENVIRONMENT/);
+});
+
+test('after trusted green, code survival and database failures keep their own verdicts', () => {
+  const survived = fakeProof('break-survives');
+  assert.equal(survived.status, 1, survived.stdout + survived.stderr);
+  assert.match(survived.stdout, /BREAK ✗ rule one off/);
+  const down = fakeProof('break-db-down');
+  assert.equal(down.status, 6, down.stdout + down.stderr);
+  assert.match(down.stdout, /RED-PROOF: ENVIRONMENT ✗/);
+  assert.doesNotMatch(down.stdout, /BREAK ✓|RED-PROOF: PROVED/);
+});
+
+test('a database ready before green keeps the existing judgment', () => {
+  const r = fakeProof('ready-first');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(r.events.filter(e => e.startsWith('green')), ['green ready']);
+  assert.match(r.stdout, /RED-PROOF: PROVED ✓/);
+});
+
+test('a proof without green waits before it starts the old and break runs', () => {
+  const r = fakeProof('no-green', 1, false);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(r.events, ['preflight started', 'compile', 'database ready', 'old', 'break']);
+});
+
+test('a test machine that does not answer is REMOTE-DOWN', () => {
   const { repo, breaks } = remoteFixture();
-  const ready = fakeHome('echo "READY pc-test docker 27.1 db eq-mysql healthy"');
-  const r = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, ...dotnet], atHome(ready.home));
-  assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.match(r.stdout, /RED-PROOF: database eq-mysql ready on pc-test/);
-  assert.match(r.stdout, /the test machine was not synced — FAILED: stand-in sync/);
-  assert.deepEqual(ready.calls(), ['preflight --db', 'sync']);
-  const down = fakeHome('echo "REMOTE-DOWN pc-test does not answer"\nexit 4');
+  const message = 'echo "REMOTE-DOWN pc-test does not answer"\nexit 4';
+  const down = fakeHome(message, message);
   const d = run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, ...dotnet], atHome(down.home));
   assert.equal(d.status, 4, d.stdout + d.stderr);
   assert.match(d.stdout, /RED-PROOF: REMOTE-DOWN/);
-  assert.deepEqual(down.calls(), ['preflight --db']);
+  assert.ok(down.calls().length > 0, 'the proof checks whether the machine answers');
 });
 
 test('no database check for a page proof, a warm-up, or a repository with no database container set', () => {

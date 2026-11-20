@@ -24,7 +24,7 @@ const slash = (p) => p.replace(/\\/g, '/');
 const real = (p) => fs.realpathSync.native(p).toLowerCase();
 const sLines = (file) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => /^S\d/.test(l));
 
-const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', or write the single line 'SAME JOB: none' after searching. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines and 'SAME JOB:' lines, or 'SIBLINGS: none' and 'SAME JOB: none'. About 4 minutes; do not edit.";
+const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', at most three, the nearest to this job first, or write the single line 'SAME JOB: none' after searching. Last, name the one design you judge best for this ticket: 'BEST DESIGN: J<n> — <one line why>' (n counts your SAME JOB lines, the first is J1), or 'BEST DESIGN: none — <why>'. The author may close that design with 'not:' only on the owner's own words. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines, 'SAME JOB:' lines and the 'BEST DESIGN:' line, or 'SIBLINGS: none' and 'SAME JOB: none'. About 4 minutes; do not edit.";
 
 // A repo where focusFirstError is used by the chip group form, and a notes folder with the three sources:
 // the ticket lines, the check lines and the places list (made by places.mjs).
@@ -92,7 +92,9 @@ test('--brief writes the brief from the ticket lines, the check lines and the pl
 });
 
 test('--brief refuses a notes folder that lacks one of its three sources, a file that is not a places list, and a missing --repo', () => {
-  const { repo, notes, places } = fixture();
+  const f = fixture();
+  const { repo, notes, places } = f;
+  f.git('config', 'sanad.lateCheckLines', 'false'); // the owner's switch off: the second look waits for the check lines
   fs.rmSync(path.join(notes, 'check.md'));
   let r = run(['--brief', '--notes', notes, '--repo', repo]);
   assert.equal(r.status, 2, r.stdout + r.stderr);
@@ -286,6 +288,7 @@ const JOBS = [
   '- SAME JOB: src/outbox/EmailOutbox.ts:12 · EmailOutbox — a table row in the same save, sent later by a worker with retries',
   '- SAME JOB: src/ms/MicrosoftIdentityChanges.ts:40 · MicrosoftIdentityChanges — queued identity changes, one worker drains them',
   '`SAME JOB: <file>:<line> · <what> — <how it does the job>`',
+  'BEST DESIGN: J1 — the outbox is the way this repo already sends a change later',
 ].join('\n');
 const jLines = (file) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => /^J\d/.test(l));
 
@@ -582,7 +585,8 @@ test('finding 7, must not change: a list without a Sources line (older) and a ch
   const f = briefed('SIBLINGS: none\nSAME JOB: none\n');
   assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
   assert.equal(run(['--check', f.list, '--places', f.places]).status, 0, 'no --lines: no comparison');
-  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^Sources: .*\n/m, ''));
+  // 2026-11-19: the list also stores one hash per line (Lines:, Checks:); an older list has none of the three.
+  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^(?:Sources|Lines|Checks): .*\n/gm, ''));
   fs.appendFileSync(path.join(f.notes, 'lines.md'), 'T3. Another line.\n');
   const r = run(['--check', f.list, '--places', f.places, '--lines', path.join(f.notes, 'lines.md'), '--check-lines', path.join(f.notes, 'check.md')]);
   assert.equal(r.status, 0, 'a list from before the Sources line has nothing to compare');
@@ -695,4 +699,356 @@ test('audit 7, must not change: prose with no file:line and the instruction quot
   const r = run(['--record', f.report, '--notes', f.notes]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(sLines(f.list).length, 1);
+});
+
+// 2026-11-19 (release "ticket lines and the second look, line by line"). One added check line forced a second full
+// run of the second look (3.5 minutes), and 13 outcomes were typed through a hand-made script.
+const linesOf = (f) => path.join(f.notes, 'lines.md');
+const checkOf = (f) => path.join(f.notes, 'check.md');
+const checkArgs = (f) => ['--check', f.list, '--places', f.places, '--lines', linesOf(f), '--check-lines', checkOf(f)];
+const recorded = (text = 'SIBLINGS: none\nSAME JOB: none\n') => {
+  const f = briefed(text);
+  const r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  return f;
+};
+// The owner's switch, set in the fixture's own repository (the tests read no config of this machine).
+// Since 2026-11-20 the rule is on unless the owner sets it to false.
+const switchOff = (f) => f.git('config', 'sanad.lateCheckLines', 'false');
+
+test('each ticket line has its own hash: one changed word or one added line is stale; a dropped line and a new order are not', () => {
+  const f = recorded();
+  const list = fs.readFileSync(f.list, 'utf8');
+  assert.match(list, /^Lines: [0-9a-f]{10} [0-9a-f]{10}$/m, 'one short hash per ticket line');
+  assert.match(list, /^Checks: [0-9a-f]{10}$/m, 'one short hash per check line');
+  const original = fs.readFileSync(linesOf(f), 'utf8');
+  assert.equal(run(checkArgs(f)).status, 0);
+  // The two lines in the other order, no word changed.
+  fs.writeFileSync(linesOf(f), '# Lines\n\nT1. Expected: the first field with an error gets the focus.\nT2. Focus does not move to the field with the error after a failed save.\n');
+  let r = run(checkArgs(f));
+  assert.equal(r.status, 0, 'a new order is no change\n' + r.stdout);
+  // One line dropped by the user, as lines.mjs --drop writes it.
+  fs.writeFileSync(linesOf(f), original.replace('T2. Expected', 'T2. [dropped by the user: "leave the focus rule for now"] Expected'));
+  r = run(checkArgs(f));
+  assert.equal(r.status, 0, 'a dropped line is no change\n' + r.stdout);
+  // The dropped line brought back by hand: the second look read it, so the list is still current.
+  fs.writeFileSync(linesOf(f), original);
+  assert.equal(run(checkArgs(f)).status, 0);
+  // One word changed.
+  fs.writeFileSync(linesOf(f), original.replace('gets the focus', 'gets the cursor'));
+  r = run(checkArgs(f));
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /^OPEN: SIBLINGS — ticket lines changed: run --brief again.* — T2 is new or changed$/m);
+  // One line added.
+  fs.writeFileSync(linesOf(f), original + 'T3. A late hand-in is marked late.\n');
+  r = run(checkArgs(f));
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, / — T3 is new or changed$/m);
+  // The ticket lines alone: the same answers, and the check file beside them is still read.
+  fs.writeFileSync(linesOf(f), original);
+  assert.equal(run(['--check', f.list, '--lines', linesOf(f)]).status, 0);
+  fs.appendFileSync(checkOf(f), '- [T2] the date picker gets the focus too\n');
+  switchOff(f);
+  r = run(['--check', f.list, '--places', f.places, '--lines', linesOf(f)]);
+  assert.equal(r.status, 1, 'with the switch off, a check line added later still asks for the second look\n' + r.stdout);
+  assert.match(r.stdout, / — the check lines changed: C2$/m);
+});
+
+test('a line dropped before the brief is not in the brief; brought back by hand later, it makes the list stale', () => {
+  const f = fixture();
+  const original = fs.readFileSync(linesOf(f), 'utf8');
+  fs.writeFileSync(linesOf(f), original.replace('T1. Focus', 'T1. [dropped by the user: "leave the focus rule for now"] Focus'));
+  const b = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
+  assert.equal(b.status, 0, b.stdout + b.stderr);
+  assert.match(b.stdout, /T1\.\.T2 \(T1 dropped\) · C1\.\.C1/);
+  const brief = fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8');
+  assert.doesNotMatch(brief, /^- T1\./m);
+  assert.match(brief, /^- T2\. Expected: the first field with an error gets the focus\.$/m, 'T2 keeps its number');
+  assert.match(brief, /^\(T1 dropped by the user: no part of the goal\)$/m);
+  const report = path.join(f.notes, 'siblings-report.md'), list = path.join(f.notes, 'siblings.md');
+  fs.writeFileSync(report, 'SIBLINGS: none\nSAME JOB: none\n');
+  assert.equal(run(['--record', report, '--notes', f.notes]).status, 0);
+  assert.equal(run(['--check', list, '--lines', linesOf(f)]).status, 0);
+  fs.writeFileSync(linesOf(f), original);
+  const r = run(['--check', list, '--lines', linesOf(f)]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, / — T1 is new or changed$/m);
+  // A lines file with every line dropped has no rule to search for.
+  fs.writeFileSync(linesOf(f), 'T1. [dropped by the user: "leave the focus rule for now"] Focus stays.\n');
+  const none = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
+  assert.equal(none.status, 2);
+  assert.match(none.stderr, /every ticket line .* is dropped/);
+});
+
+test("with the owner's switch: a check line added after the second look is not stale, and the NOTE line names it", async () => {
+  const f = recorded();
+  fs.appendFileSync(checkOf(f), '- [T2] the date picker gets the focus too\n');
+  // Switched off (false): the rule of 2026-11-18 stands.
+  switchOff(f);
+  assert.equal(run(checkArgs(f)).status, 1);
+  f.git('config', '--unset-all', 'sanad.lateCheckLines');
+  let r = run(checkArgs(f));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^NOTE: C2 added after the second look$/m);
+  assert.doesNotMatch(r.stdout, /OPEN: SIBLINGS/);
+  // A check line that is edited, not added, was never read either.
+  fs.writeFileSync(checkOf(f), '- [T1, T2] after a failed save the first date picker with an error has the focus\n');
+  r = run(checkArgs(f));
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /^NOTE: C1 added after the second look$/m);
+  // The export the review brief reads.
+  const { lateCheckLines, parseSiblings } = await import(pathToFileURL(script).href);
+  const listText = fs.readFileSync(f.list, 'utf8');
+  const two = '- [T1, T2] after a failed save the first chip group with an error has the focus\n- [T2] the date picker gets the focus too\n';
+  assert.deepEqual(lateCheckLines(listText, two), [{ n: 2, text: '[T2] the date picker gets the focus too' }]);
+  assert.deepEqual(lateCheckLines(parseSiblings(listText), two).map((c) => c.n), [2]);
+  assert.deepEqual(lateCheckLines(listText.replace(/^Checks: .*\n/m, ''), two), [], 'a list of the release before has no late line');
+  // A ticket line added or changed is stale with the switch too.
+  fs.appendFileSync(linesOf(f), 'T3. A late hand-in is marked late.\n');
+  r = run(checkArgs(f));
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, / — T3 is new or changed$/m);
+});
+
+test("with the owner's switch, --brief with no check.md writes the brief; without the switch it is refused as before", () => {
+  const f = fixture();
+  fs.rmSync(checkOf(f));
+  switchOff(f);
+  const off = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
+  assert.equal(off.status, 2, off.stdout);
+  assert.match(off.stderr, /no check\.md in .*write the check lines first/);
+  f.git('config', '--unset-all', 'sanad.lateCheckLines');
+  const on = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
+  assert.equal(on.status, 0, on.stdout + on.stderr);
+  assert.match(on.stdout, /T1\.\.T2 · no check line yet · /);
+  assert.match(fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8'), /^- none yet: the check lines are written after this look$/m);
+  const report = path.join(f.notes, 'siblings-report.md'), list = path.join(f.notes, 'siblings.md');
+  fs.writeFileSync(report, 'SIBLINGS: none\nSAME JOB: none\n');
+  // The check lines are written while the agent searches; the record takes the report.
+  fs.writeFileSync(checkOf(f), '- [T1, T2] the first chip group with an error has the focus\n');
+  const rec = run(['--record', report, '--notes', f.notes]);
+  assert.equal(rec.status, 0, rec.stdout + rec.stderr);
+  assert.match(fs.readFileSync(list, 'utf8'), /^Checks: none$/m);
+  const r = run(['--check', list, '--places', f.places, '--lines', linesOf(f)]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^NOTE: C1 added after the second look$/m);
+});
+
+test('with no setting at all, a check line added after the brief does not void the record', () => {
+  const f = recorded();
+  fs.appendFileSync(checkOf(f), '- [T2] the date picker gets the focus too\n');
+  const r = run(checkArgs(f));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^NOTE: C2 added after the second look$/m);
+});
+
+test('a siblings list written by the release before (one Sources hash) is valid until a ticket line changes', () => {
+  const f = recorded();
+  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^(?:Lines|Checks): .*\n/gm, ''));
+  assert.match(fs.readFileSync(f.list, 'utf8'), /^Sources: [0-9a-f]{12}$/m);
+  assert.equal(run(checkArgs(f)).status, 0);
+  // A dropped line keeps the old hash: its own words still count there.
+  const original = fs.readFileSync(linesOf(f), 'utf8');
+  fs.writeFileSync(linesOf(f), original.replace('T2. Expected', 'T2. [dropped by the user: "leave the focus rule for now"] Expected'));
+  assert.equal(run(checkArgs(f)).status, 0);
+  fs.writeFileSync(linesOf(f), original.replace('gets the focus', 'gets the cursor'));
+  const r = run(checkArgs(f));
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /^OPEN: SIBLINGS — ticket lines changed: run --brief again/m);
+});
+
+test('--close with two --set options writes the outcomes by the rules of --check, and writes nothing when one is refused', () => {
+  const f = briefed(TWO + '\nSIBLING: src/ChipGroup.tsx:3 · onSaveFailed — the handler itself skips the second group\nSAME JOB: src/focus.ts:1 · focusFirstError — the helper every form calls after a failed save\nSAME JOB: src/ChipGroup.tsx:2 · onSaveFailed — the handler that calls it\nBEST DESIGN: J1 — one helper every form calls\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  const before = fs.readFileSync(f.list, 'utf8');
+  // P1 is the place of the file's top level, not of the function onSaveFailed that holds S3's line: refused, as
+  // --check refuses it. P2 is that function's place.
+  let other = run(['--close', f.list, '--set', 'S3=P1']);
+  assert.equal(other.status, 1, other.stdout + other.stderr);
+  assert.match(other.stdout, /^REFUSED: S3 — P1 is a place of \(file\), not of onSaveFailed/m);
+  assert.equal(fs.readFileSync(f.list, 'utf8'), before);
+  other = run(['--close', f.list, '--set', 'S3=P2']);
+  assert.equal(other.status, 0, other.stdout + other.stderr);
+  assert.match(other.stdout, /^ {2}S3 · .* → P2$/m);
+  assert.match(other.stdout, /^SIBLINGS: 3 found, 2 open$/m);
+  fs.writeFileSync(f.list, before);
+  // P1 is the place of another file: refused, as --check refuses it, and nothing is written.
+  let r = run(['--close', f.list, '--set', 'S1=P1', '--set', 'J1,J2=reuse']);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^REFUSED: S1 — P1 is in .*, not in src\/DatePicker\.tsx/m);
+  assert.match(r.stdout, /^SIBLINGS: nothing written/m);
+  assert.equal(fs.readFileSync(f.list, 'utf8'), before);
+  // A reason of 11 characters is too short, for S and for J.
+  r = run(['--close', f.list, '--set', 'S1,S2=none: elevenchars', '--set', 'J2=not: elevenchars']);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /^REFUSED: S1 — the reason after none: needs at least 12 characters$/m);
+  assert.match(r.stdout, /^REFUSED: J2 — the reason after not: needs at least 12 characters$/m);
+  assert.equal(fs.readFileSync(f.list, 'utf8'), before);
+  // Two --set options, S and J lines.
+  r = run(['--close', f.list, '--set', 's1, S2=none: another form with its own focus rule', '--set', 'J1,J2=reuse', '--set', 'S3=P2']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^CLOSED: 5 line\(s\) written to /m);
+  assert.match(r.stdout, /^SIBLINGS: 3 found, 0 open$/m);
+  assert.match(r.stdout, /^SAME JOB: 2 found, 0 open$/m);
+  const after = fs.readFileSync(f.list, 'utf8');
+  assert.deepEqual(sLines(f.list).map((l) => l.split(' → ')[1]), ['none: another form with its own focus rule', 'none: another form with its own focus rule', 'P2']);
+  assert.equal(after.split('\n').filter((l) => /^J\d .* → reuse$/.test(l)).length, 2);
+  assert.equal(after.replace(/ → .*$/gm, ' → '), before.replace(/ → .*$/gm, ' → '), 'only the outcomes changed');
+  assert.equal(run(['--check', f.list, '--places', f.places]).status, 0);
+  // Usage errors: a number that is not on the list, a line set twice, no --set, --set without --close.
+  for (const [args, why] of [
+    [['--close', f.list, '--set', 'S9=none: another form with its own rule'], /S9 is not on the list/],
+    [['--close', f.list, '--set', 'S1=none: another form here', '--set', 'S1=none: another form there'], /S1 is set twice/],
+    [['--close', f.list, '--set', 'P1=none: another form with its own rule'], /names S and J lines by number/],
+    [['--close', f.list], /--close needs at least one --set/],
+    [['--check', f.list, '--set', 'S1=P2'], /--set goes with --close/],
+  ]) {
+    const u = run(args);
+    assert.equal(u.status, 2, args.join(' ') + '\n' + u.stdout);
+    assert.match(u.stderr, why);
+  }
+});
+
+test('the instructions ask for at most three SAME JOB lines, the nearest first; SIBLING lines have no limit', async () => {
+  const mod = await import(pathToFileURL(script).href);
+  assert.match(mod.INSTRUCTIONS, /'SAME JOB: <file>:<line> · <what> — <how it does the job>', at most three, the nearest to this job first, or write the single line 'SAME JOB: none'/);
+  assert.doesNotMatch(mod.INSTRUCTIONS, /SIBLING: [^']*', at most/);
+  assert.equal(mod.lateChecksOn(root), true, 'the rule is on unless the owner sets it to false');
+});
+
+test('a report saved as UTF-16 or with CRLF is recorded with its per-line hashes', () => {
+  for (const save of [(t) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(t, 'utf16le')]), (t) => Buffer.from(t.replace(/\n/g, '\r\n'), 'utf8')]) {
+    const f = briefed('SIBLINGS: none\nSAME JOB: none\n');
+    fs.writeFileSync(f.report, save('SIBLING: src/DatePicker.tsx:1 · DueDatePicker — the same focus rule\nSAME JOB: none\n'));
+    const r = run(['--record', f.report, '--notes', f.notes]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(sLines(f.list).length, 1);
+    assert.match(fs.readFileSync(f.list, 'utf8'), /^Lines: [0-9a-f]{10} [0-9a-f]{10}$/m);
+  }
+});
+
+// 2026-11-20 (timed medium task, twice): the author closed the best same-job design "not: …" and built another; three of
+// four reviewers then asked for the one the author had refused. The second look now ends with one BEST DESIGN line, and
+// that J cannot be closed "not:" without the owner's recorded words.
+const BEST_REPORT = 'SIBLINGS: none\n' +
+  'SAME JOB: src/outbox/EmailOutbox.ts:12 · EmailOutbox — a table row in the same save, sent later by a worker\n' +
+  'SAME JOB: src/ms/MicrosoftIdentityChanges.ts:40 · MicrosoftIdentityChanges — queued identity changes, one worker drains them\n';
+
+test('BEST DESIGN: the brief asks for it; --record refuses same-job lines with no BEST DESIGN line and keeps the J number', () => {
+  const f = briefed(BEST_REPORT);
+  const brief = fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8');
+  assert.match(brief, /'BEST DESIGN: J<n> — <one line why>'/);
+  let r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /has SAME JOB lines but no "BEST DESIGN: J<n> — <why>" line/);
+  assert.equal(fs.existsSync(f.list), false, 'nothing written');
+  fs.writeFileSync(f.report, BEST_REPORT + 'BEST DESIGN: J3 — there is no third line\n');
+  r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /names J3, but the report has 2 SAME JOB line/);
+  fs.writeFileSync(f.report, BEST_REPORT + '**BEST DESIGN: J2 — one worker drains every change**\n');
+  r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /^BEST DESIGN: J2 — one worker drains every change$/m);
+  assert.match(r.stdout, /^BEST DESIGN: J2 — /m);
+});
+
+test('BEST DESIGN: Markdown emphasis and code marks around the label and the J id are removed before parsing', () => {
+  for (const line of ['**BEST DESIGN:** **J2** — one worker drains every change', 'BEST DESIGN: `J2` — one worker drains every change', '_BEST DESIGN_: J2 — one worker drains every change']) {
+    const f = briefed(BEST_REPORT + line + '\n');
+    const r = run(['--record', f.report, '--notes', f.notes]);
+    assert.equal(r.status, 0, line + '\n' + r.stdout + r.stderr);
+    assert.match(fs.readFileSync(f.list, 'utf8'), /^BEST DESIGN: J2 — one worker drains every change$/m, line);
+  }
+});
+
+test('BEST DESIGN: "BEST DESIGN: none — <why>" is an answer, and a report with no same-job line needs none', () => {
+  const f = briefed(BEST_REPORT + 'BEST DESIGN: none — each one is a different system\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  assert.match(fs.readFileSync(f.list, 'utf8'), /^BEST DESIGN: none — each one is a different system$/m);
+  const g = briefed('SIBLINGS: none\nSAME JOB: none\n');
+  assert.equal(run(['--record', g.report, '--notes', g.notes]).status, 0);
+});
+
+test('BEST DESIGN: --check and --close refuse "not:" on the best J unless the owner\'s design words are recorded; the refusal prints the command', () => {
+  const f = briefed(BEST_REPORT + 'BEST DESIGN: J2 — one worker drains every change\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  const why = 'not: it sends to Microsoft Graph, a different system with its own ordering';
+  // --close: the best J refuses, J1 (not the best) takes the same words; nothing is written when one is refused.
+  const before = fs.readFileSync(f.list, 'utf8');
+  let r = run(['--close', f.list, '--set', 'J1=reuse', '--set', 'J2=' + why]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^REFUSED: J2 — J2 is the BEST DESIGN of the second look \(one worker drains every change\)/m);
+  assert.match(r.stdout, /notes\.mjs decide --kind design --question "BEST DESIGN J2" --words "<the owner's exact words>" --notes /);
+  assert.equal(fs.readFileSync(f.list, 'utf8'), before);
+  r = run(['--close', f.list, '--set', 'J2=reuse', '--set', 'J1=' + why]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  // --check: the same list, with the best J closed "not:" by hand, is open.
+  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^(J2 · .*?→).*$/m, '$1 ' + why));
+  let c = run(['--check', f.list]);
+  assert.equal(c.status, 1, c.stdout);
+  assert.match(c.stdout, /^OPEN: J2 · .* — J2 is the BEST DESIGN of the second look/m);
+  assert.match(c.stdout, /^SAME JOB: 2 found, 1 open$/m);
+  // The owner's recorded words (a design decision in the same notes folder) lift the refusal.
+  fs.writeFileSync(path.join(f.notes, 'decisions.json'), JSON.stringify({ version: 1, decisions: [{ id: 'D1', kind: 'design', question: '', words: 'use the paged roster, not the worker', question: 'BEST DESIGN J2', source: 'typed by the author', notes: [], at: new Date().toISOString() }] }));
+  c = run(['--check', f.list]);
+  assert.equal(c.status, 0, c.stdout + c.stderr);
+  assert.match(c.stdout, /^SAME JOB: 2 found, 0 open$/m);
+});
+
+// 2026-11-20 (fix round): the owner's design words unlock only the J line they name, and the report has exactly one
+// BEST DESIGN line with a reason.
+test('BEST DESIGN: a design decision for J1 does not unlock J2; one that names J2 does', () => {
+  const f = briefed(BEST_REPORT + 'BEST DESIGN: J2 — one worker drains every change\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^(J1 · .*?→).*$/m, '$1 reuse').replace(/^(J2 · .*?→).*$/m, '$1 not: it sends to Microsoft Graph, a different system'));
+  const decide = (question) => fs.writeFileSync(path.join(f.notes, 'decisions.json'), JSON.stringify({ version: 1, decisions: [{ id: 'D1', kind: 'design', question, words: 'use the paged roster, not the worker', source: 'typed by the author', notes: [], at: new Date().toISOString() }] }));
+  decide('BEST DESIGN J1');
+  let c = run(['--check', f.list]);
+  assert.equal(c.status, 1, c.stdout);
+  assert.match(c.stdout, /^OPEN: J2 · .* — J2 is the BEST DESIGN/m);
+  assert.match(c.stdout, /decide --kind design --question "BEST DESIGN J2" --words/);
+  decide('BEST DESIGN J12');
+  assert.equal(run(['--check', f.list]).status, 1, 'J12 is not J2');
+  decide('BEST DESIGN J2');
+  c = run(['--check', f.list]);
+  assert.equal(c.status, 0, c.stdout + c.stderr);
+});
+
+test('BEST DESIGN: two BEST DESIGN lines, or one with no reason, are refused', () => {
+  const f = briefed(BEST_REPORT + 'BEST DESIGN: J1 — the outbox is how this repo sends later\nBEST DESIGN: J2 — one worker drains all\n');
+  let r = run(['--record', f.report, '--notes', f.notes]);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /two BEST DESIGN lines/);
+  for (const line of ['BEST DESIGN: J1', 'BEST DESIGN: J1 — ok', 'BEST DESIGN: none —']) {
+    fs.writeFileSync(f.report, BEST_REPORT + line + '\n');
+    r = run(['--record', f.report, '--notes', f.notes]);
+    assert.equal(r.status, 2, line + r.stdout + r.stderr);
+    assert.match(r.stderr, /BEST DESIGN line has no reason/);
+  }
+  assert.equal(fs.existsSync(f.list), false, 'nothing written');
+});
+
+// 2026-11-20 (fix round 1b): the owner's words must come AFTER the list, and a wrong-shape BEST DESIGN line is called
+// malformed, with the right shape.
+test('BEST DESIGN: a design decision made before the list was recorded does not unlock it', () => {
+  const f = briefed(BEST_REPORT + 'BEST DESIGN: J2 — one worker drains every change\n');
+  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^(J1 · .*?→).*$/m, '$1 reuse').replace(/^(J2 · .*?→).*$/m, '$1 not: it sends to Microsoft Graph, a different system'));
+  const decide = (at) => fs.writeFileSync(path.join(f.notes, 'decisions.json'), JSON.stringify({ version: 1, decisions: [{ id: 'D1', kind: 'design', question: 'BEST DESIGN J2', words: 'use the paged roster, not the worker', source: 'typed by the author', notes: [], at }] }));
+  decide('2000-01-01T00:00:00.000Z');
+  assert.equal(run(['--check', f.list]).status, 1, 'older than the list');
+  decide(new Date(Date.now() + 1000).toISOString());
+  const c = run(['--check', f.list]);
+  assert.equal(c.status, 0, c.stdout + c.stderr);
+});
+
+test('BEST DESIGN: a line with the wrong shape is malformed and the right shape is printed', () => {
+  const f = briefed(BEST_REPORT);
+  for (const line of ['BEST DESIGN — J2: one worker drains it', 'BEST DESIGN J2 one worker drains it all', 'BEST DESIGN: second one is best because it is simple']) {
+    fs.writeFileSync(f.report, BEST_REPORT + line + '\n');
+    const r = run(['--record', f.report, '--notes', f.notes]);
+    assert.equal(r.status, 2, line + r.stdout + r.stderr);
+    assert.match(r.stderr, /BEST DESIGN line is malformed: .*"BEST DESIGN: J<n> — <why>"/);
+  }
 });

@@ -108,4 +108,81 @@ test('a new commit with the same files (a reworded message) runs the commit chec
   f.git('commit', '-q', '--amend', '-m', 'fix(web): the value is two');
   const r = f.run();
   assert.match(r.stdout, /✓ commits \(\d+\.\d s\)/, r.stdout);
+  // 2026-11-19: and only that one. The files are the same, so lint, types and the project check are read.
+  assert.match(r.stdout, /✓ lint web \(1 file\) \(same code: passed at \d\d:\d\d\)/, r.stdout);
+  assert.deepEqual([f.runs('lint'), f.runs('types'), f.runs('mechanical')], [1, 1, 1], 'a reworded message runs no lint or type check again');
+});
+
+// 2026-11-19: the commit (HEAD) was in every key, so committing a checked tree ran lint and types again on the
+// very same files (about 30 s each on the test machine, twice per fix round).
+test('check a dirty tree, commit it, check again: lint and types show the kept pass, and only the commits check runs', () => {
+  const f = fixture();
+  f.write('web/src/a.ts', 'export const a = 3;\n');
+  const dirty = f.run();
+  assert.match(dirty.stdout, /✓ lint web \(1 file\) \(\d+\.\d s\)/, dirty.stdout);
+  assert.deepEqual([f.runs('lint'), f.runs('types'), f.runs('mechanical')], [1, 1, 1]);
+  f.git('commit', '-qam', 'fix(web): three');
+  const committed = f.run();
+  assert.match(committed.stdout, /✓ lint web \(1 file\) \(same code: passed at \d\d:\d\d\)/, committed.stdout);
+  assert.match(committed.stdout, /✓ types web \(same code: passed at \d\d:\d\d\)/);
+  assert.match(committed.stdout, /✓ size \(same code: passed at \d\d:\d\d\)\n\s+SIZE: /, 'the kept size answer still shows its lines');
+  assert.match(committed.stdout, /[✓✗] commits \(\d+\.\d s\)/, 'the commits check runs: its answer is about the commit');
+  assert.deepEqual([f.runs('lint'), f.runs('types'), f.runs('mechanical')], [1, 1, 1], 'nothing ran again after the commit');
+  // Must not change: the same commit with one more edit is other code.
+  f.write('web/src/a.ts', 'export const a = 4;\n');
+  f.run();
+  assert.deepEqual([f.runs('lint'), f.runs('types')], [2, 2]);
+});
+
+test('a changed lock file or tool version misses the cache, though no tracked file changed', () => {
+  const f = fixture();
+  // The lock file and node_modules are not in git here, so the tree is the same before and after.
+  f.write('web/.gitignore', 'node_modules/\npackage-lock.json\n');
+  f.git('commit', '-qam', 'fix(web): ignore the lock file');
+  f.write('web/package-lock.json', '{"lockfileVersion":3,"packages":{"node_modules/eslint":{"version":"9.0.0"}}}\n');
+  f.write('web/node_modules/eslint/package.json', '{"name":"eslint","version":"9.0.0"}\n');
+  f.run(); f.run();
+  assert.deepEqual([f.runs('lint'), f.runs('types')], [1, 1], 'the same state twice: kept');
+  f.write('web/node_modules/eslint/package.json', '{"name":"eslint","version":"9.1.0"}\n');
+  const upgraded = f.run();
+  assert.match(upgraded.stdout, /✓ lint web \(1 file\) \(\d+\.\d s\)/, 'another eslint version: lint runs again');
+  assert.deepEqual([f.runs('lint'), f.runs('types')], [2, 1], 'the type check does not use eslint: it is kept');
+  f.write('web/package-lock.json', '{"lockfileVersion":3,"packages":{"node_modules/eslint":{"version":"9.1.0"}}}\n');
+  f.run();
+  assert.deepEqual([f.runs('lint'), f.runs('types')], [3, 2], 'another lock file: every check of the package runs again');
+  f.run();
+  assert.deepEqual([f.runs('lint'), f.runs('types')], [3, 2]);
+});
+
+test('the key: the Node version is in every key; the commit is only in the key of the commits check', async () => {
+  const { checkKey, NEVER } = await import('../scripts/pre-review-cache.mjs');
+  const ident = { head: 'h1', tree: 't1', base: 'b1', mergeBase: 'm1', node: 'v20.20.2' };
+  const lint = { name: 'lint web (1 file)', cmd: process.execPath, args: ['eslint.js', 'src/a.ts'], cwd: root };
+  const commits = { name: 'commits', cmd: process.execPath, args: ['check-commits.mjs'], cwd: root };
+  assert.equal(checkKey(lint, ident), checkKey(lint, { ...ident }), 'the same inputs: the same key');
+  assert.notEqual(checkKey(lint, ident), checkKey(lint, { ...ident, node: 'v22.11.0' }), 'another Node version');
+  assert.equal(checkKey(lint, ident), checkKey(lint, { ...ident, head: 'h2' }), 'another commit with the same tree: the same key');
+  assert.notEqual(checkKey(commits, ident), checkKey(commits, { ...ident, head: 'h2' }), 'the commits check holds the commit');
+  for (const part of ['tree', 'base', 'mergeBase']) assert.notEqual(checkKey(lint, ident), checkKey(lint, { ...ident, [part]: 'other' }), part + ' stays in every key');
+  // Must not change: the checks that read state outside these inputs are never kept, and a failed check is not kept.
+  assert.deepEqual([...NEVER].sort(), ['one job', 'places', 'siblings', 'test asserts']);
+  for (const name of NEVER) assert.equal(checkKey({ ...lint, name }, ident), '');
+  assert.equal(checkKey({ ...lint, notRun: 'no node_modules' }, ident), '');
+});
+
+test('a kept size answer that starts with a line break and is over 20,000 characters stays whole JSON', async () => {
+  const dir = fs.mkdtempSync(path.join(root, 'keep-'));
+  const old = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = dir;
+  try {
+    const { remember, lookup } = await import('../scripts/pre-review-cache.mjs');
+    const out = '\n' + JSON.stringify({ files: 'x'.repeat(30000) });
+    remember([{ key: 'k-big-json', name: 'size', code: 0, out, ms: 1 }]);
+    const got = lookup('k-big-json');
+    assert.ok(got, 'the answer was kept');
+    assert.equal(got.out, out, 'kept whole, not cut to the last 20,000 characters');
+    assert.doesNotThrow(() => JSON.parse(got.out));
+  } finally {
+    if (old === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = old;
+  }
 });

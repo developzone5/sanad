@@ -122,6 +122,8 @@ export function scoreLines({ seats, classes }) {
     ...rows.map(([name, s]) => `  ${name}: ${s.notes} note(s) → ${s.fixed} fixed, ${s.user} decided by the user, ${s.open} open${s.refuted ? ', ' + s.refuted + ' refuted' : ''}`),
     `REVIEW SCORE: ${total} note(s), ${fixed} led to a change (${Math.round((100 * fixed) / total)}%)`,
     'CLASSES: ' + (named.length ? named.join(', ') : 'none named'),
+    // Notes of every seat but the re-check seat (the scanner tags a re-check prompt by its word "re-check").
+    `FOUND IN ROUND 1: ${total - (seats['re-check'] ? seats['re-check'].notes : 0)} of ${total}`,
   ];
 }
 

@@ -83,6 +83,7 @@ const SCORE = [
   '  file report: 1 note(s) → 0 fixed, 0 decided by the user, 1 open',
   'REVIEW SCORE: 6 note(s), 3 led to a change (50%)',
   'CLASSES: CLIENT STATE ×2, CALLERS ×1, DATABASE ×1',
+  'FOUND IN ROUND 1: 6 of 6',
 ];
 const SEATS = {
   'fresh eyes': { notes: 3, fixed: 2, user: 1, open: 0 },
@@ -127,10 +128,10 @@ test('the score names each seat with its notes and their outcomes, the share tha
   const { scoreOf, scoreLines } = await lib();
   const score = scoreOf({ reviewNotes: [{ outcome: 'fixed' }, { outcome: null }, { outcome: 'user' }], reviewNoteSeats: ['whole diff', 'whole diff', 're-check'], reviewNoteClasses: ['TIME', '', 'TIME'] });
   assert.deepEqual(score, { seats: { 'whole diff': { notes: 2, fixed: 1, user: 0, open: 1 }, 're-check': { notes: 1, fixed: 0, user: 1, open: 0 } }, classes: { TIME: 2 } });
-  assert.deepEqual(scoreLines(score).slice(-2), ['REVIEW SCORE: 3 note(s), 1 led to a change (33%)', 'CLASSES: TIME ×2']);
+  assert.deepEqual(scoreLines(score).slice(-3), ['REVIEW SCORE: 3 note(s), 1 led to a change (33%)', 'CLASSES: TIME ×2', 'FOUND IN ROUND 1: 2 of 3']);
   // No class named, and a scan result with no seat list (an older scanner): every note is a reviewer's.
   assert.deepEqual(scoreLines(scoreOf({ reviewNotes: [{ outcome: 'fixed' }, { outcome: 'fixed' }] })),
-    ['  reviewer: 2 note(s) → 2 fixed, 0 decided by the user, 0 open', 'REVIEW SCORE: 2 note(s), 2 led to a change (100%)', 'CLASSES: none named']);
+    ['  reviewer: 2 note(s) → 2 fixed, 0 decided by the user, 0 open', 'REVIEW SCORE: 2 note(s), 2 led to a change (100%)', 'CLASSES: none named', 'FOUND IN ROUND 1: 2 of 2']);
 });
 
 test('a session with no reviewer note says so, and --log adds nothing for it', () => {
@@ -390,4 +391,12 @@ test('the worktrees of one repository add to one log, so --repeats counts a clas
   }
   assert.equal(logged(main).length, 3);
   assert.match(rows(last.stdout).at(-1), /^REPEAT: CLIENT STATE in 3 of the last 3 tasks/);
+});
+
+test('P9: found in round 1 counts every note whose seat is not re-check', async () => {
+  const { scoreOf, scoreLines } = await lib();
+  const notes = Array.from({ length: 7 }, () => ({ outcome: 'fixed' }));
+  const seats = ['fresh eyes', 'fresh eyes', 'whole diff', 'risk files', 'reviewer', 're-check', 're-check'];
+  const lines = scoreLines(scoreOf({ reviewNotes: notes, reviewNoteSeats: seats }));
+  assert.equal(lines[lines.length - 1], 'FOUND IN ROUND 1: 5 of 7');
 });
