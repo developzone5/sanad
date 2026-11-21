@@ -6,16 +6,18 @@
 #   Per repository (the test machine runs Windows, as for remote-sync.sh):
 #     git config sanad.remoteWebUp '<command run there: starts the web server and stays in the foreground>'
 #     git config sanad.remoteWebPorts '<web port> [more ports]'   linked to localhost here; the first is the web server's
+#     git config sanad.remoteWebCheckPath '/ready'                optional: check this path (default /)
 #     git config sanad.remoteAppRestart '<command run there>'      optional: the app picks up the synced code
 #   start  1. stops the web server and the link an earlier start left — only its own, by the ids it saved
 #          2. refuses a port another process holds (there or here): PORT-BUSY, ask the user
 #          3. remote-sync.sh (this folder's exact code), the app restart, remote-preflight.sh (--app when
 #             sanad.remoteAppUp is set, --db when sanad.remoteDbUp is set)
-#          4. starts the web server there with the ports linked here, waits until the web port answers
+#          4. starts the web server there and waits for HTTP 2xx or 3xx over the link
 #   stop   stops that web server and the link. Run it when the user reports the browser check.
 #   status what a start left, and whether it still runs.
 # Prints READY http://localhost:<port> … (exit 0), STOPPED, or NO-REMOTE (3), REMOTE-DOWN (4), PORT-BUSY (9),
-# WEB-DOWN (10), FAILED (1); a failed sync or preflight keeps its own word and exit code.
+# WEB-DOWN or WEB-ERROR (10), FAILED (1); a failed sync or preflight keeps its own word and exit code.
+# A FOREIGN? line (exit 1) stops a sync that would copy another task's files.
 # 2026-11-11 (TUW-242, TUW-243): every step was typed by hand. A link to an old web server held the ports
 # here, the new server came up on another port behind it, and three web servers stayed on the test machine.
 # Env: REMOTE_WEB_WAIT_SECONDS (default 90); REMOTE_WEB_SYNC, REMOTE_WEB_PREFLIGHT (tests: stand-ins).
@@ -118,6 +120,27 @@ up=$(git config --get sanad.remoteWebUp || true); ports=$(git config --get sanad
 [ -n "$up" ] && [ -n "$ports" ] || { echo "FAILED: start needs git config sanad.remoteWebUp (the command that starts the web server there) and sanad.remoteWebPorts (the web port first) in this repository"; exit 1; }
 for p in $ports; do case "$p" in ''|*[!0-9]*) echo "FAILED: sanad.remoteWebPorts holds '$p'; it takes port numbers"; exit 1 ;; esac; done
 web_port=${ports%% *}
+check_path=$(git config --get sanad.remoteWebCheckPath || true)
+check_path=${check_path:-/}
+if [[ "$check_path" != /* || "$check_path" == *[[:cntrl:]]* ]]; then
+  echo "FAILED: sanad.remoteWebCheckPath must start with / and contain no control characters"
+  exit 1
+fi
+
+# Check before replacing an earlier start or packing the work folder for the sync.
+if git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    try {
+      const { changeSet, foreignLine } = await import(pathToFileURL(process.argv[1]));
+      const warning = foreignLine(changeSet(process.cwd(), "HEAD"));
+      if (warning) { console.log(warning); process.exitCode = 1; }
+    } catch (error) {
+      console.log(`FAILED: could not check files before sync: ${error.message}`);
+      process.exitCode = 1;
+    }
+  ' "$here/../../skills/gate/scripts/change-set.mjs" || exit 1
+fi
 
 stop_own
 other=$(listener "$web_port")
@@ -142,7 +165,11 @@ ready=""
 if [ ${#flags[@]} -gt 0 ]; then
   pre=$(bash "${REMOTE_WEB_PREFLIGHT:-$here/remote-preflight.sh}" "${flags[@]}" --hold "$hold" 2>&1); code=$?
   ready=$(printf '%s\n' "$pre" | grep -m1 '^READY ' || true)
-  [ "$code" = 0 ] && [ -n "$ready" ] || { printf '%s\n' "$pre" | grep -v '^NOTE:' | grep -m1 . || echo "FAILED: the preflight printed nothing"; exit $([ "$code" = 0 ] && echo 1 || echo "$code"); }
+  if [ "$code" != 0 ] || [ -z "$ready" ]; then
+    [ -n "$pre" ] && printf '%s\n' "$pre" || echo "FAILED: the preflight printed nothing"
+    exit "$((code == 0 ? 1 : code))"
+  fi
+  printf '%s\n' "$pre" | grep -v '^READY '
 fi
 
 forwards=()
@@ -154,17 +181,32 @@ winpid=$(cat "/proc/$pid/winpid" 2>/dev/null || echo -)
 echo "$pid $winpid $ports" > "$link_file"
 git rev-parse --show-toplevel > "$owner_file" 2>/dev/null || rm -f "$owner_file"
 
-answers() { [ "$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://localhost:$web_port" 2>/dev/null)" -ge 200 ] 2>/dev/null; }
-start=$SECONDS
-until answers; do
-  if ! kill -0 "$pid" 2>/dev/null; then
-    echo "WEB-DOWN: the web server on $host stopped before it answered. Its last lines:"; tail -5 "$log" | sed 's/^/  /'
-    rm -f "$link_file"; exit 10
+last_error=""
+show_web_failure() {
+  if [ -n "$last_error" ]; then
+    echo "WEB-ERROR: HTTP $last_error from localhost:$web_port. Its last lines:"
+  else
+    echo "$1. Its last lines:"
   fi
+  tail -5 "$log" | sed 's/^/  /'
+}
+
+start=$SECONDS
+while :; do
+  http_code=$(curl -q --noproxy '*' --globoff -s -o /dev/null -m 5 -w '%{http_code}' "http://localhost:$web_port$check_path" 2>/dev/null)
+  curl_status=$?
+  case "$http_code" in [145-9][0-9][0-9]) last_error=$http_code ;; esac
+  if ! kill -0 "$pid" 2>/dev/null; then
+    show_web_failure "WEB-DOWN: the web server on $host stopped before it answered"
+    stop_own >/dev/null
+    exit 10
+  fi
+  case "$curl_status:$http_code" in 0:[23][0-9][0-9]) break ;; esac
   if [ $((SECONDS - start)) -ge "$WAIT" ]; then
-    echo "WEB-DOWN: http://localhost:$web_port did not answer within ${WAIT}s. Its last lines:"; tail -5 "$log" | sed 's/^/  /'
-    kill "$pid" 2>/dev/null || true; rm -f "$link_file"
-    rpid=$(listener "$web_port"); [ -n "$rpid" ] && on "taskkill /PID $rpid /T /F" >/dev/null
+    show_web_failure "WEB-DOWN: http://localhost:$web_port did not answer within ${WAIT}s"
+    rpid=$(listener "$web_port")
+    [ -n "$rpid" ] && echo "$web_port $rpid" > "$server_file"
+    stop_own >/dev/null
     exit 10
   fi
   sleep 1

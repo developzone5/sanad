@@ -366,3 +366,54 @@ test('every passing evidence receipt is listed with its repository, trees and fo
   assert.ok(r.passingReceipts.every((x) => typeof x.seq === 'number'));
   assert.equal(r.completedCheck.cwd, 'D:\\work\\other\\web', 'completedCheck is unchanged: the latest passing receipt as written');
 });
+
+// ---------------------------------------------------------------------------
+// 2026-11-19: the saved state gained the owner's dialog answers, the note checker's SAME lines and the
+// session's folder, so the cache version went up. A cache of the older version is dropped, never half read.
+// ---------------------------------------------------------------------------
+
+test('a cache of an older version is ignored; the state with the kept dialog answers is saved and restored equal', () => {
+  const dir = fs.mkdtempSync(path.join(root, 'version-'));
+  const file = path.join(dir, 's.jsonl');
+  const question = 'NOTE 1: the wrong status code for a gone row. Fix it now?';
+  const part1 = [
+    call('rv-call', 'Agent', { description: 'review', prompt: 'You are the independent reviewer. Review it.', run_in_background: true }, 1),
+    result('rv-call', 'Async agent launched successfully.', 1, false, { isAsync: true, status: 'async_launched', agentId: 'rv1' }),
+    { type: 'attachment', timestamp: at(2), attachment: { type: 'queued_command', commandMode: 'task-notification', prompt: '<task-notification>\n<task-id>rv1</task-id>\n<status>completed</status>\n<summary>Agent "review" completed</summary>\n<result>RECOMMEND: PASS\n- Gap — Api/X.cs:4 — the wrong status code for a gone row</result>\n</task-notification>' } },
+    call('q1', 'AskUserQuestion', { questions: [{ question, header: 'Note', multiSelect: false, options: [{ label: 'Fix it now', description: 'a' }, { label: 'Leave it', description: 'b' }] }] }, 3),
+    result('q1', 'Your questions have been answered: "' + question + '"="Keep the status code for this release". You can now continue with these answers in mind.', 4, false, { questions: [{ question }], answers: { [question]: 'Keep the status code for this release' }, annotations: {} }),
+  ].map((e) => ({ ...e, cwd: 'C:/repos/example' }));
+  const part2 = [verdict('NOTE 1: user — "Keep the status code for this release"', 5)].map((e) => ({ ...e, cwd: 'C:/repos/example' }));
+  fs.writeFileSync(file, lines(part1));
+  scan.scanTranscript(file);
+  const cacheOf = () => {
+    const name = cacheFiles().find((n) => { try { return JSON.parse(fs.readFileSync(path.join(stateDir, 'scan-cache', n), 'utf8')).path.toLowerCase() === file.split(path.sep).join('/').toLowerCase(); } catch { return false; } });
+    assert.ok(name, 'the scan left a cache for this transcript');
+    return path.join(stateDir, 'scan-cache', name);
+  };
+  const saved = JSON.parse(fs.readFileSync(cacheOf(), 'utf8'));
+  assert.equal(saved.v, 2, 'the cache version');
+  assert.deepEqual(saved.state.decisions.map((d) => [d.id, d.text]), [['q1', 'keep the status code for this release']], 'the dialog answer with its call id');
+  assert.deepEqual([saved.state.sameAs, saved.state.closedBy, saved.state.cwd], [[], [], 'C:/repos/example']);
+  // An old cache, with a state that would give a wrong answer if it were read.
+  const poisoned = (change) => { const c = JSON.parse(JSON.stringify(saved)); change(c); c.state.res.lastVerify = 77; fs.writeFileSync(cacheOf(), JSON.stringify(c)); };
+  for (const [name, change] of [
+    ['version 1', (c) => { c.v = 1; }],
+    ['version 1 without the new lists', (c) => { c.v = 1; delete c.state.decisions; delete c.state.sameAs; delete c.state.closedBy; delete c.state.cwd; }],
+    ['version 2 without the dialog answers', (c) => { delete c.state.decisions; }],
+    ['version 2 without the folder', (c) => { delete c.state.cwd; }],
+  ]) {
+    poisoned(change);
+    const r = scan.scanTranscript(file);
+    assert.equal(r.lastVerify, -1, name + ': the old state is not read');
+    assert.deepEqual(r, fullScan(file), name);
+    assert.equal(JSON.parse(fs.readFileSync(cacheOf(), 'utf8')).v, 2, name + ': a new cache replaces it');
+  }
+  // The restored state closes the note as a scan from zero does, and keeps which dialog answer closed it.
+  fs.appendFileSync(file, lines(part2));
+  const grown = scan.scanTranscript(file);
+  assert.deepEqual(grown, fullScan(file));
+  assert.deepEqual(grown.reviewNotes.map((n) => n.outcome), ['user']);
+  assert.deepEqual(grown.reviewClosedBy, [{ n: 1, id: 'q1' }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(cacheOf(), 'utf8')).state.closedBy, [{ n: 1, id: 'q1' }], 'saved for the next call');
+});

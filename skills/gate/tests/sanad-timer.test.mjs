@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mark, readMarks, report } from '../scripts/sanad-timer.mjs';
+import { mark, readMarks, report, week, requestStart } from '../scripts/sanad-timer.mjs';
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'sanad-timer.mjs');
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sanad-timer-'));
@@ -384,7 +384,7 @@ test('the report names the first request and the minutes before the first edit',
     // The time of day is shown where the report is read. The command runs in UTC here, so the line is known.
     const lines = execFileSync(process.execPath, [script, 'report', dir], { encoding: 'utf8', env: { ...process.env, TZ: 'UTC' } }).trim().split(/\r?\n/);
     assert.equal(lines.pop(), 'start: first request 10:00 · first edit after 21 min');
-    assert.equal(lines.pop(), '   40 min  total (work 40, waiting 0.0)', 'the lines before it stay as they were');
+    assert.ok(lines.includes('   40 min  total (work 40, waiting 0.0)'), 'the total line stays as it was');
     // In this process the clock is this machine's own.
     const local = `${String(at('10:00').getHours()).padStart(2, '0')}:${String(at('10:00').getMinutes()).padStart(2, '0')}`;
     assert.match(report(dir, at('11:00')), new RegExp(`^start: first request ${local} · first edit after 21 min$`, 'm'));
@@ -478,12 +478,130 @@ test('other work in the middle of a paused task starts at the message that asked
   }
 });
 
-// 2026-11-17 (audit S7): Sanad writes the routing time of a new task; the hooks start the timer there.
-test('request writes the time the hooks use as the start of the task', () => {
+// 2026-11-19 (P7): one task per timer, and the overhead as a number.
+const cli = (state, args, extra = {}) => execFileSync(process.execPath, [script, ...args], { encoding: 'utf8', env: { ...process.env, SANAD_STATE_DIR: state, ...extra } });
+const write = (dir, rows) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'timer.tsv'), rows.map(([t, k, w]) => `${at(t).toISOString()}\t${k}\t${w}`).join('\n') + '\n'); };
+
+test('request ends the active timer of the session, and the end mark does not count as work', () => {
+  const state = tmp(), notes = tmp();
+  try {
+    cli(state, ['mark', notes, 'proof']);
+    const out = cli(state, ['request']);
+    assert.match(out, /the timer before .* was ended/);
+    assert.equal(readMarks(notes).pop().text, 'end (auto: a new task was routed)');
+    // 2026-11-20: the new task has its own active timer at once, with the start mark.
+    const fresh = fs.readFileSync(path.join(state, POINTER), 'utf8').trim();
+    assert.notEqual(path.resolve(fresh), path.resolve(notes));
+    assert.match(readMarks(fresh)[0].text, /^start: the user's request — /);
+    // The ended timer stays named as the timer before.
+    assert.equal(path.resolve(fs.readFileSync(path.join(state, 'sanad-timer-last-' + SID), 'utf8').trim()), path.resolve(notes));
+  } finally { for (const d of [state, notes]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+// 2026-11-20: a task in another work tree than the session's folder ran 45 minutes with no timer of its own.
+test('request starts the new timer itself: named after --repo, the active one, and report reads it', () => {
+  const state = tmp(), notes = tmp(), repo = tmp();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: repo, windowsHide: true });
+    cli(state, ['mark', notes, 'proof']);
+    const out = cli(state, ['request', '--repo', repo]);
+    assert.match(out, /the timer before .* was ended/);
+    const fresh = fs.readFileSync(path.join(state, POINTER), 'utf8').trim();
+    assert.equal(path.basename(fresh).slice(16), path.basename(repo).replace(/[^A-Za-z0-9_.-]/g, '_'), 'named after the task repo, not the session folder');
+    assert.equal(path.basename(path.dirname(fresh)), 'timers');
+    const first = readMarks(fresh)[0];
+    assert.equal(first.text, `start: the user's request — ${path.basename(repo)}`);
+    assert.ok(Math.abs(Date.now() - first.at.getTime()) < 60000);
+    // report with no folder shows the new timer, not the old one.
+    const rep = cli(state, ['report']);
+    assert.ok(rep.includes(`TIMER folder: ${path.resolve(fresh)}`), rep);
+    assert.ok(!rep.includes(path.resolve(notes)), rep);
+    // No request file is left for a later task to read.
+    assert.equal(fs.existsSync(path.join(state, 'sanad-task-start-' + SID)), false);
+  } finally { for (const d of [state, notes, repo]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('a start that follows a fresh request keeps that request timer', () => {
+  const state = tmp(), before = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = state;
+  try {
+    const first = requestStart(new Date(Date.now() - 600000)).dir;
+    const again = requestStart(new Date(), { unlessFresh: true });
+    assert.equal(again.dir, first);
+    assert.equal(again.ended, '');
+    assert.equal(readMarks(first).length, 1);
+  } finally { process.env.SANAD_STATE_DIR = before; fs.rmSync(state, { recursive: true, force: true }); }
+});
+
+test('a second request with nothing running starts a timer and ends nothing', () => {
   const state = tmp();
   try {
-    execFileSync(process.execPath, [script, 'request'], { encoding: 'utf8', env: { ...process.env, SANAD_STATE_DIR: state } });
-    const written = new Date(fs.readFileSync(path.join(state, 'sanad-task-start-' + SID), 'utf8').trim());
-    assert.ok(Math.abs(Date.now() - written.getTime()) < 60000, String(written));
+    cli(state, ['request']);
+    const out = cli(state, ['request']);
+    assert.match(out, /the timer before/);   // the first request's timer was the active one
+    fs.rmSync(path.join(state, POINTER));
+    assert.doesNotMatch(cli(state, ['request']), /ended/);
   } finally { fs.rmSync(state, { recursive: true, force: true }); }
+});
+
+test('report with no folder reads this session timer and names it; another session does not', () => {
+  const state = tmp(), notes = tmp();
+  try {
+    cli(state, ['mark', notes, 'build']);
+    const out = cli(state, ['report']);
+    assert.ok(out.includes(`TIMER folder: ${path.resolve(notes)}`), out);
+    assert.match(out, /build/);
+    assert.match(cli(state, ['report'], { CLAUDE_CODE_SESSION_ID: 'other-session' }), /no timer for this session/);
+  } finally { for (const d of [state, notes]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('workflow minutes = work minus read and plan and code', () => {
+  const dir = tmp();
+  write(dir, [['10:00', 'step', "start (auto): the user's message — r"], ['10:05', 'step', 'first code edit'], ['10:08', 'step', 'code'],
+    ['10:08', 'step', 'checks before review'], ['10:10', 'step', 'proof'], ['10:11', 'step', 'end']]);
+  // 5 read, 3 code (first edit + code), 2 checks, 1 proof = work 11, minus 8 = 3.0
+  assert.match(report(dir, at('10:30')), /workflow minutes 3\.0 \(work 11/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a stage over its budget prints OVER on its own line; nothing else changes', () => {
+  const dir = tmp();
+  write(dir, [['10:00', 'step', 'proof'], ['10:05', 'step', 'end']]);
+  const text = report(dir, at('10:30'));
+  assert.match(text, /^OVER: proof 5\.0 min, budget 1\.0 min$/m);
+  const without = text.split('\n').filter((l) => !l.startsWith('OVER:'));
+  assert.match(without.join('\n'), /5\.0 min {2}proof/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('proof runs are counted per tool and per tree', () => {
+  const dir = tmp();
+  write(dir, [['10:00', 'step', 'code'], ['10:01', 'side', 'run proof aaa'], ['10:02', 'side', 'run proof aaa'], ['10:03', 'side', 'run proof bbb'], ['10:04', 'step', 'end']]);
+  assert.match(report(dir, at('10:30')), /proof: 3 runs on 2 trees/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a bad budgets.json says so and prints no OVER', () => {
+  const dir = tmp(), bad = path.join(tmp(), 'b.json');
+  write(dir, [['10:00', 'step', 'proof'], ['10:05', 'step', 'end']]);
+  const before = process.env.SANAD_BUDGETS_FILE;
+  try {
+    for (const body of [{ medium: { proof: 0 } }, { medium: { proof: 'x' } }]) {
+      fs.writeFileSync(bad, JSON.stringify(body));
+      process.env.SANAD_BUDGETS_FILE = bad;
+      const text = report(dir, at('10:30'));
+      assert.match(text, /budgets: budgets\.json: "proof" must be a number above 0; no OVER shown/);
+      assert.doesNotMatch(text, /OVER:/);
+    }
+  } finally { if (before === undefined) delete process.env.SANAD_BUDGETS_FILE; else process.env.SANAD_BUDGETS_FILE = before; fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('week adds up the timers of the last 7 days only', () => {
+  const root = tmp();
+  write(path.join(root, 'a'), [['10:00', 'step', 'code'], ['10:04', 'step', 'proof'], ['10:06', 'step', 'end']]);
+  const old = path.join(root, 'old');
+  fs.mkdirSync(old); fs.writeFileSync(path.join(old, 'timer.tsv'), '2026-10-01T10:00:00.000Z\tstep\tcode\n2026-10-01T10:30:00.000Z\tstep\tend\n');
+  const text = week(root, new Date('2026-11-10T00:00:00Z'));
+  assert.match(text, /WEEK: 1 timers · work 6\.0 min · workflow 2\.0 min · proof 2\.0 min/);
+  fs.rmSync(root, { recursive: true, force: true });
 });

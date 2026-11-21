@@ -1,0 +1,6 @@
+{
+  "note": "Seconds per stage and task size. The report prints OVER beside a stage above its budget. It never stops or skips a step.",
+  "small":  { "checks before review": 60,  "proof": 60, "tests": 120, "second look": 90,  "review": 180 },
+  "medium": { "checks before review": 100, "proof": 60, "tests": 180, "second look": 130, "review": 300 },
+  "big":    { "checks before review": 150, "proof": 120, "tests": 300, "second look": 180, "review": 600 }
+}

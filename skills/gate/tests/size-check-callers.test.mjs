@@ -316,3 +316,93 @@ test('a C# property whose accessor block starts on a later line has its readers 
   const d = size(change({ 'Api/Row.cs': dto('set'), ...rowUsers }, { 'Api/Row.cs': dto('init') }));
   assert.equal(d.size, 'small', JSON.stringify(d.callers));
 });
+
+// 2026-11-19 (size check as data): --json holds every caller row; the printed text does not move.
+// The text below is what the script printed for this change before the release, byte for byte: pre-review and the
+// brief read these lines, and a reader once took the "(+N more …)" entry for a function name.
+test('2026-11-19: --json holds every caller row of 40 changed functions; the text is today\'s, byte for byte', () => {
+  const fns = v => Array.from({ length: 40 }, (_, i) => `export function fn${String(i).padStart(2, '0')}(a) {\n  return a + ${v};\n}\n`).join('');
+  const user = "import { fn05, fn39 } from './many';\nexport function run() {\n  fn05(1);\n  fn39(1);\n  fn39(2);\n}\n";
+  const repo = change({ 'src/many.ts': fns(1), 'src/user.ts': user }, { 'src/many.ts': fns(2) });
+  const json = spawnSync(process.execPath, [script, '--repo', repo, '--base', 'base', '--json'], { encoding: 'utf8', env: process.env });
+  assert.equal(json.status, 0, json.stderr);
+  const r = JSON.parse(json.stdout);
+  assert.equal(r.allCallers.length, 40, 'one row per changed function');
+  assert.deepEqual(r.allCallers.map(c => c.name), Array.from({ length: 40 }, (_, i) => `fn${String(i).padStart(2, '0')}`));
+  // The 40th function has two callers and is not among the printed rows: only the data holds it.
+  assert.deepEqual(r.allCallers[39], { name: 'fn39', file: 'src/many.ts', count: 2, tests: 0, where: ['src/user.ts:4', 'src/user.ts:5'] });
+  assert.equal(r.callers.length, 12, 'the printed rows stay capped');
+  assert.equal(r.moreSymbols, 28);
+  const text = spawnSync(process.execPath, [script, '--repo', repo, '--base', 'base'], { encoding: 'utf8', env: process.env });
+  assert.equal(text.status, 0, text.stderr);
+  assert.equal(text.stdout, [
+    'Stack: no known stack files',
+    'SIZE: small (diff) — behavior code with no risk signal',
+    '  roles: one review: fresh eyes',
+    '  callers: fn05 ×1 [src/user.ts:3]; (+28 more changed functions, all analysed; rows not printed)',
+    '  files: 1 (1 code, 80 code lines changed)',
+    '',
+  ].join('\n'));
+});
+
+test('2026-11-19: 30 changed functions are all in allCallers, and two files of one base name keep their own rows', () => {
+  const fns = v => Array.from({ length: 30 }, (_, i) => `export function step${i}(a) {\n  return a + ${v};\n}\n`).join('');
+  const rule = v => `export function validate(a) {\n  return a + ${v};\n}\n`;
+  const use = (dir, n) => `import { validate } from '../${dir}/rule';\nexport function run${dir}() {\n${calls('validate', n)}}\n`;
+  const r = size(change(
+    { 'src/steps.ts': fns(1), 'src/a/rule.ts': rule(1), 'src/b/rule.ts': rule(1), 'src/use/a.ts': use('a', 2), 'src/use/b.ts': use('b', 3) },
+    { 'src/steps.ts': fns(2), 'src/a/rule.ts': rule(2), 'src/b/rule.ts': rule(2) }));
+  const names = new Set(r.allCallers.map(c => c.name));
+  for (let i = 0; i < 30; i++) assert.ok(names.has(`step${i}`), `step${i}`);
+  assert.equal(r.allCallers.length, 32);
+  assert.deepEqual(r.allCallers.filter(c => c.name === 'validate').map(c => [c.file, c.count]).sort(), [['src/a/rule.ts', 2], ['src/b/rule.ts', 3]]);
+  // Every printed row is one of the data rows: the cap only hides, it never changes a row.
+  for (const c of r.callers) assert.ok(r.allCallers.includes(c), c.name);
+});
+
+// 2026-11-20 (promote-students task): a comment line above a member of an exported object was taken as the
+// member's key line, so the member had no name and its callers read as unknown ("groupsApi.(member) x?", big).
+// A changed line is credited to the member that holds it; a comment line belongs to the member below it.
+test('a comment line above a member of an exported object is credited to that member, not an unnamed one', () => {
+  const api = (note, v) => `export const groupsApi = {\n  list: () => client.get('/g'),\n${note}  getMembers: (id) => client.get('/g/' + id + '/members', ${v}),\n};\n`;
+  const files = users12("import { groupsApi } from '../lib/groupsApi';", () => 'groupsApi.getMembers(1)');
+  const few = Object.fromEntries(Object.entries(files).slice(0, 2));
+  for (const note of ['  // all members, unpaged\n', '  /** all members */\n', '  /**\n   * All members,\n   * unpaged.\n   */\n']) {
+    const r = size(change({ 'src/lib/groupsApi.ts': api('', '1'), ...few }, { 'src/lib/groupsApi.ts': api(note, '2') }));
+    assert.equal(r.callers.find(c => c.name === 'groupsApi.(member)'), undefined, JSON.stringify(r.callers));
+    assert.equal(r.callers.find(c => c.name === 'groupsApi.getMembers').count, 2, JSON.stringify(r.callers));
+    assert.equal(r.size, 'small', JSON.stringify(r));
+  }
+});
+
+// 2026-11-20 (fix round): "*name(" in an exported object is a generator member, not a JSDoc star line; a change on its
+// own line is credited to it, never to the member below.
+test('a generator member of an exported object is its own member, not a comment line', () => {
+  const api = (v) => `export const groupsApi = {\n  list: () => 1,\n  *walk(id) { yield ${v}; },\n  after: () => 2,\n};\n`;
+  const files = users12("import { groupsApi } from '../lib/groupsApi';", () => 'groupsApi.walk(1)');
+  const few = Object.fromEntries(Object.entries(files).slice(0, 2));
+  const r = size(change({ 'src/lib/groupsApi.ts': api('1'), ...few }, { 'src/lib/groupsApi.ts': api('2') }));
+  assert.equal(r.callers.find(c => c.name === 'groupsApi.after'), undefined, JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'groupsApi.walk').count, 2, JSON.stringify(r.callers));
+});
+
+// 2026-11-20 (fix round): quoted keys and getters are named members, and a block comment whose lines have no leading
+// star is a comment, never the key of the member above.
+test('a quoted-key member, a getter and a star-less block comment are credited to the right named member', () => {
+  const users = (call) => { const f = users12("import { api } from '../lib/api';", () => call); return Object.fromEntries(Object.entries(f).slice(0, 2)); };
+  const run = (oldApi, newApi, call) => size(change({ 'src/lib/api.ts': oldApi, ...users(call) }, { 'src/lib/api.ts': newApi }));
+  const quoted = (v) => `export const api = {\n  list: () => 1,\n  'get-x': () => ${v},\n  after: () => 2,\n};\n`;
+  let r = run(quoted('1'), quoted('2'), "api['get-x']()");
+  assert.equal(r.callers.find(c => c.name === 'api.(member)'), undefined, JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'api.get-x').count, 2, JSON.stringify(r.callers));
+  assert.equal(r.size, 'small', JSON.stringify(r));
+  const getter = (v) => `export const api = {\n  list: () => 1,\n  get total() { return ${v}; },\n  after: () => 2,\n};\n`;
+  r = run(getter('1'), getter('2'), 'api.total');
+  assert.equal(r.callers.find(c => c.name === 'api.(member)'), undefined, JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'api.total').count, 2, JSON.stringify(r.callers));
+  const note = (v) => `export const api = {\n  list: () => 1,\n  /*\n  all members, unpaged ${v}\n  */\n  getMembers: () => ${v},\n};\n`;
+  r = run(note('1'), note('2'), 'api.getMembers()');
+  assert.equal(r.callers.find(c => c.name === 'api.list'), undefined, JSON.stringify(r.callers));
+  assert.equal(r.callers.find(c => c.name === 'api.getMembers').count, 2, JSON.stringify(r.callers));
+  assert.equal(r.size, 'small', JSON.stringify(r));
+});

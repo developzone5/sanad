@@ -272,3 +272,54 @@ test("the wait for the user's go is marked as waiting, not as work", () => {
   g.write([said('10:00', 'fix the export'), toolResult('10:20'), said('10:20', 'and the title too')]);
   assert.deepEqual(allMarks(g.start('10:21')).map(([, w]) => w), [START, 'first code edit']);
 });
+
+// 2026-11-19 (P7): a task that never reached its gate no longer swallows the next task's marks.
+const timerScript = path.resolve(hooks, '..', 'skills', 'gate', 'scripts', 'sanad-timer.mjs');
+test('a new request ends the unfinished timer, and the next task has a timer of its own from the request', () => {
+  const f = fixture();
+  f.write([said('10:00', 'fix the export')]);
+  const first = f.start('10:05');
+  assert.ok(first);
+  const env = { ...process.env, SANAD_STATE_DIR: f.state, CLAUDE_CODE_SESSION_ID: SID };
+  execFileSync(process.execPath, [timerScript, 'request', '--repo', path.dirname(f.edit.tool_input.file_path)], { env, encoding: 'utf8' });
+  assert.equal(allMarks(first).pop()[1], 'end (auto: a new task was routed)');
+  const second = fs.readFileSync(path.join(f.state, 'sanad-timer-active-' + SID), 'utf8').trim();
+  assert.ok(second && path.resolve(second) !== path.resolve(first), 'request made a new active timer');
+  assert.equal(allMarks(second)[0][1], "start: the user's request — repo");
+  // A code edit after the request stamps the new timer; it starts no third one (an active timer is kept).
+  f.write([said('10:00', 'fix the export'), said('11:00', 'now the report page')]);
+  assert.equal(f.start('11:05'), null, 'no second new timer');
+  const { autoStage } = createRequire(import.meta.url)(path.join(hooks, 'lib', 'timer-idle.cjs'));
+  assert.equal(autoStage(f.edit, new Date(), { isCode }), 'code');
+  assert.equal(allMarks(second).pop()[1], 'code', 'the stamp landed in the request timer');
+  assert.equal(allMarks(first).pop()[1], 'end (auto: a new task was routed)', 'the first timer got no new marks');
+  assert.equal(fs.readdirSync(path.join(f.state, 'timers')).length, 2, 'two timers in all');
+});
+
+// 2026-11-20: a task that lives in another git work tree than the session's folder (cwd) still gets a timer.
+test('an edit in a git work tree outside the session folder starts a timer named after that tree', () => {
+  const f = fixture();
+  const other = path.join(path.dirname(path.dirname(f.state)), 'other-tree');
+  fs.mkdirSync(other, { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: other, windowsHide: true });
+  const edit = { ...f.edit, tool_input: { file_path: path.join(other, 'sub', 'b.cs') } };
+  f.write([said('10:00', 'fix the export')]);
+  const dir = autoStart(edit, at('10:05'), { isCode });
+  assert.ok(dir && /-other-tree$/.test(dir), String(dir));
+  // A folder that is no repository still starts nothing.
+  const bare = fs.mkdtempSync(path.join(scratch, 'bare-'));
+  const g = fixture();
+  assert.equal(autoStart({ ...g.edit, tool_input: { file_path: path.join(bare, 'c.cs') } }, at('10:05'), { isCode }), null);
+});
+
+test('a proof start adds a run line with the tree id', () => {
+  const { autoStage } = createRequire(import.meta.url)(path.join(hooks, 'lib', 'timer-idle.cjs'));
+  const f = fixture();
+  f.write([said('10:00', 'fix the export')]);
+  const dir = f.start('10:05');
+  const input = { session_id: SID, transcript_path: f.transcript, cwd: path.dirname(f.edit.tool_input.file_path), tool_name: 'Bash', tool_input: { command: 'node /x/gate/scripts/red-proof.mjs --test a' } };
+  assert.equal(autoStage(input, at('10:10'), { isCode }), 'proof');
+  assert.equal(autoStage(input, at('10:11'), { isCode }), '');
+  const runs = fs.readFileSync(path.join(dir, 'timer.tsv'), 'utf8').split(/\r?\n/).filter((l) => /\tside\trun proof /.test(l));
+  assert.equal(runs.length, 2, 'each start is a run, though the step is added once');
+});

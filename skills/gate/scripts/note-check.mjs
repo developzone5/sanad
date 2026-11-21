@@ -105,8 +105,16 @@ export const idLine = (id, generation = 0) => 'BRIEF ' + id + (generation ? ' g'
 export const PROMPT_START = 'Seat: Note check, before any fix.';
 // A K brief: its answer is "REFUTED K1", and the guards read that as NOTE 1, which is another note. So this prompt
 // is not the note check seat to them: a K answer never makes a NOTE number refutable.
+// 2026-11-19: K numbers are only for a call with no session log of these notes. With the log of these notes the
+// brief always uses the guards' NOTE numbers (see writeBrief).
 export const PROMPT_START_K = 'Check each K note, before any fix.';
-export const REFUTED_RULE = 'Refuted notes are not fixed now: ask the user about them together, with this evidence and a recommended answer; their words close each one (rule 5).';
+// 2026-11-19: the old text said "ask the user about them together". With the guards' numbers that is stale since the
+// note check may refute (2026-11-17): a refuted note is closed by its own refuted line, and only a Blocker or a
+// Question goes to the user. With K numbers the guards do not take the check as a refutation, so the user is still
+// asked: now, when the answer arrives, not later with other questions.
+export const REFUTED_RULE = "Refuted notes are not fixed: a note the note check refuted is closed by its own line `NOTE <n>: refuted — <this evidence>` (never a Blocker or a Question: the user's words close those, rule 5). The ship brief lists every refuted note.";
+export const REFUTED_RULE_K = 'Refuted notes are not fixed now: ask the user now, with this evidence and a recommended answer; their words close each one (rule 5).';
+const refutedRule = (rows) => (rows.length && rows.every((r) => r.guard) ? REFUTED_RULE : REFUTED_RULE_K);
 // The hooks number notes their own way (see collectNotes): an author who writes "NOTE 2: …" for K2 names another note.
 export const K_RULE = 'K numbers belong to this brief, not to NOTE numbers: close each note under its own NOTE <n>, found by its text.';
 
@@ -154,11 +162,153 @@ export function loadReportNotes(file = PARSER) { return loadScan(file).reportNot
 // of the repo's project folder (the slug is the absolute repo path with every non-alphanumeric character replaced
 // by "-"; SANAD_PROJECTS_DIR replaces <home>/.claude/projects). '' when none is found: the K numbering then stands.
 export function transcriptCandidates(repo) {
-  const folder = path.join(process.env.SANAD_PROJECTS_DIR || path.join(os.homedir(), '.claude', 'projects'), path.resolve(repo).replace(/[^A-Za-z0-9]/g, '-'));
-  let names;
-  try { names = fs.readdirSync(folder).filter((n) => /\.jsonl$/i.test(n)); } catch { return []; }
-  return names.map((n) => ({ file: path.join(folder, n), at: fs.statSync(path.join(folder, n)).mtimeMs })).sort((a, b) => b.at - a.at).map((x) => x.file);
+  const root = process.env.SANAD_PROJECTS_DIR || path.join(os.homedir(), '.claude', 'projects');
+  const slug = (p) => path.resolve(p).replace(/[^A-Za-z0-9]/g, '-');
+  const folder = path.join(root, slug(repo));
+  const siblings = siblingFolders(repo, root, slug, folder);
+  // 2026-11-19: when the host names this session (CLAUDE_CODE_SESSION_ID) and its log is there, it is the only
+  // candidate: the newest file can be another session on the same repository, with other numbers.
+  // 2026-11-20: the log is looked for in the task's folder AND in every sibling work tree's folder.
+  const own = String(process.env.CLAUDE_CODE_SESSION_ID || '').replace(/[^\w.-]/g, '');
+  if (own) {
+    for (const dir of [folder, ...siblings]) {
+      const file = path.join(dir, own + '.jsonl');
+      if (isFile(file)) return [file];
+    }
+  }
+  let names = null;
+  try { names = fs.readdirSync(folder).filter((n) => /\.jsonl$/i.test(n)); } catch { names = null; }
+  const first = names ? newestFirst(names.map((n) => path.join(folder, n))) : [];
+  return [...first, ...siblingTranscripts(repo, siblings)];
 }
+const newestFirst = (files) => files.map((file) => { let at = 0; try { at = fs.statSync(file).mtimeMs; } catch { /* gone */ } return { file, at }; }).sort((a, b) => b.at - a.at).map((x) => x.file);
+// 2026-11-20: sessions often run in one work tree while the task's code is in another work tree of the same repository.
+// The project folders of the other work trees. Any git failure gives none.
+function siblingFolders(repo, root, slug, ownFolder) {
+  let listing;
+  try { listing = execFileSync('git', ['-C', path.resolve(repo), 'worktree', 'list', '--porcelain'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 }); } catch { return []; }
+  const seen = new Set([ownFolder.toLowerCase()]);
+  const out = [];
+  for (const line of listing.split(/\r?\n/)) {
+    if (!line.startsWith('worktree ')) continue;
+    const dir = path.join(root, slug(line.slice('worktree '.length).trim()));
+    if (seen.has(dir.toLowerCase())) continue;
+    seen.add(dir.toLowerCase());
+    out.push(dir);
+  }
+  return out;
+}
+// The logs of the other work trees are added after the repository's own logs, newest first, and only those that
+// mention the task's repository path (any other log is another task's session).
+function siblingTranscripts(repo, folders) {
+  const found = [];
+  const needles = pathNeedles(repo);
+  for (const dir of folders) {
+    let names;
+    try { names = fs.readdirSync(dir).filter((n) => /\.jsonl$/i.test(n)); } catch { continue; }
+    for (const n of names) found.push(path.join(dir, n));
+  }
+  return newestFirst(found).filter((file) => fileMentions(file, needles));
+}
+// The repository path in the three spellings a log can hold it, lower case, as latin1 text (one byte per character).
+function pathNeedles(repo) {
+  const p = path.resolve(repo).replace(/[\\/]+$/, '');
+  const fwd = p.replace(/\\/g, '/');
+  const back = p.replace(/\//g, '\\');
+  return [...new Set([fwd, back, back.replace(/\\/g, '\\\\')])].map((x) => Buffer.from(x, 'utf8').toString('latin1').toLowerCase());
+}
+// A path mention counts only when the next character is not a letter, digit, "-", "_" or "." (a quote, a slash,
+// a backslash, a space or the end). So ".../EduQuest" does not match ".../EduQuest-other". Bytes above 127 count as letters.
+const PATH_CONTINUES = { test: (c) => /[a-z0-9_.-]/.test(c) || c.charCodeAt(0) > 127 };
+function mentionIn(text, needles, atEnd) {
+  for (const x of needles) {
+    for (let i = text.indexOf(x); i !== -1; i = text.indexOf(x, i + 1)) {
+      const end = i + x.length;
+      if (end >= text.length) { if (atEnd) return { hit: true }; return { hit: false, from: i }; }
+      if (!PATH_CONTINUES.test(text[end])) return { hit: true };
+    }
+  }
+  return { hit: false };
+}
+// True at the first chunk that holds one of the needles. 1 MB chunks, overlapped so a hit across a cut is found
+// (a hit at the very end of a chunk waits for the next character).
+function fileMentions(file, needles) {
+  const CHUNK = 1024 * 1024, keep = Math.max(...needles.map((x) => x.length));
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(CHUNK);
+    let tail = '';
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, CHUNK, null);
+      const atEnd = n <= 0;
+      const text = tail + (atEnd ? '' : buf.toString('latin1', 0, n).toLowerCase());
+      if (mentionIn(text, needles, atEnd).hit) return true;
+      if (atEnd) return false;
+      tail = text.slice(-keep);
+    }
+  } catch { return false; } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ } }
+}
+// 2026-11-20: the Codex CLI keeps its sessions in <codex home>/sessions/<year>/<month>/<day>/rollout-<time>-<id>.jsonl
+// (SANAD_CODEX_DIR replaces <home>/.codex). Line shapes seen on this PC:
+//   first line   { type: 'session_meta', payload: { cwd, source, ... } }   source is a string for a user session, an object for a helper agent's
+//   newer files  { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text }] } } }
+//   older files  { type: 'event_msg', payload: { type: 'user_message', message: '<text>' } }
+// Only those two line kinds are the owner's own typed messages. A response_item with role 'user' is not: it also holds
+// the injected instructions. Helper agents' sessions are skipped: their "user" is the parent agent.
+const sameFolder = (a, b) => String(a).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === String(b).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+function codexFiles(dir) {
+  const out = [];
+  const list = (d) => { try { return fs.readdirSync(d, { withFileTypes: true }); } catch { return []; } };
+  for (const y of list(dir).filter((e) => e.isDirectory()).map((e) => e.name).sort().reverse())
+    for (const m of list(path.join(dir, y)).filter((e) => e.isDirectory()).map((e) => e.name).sort().reverse())
+      for (const d of list(path.join(dir, y, m)).filter((e) => e.isDirectory()).map((e) => e.name).sort().reverse())
+        for (const f of list(path.join(dir, y, m, d)).filter((e) => e.isFile() && /\.jsonl$/i.test(e.name)).map((e) => e.name).sort().reverse()) out.push(path.join(dir, y, m, d, f));
+  return out;
+}
+// The working folder and the kind of the session, from the first line only (cheap: the first chunk of the file).
+function codexMeta(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(16384);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const head = buf.subarray(0, n).toString('utf8');
+    const cwd = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(head);
+    const helper = /"source":\{/.test(head);
+    return cwd ? { cwd: JSON.parse('"' + cwd[1] + '"'), helper } : null;
+  } catch { return null; } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ } }
+}
+const MAX_CODEX_FILES = 300;
+// The newest Codex session of this repository: its file, or ''.
+export function codexSession(repo) {
+  const dir = path.join(process.env.SANAD_CODEX_DIR || path.join(os.homedir(), '.codex'), 'sessions');
+  for (const file of codexFiles(dir).slice(0, MAX_CODEX_FILES)) {
+    const meta = codexMeta(file);
+    if (meta && !meta.helper && sameFolder(meta.cwd, path.resolve(repo))) return file;
+  }
+  return '';
+}
+// The owner's typed messages of that session, in order. [] when there is none.
+export function codexUserMessages(repo) {
+  const file = codexSession(repo);
+  if (!file) return [];
+  const out = [];
+  let rows; try { rows = fs.readFileSync(file, 'utf8').split('\n'); } catch { return []; }
+  for (const row of rows) {
+    if (!row.trim()) continue;
+    let o; try { o = JSON.parse(row); } catch { continue; }
+    const p = o && o.type === 'event_msg' && o.payload;
+    if (!p) continue;
+    if (p.type === 'user_message' && typeof p.message === 'string') out.push(p.message);
+    else if (p.type === 'item_completed' && p.item && p.item.type === 'UserMessage' && Array.isArray(p.item.content)) {
+      const text = p.item.content.filter((c) => c && c.type === 'text' && typeof c.text === 'string').map((c) => c.text).join('\n');
+      if (text) out.push(text);
+    }
+  }
+  return out;
+}
+
 export function findTranscript({ transcript, repo }) {
   if (transcript !== undefined) {
     if (!isFile(transcript)) throw usage('no such transcript: ' + transcript);
@@ -244,6 +394,29 @@ export function collectNotes(files, reportNotes) {
 }
 
 export const tag = (k) => (k.guard ? 'NOTE ' : 'K') + k.n;
+
+// 2026-11-19 (groups): the file and line a note names ("src/save.ts:12"), '' when it names none. Day 2 had 27 notes
+// about 13 problems: notes that name the same place are shown as one group, and each keeps its own number and text.
+const PLACE = /((?:[A-Za-z]:)?[\w@.\-\/\\]+\.[A-Za-z]\w{0,9})[`*_"']*:(\d+)/;
+export function placeOf(text) {
+  const m = PLACE.exec(String(text || ''));
+  return m ? slash(m[1]).replace(/^(?:\.\/)+/, '') + ':' + m[2] : '';
+}
+// The groups of a list of notes ({ n, text }): two or more notes with the same place (no case), numbered G1.. by
+// their first note: [{ id, place, notes: [n] }]. A group hides nothing: it only names note numbers.
+export function placeGroups(notes) {
+  const byPlace = new Map();
+  for (const k of notes) {
+    const place = placeOf(k.text);
+    if (!place) continue;
+    const key = place.toLowerCase();
+    if (!byPlace.has(key)) byPlace.set(key, { place, notes: [] });
+    byPlace.get(key).notes.push(k.n);
+  }
+  return [...byPlace.values()].filter((g) => g.notes.length > 1).map((g, i) => ({ id: 'G' + (i + 1), place: g.place, notes: g.notes }));
+}
+export const GROUP_RULE = 'Notes that name the same file and line are one group. They can be one finding or different ones: read every text, and answer one line per note number. You may split a group: two notes of it can get different verdicts.';
+export const groupLine = (g, guard) => `${g.id} · ${g.place} · ${g.notes.map((n) => (guard ? 'NOTE ' : 'K') + n).join(', ')}`;
 // asks (2026-11-18): a Gap or Bug line that asks the user to decide is marked on its line, so --record treats it as a Question.
 export const ASKS_MARK = ' (asks the user)';
 const kindText = (k) => k.kind + (k.asks && !/^Question$/i.test(k.kind) ? ASKS_MARK : '');   // a Question needs no mark
@@ -412,6 +585,8 @@ export function buildBrief({ repo, notes, transcript, code, generation = 0 }) {
   const guard = notes.length > 0 && notes.every((k) => k.guard);
   const lines = notes.flatMap(noteLines);
   const id = briefId(repo, lines, code && code.code);
+  // The groups stand above the notes: the id is made of the note lines only, so a group line never changes it.
+  const groups = placeGroups(notes);
   return [
     '# Note check — before any fix', '',
     `Brief id: ${id}`,
@@ -426,6 +601,7 @@ export function buildBrief({ repo, notes, transcript, code, generation = 0 }) {
     'It names the brief you read: an answer without it, or with another id, is not recorded.',
     ...(generation ? [`Write the run number after the id, as ${idLine(id, generation)}: an answer for an older run of this check is not recorded.`] : []), '',
     ...(repo ? ['A file a note names is relative to the repo above.', ''] : []),
+    ...(groups.length ? ['## Groups', '', GROUP_RULE, ...groups.map((g) => groupLine(g, guard)), ''] : []),
     '## Notes', '',
     ...lines, '',
   ].join('\n');
@@ -484,11 +660,15 @@ export function writeBrief({ notes, reports, repo, transcript }) {
     const r = fromReports.find((x) => oneLine(x.text) === g.text);
     if (r && r.cut) Object.assign(g, { cut: r.cut, whole: r.whole, from: r.from });
   }
-  const list = open.length ? open : fromReports;
+  // 2026-11-19: with the session log of these notes the brief always uses NOTE numbers. When every note of the
+  // reports is a note of that session and none is open, nothing is left to check (they came back as K notes before).
+  // A log that does not hold these notes is not their log: the K numbering stands, as with no log.
+  const closed = found && !open.length && sessionHolds(found, scan, fromReports) ? fromReports : [];
+  const list = open.length ? open : closed.length ? [] : fromReports;
   const numbering = open.length ? found : '';
   const removed = [REPORT, LIST, ...(list.length ? [] : [BRIEF])].filter((name) => removeOld(path.join(notes, name)));
   removeOld(path.join(notes, FILES));   // the file fingerprint of the last brief goes with it, silently
-  if (!list.length) return { brief: '', notes: list, removed, transcript: '', unmatched: [], skipped, bound: true };
+  if (!list.length) return { brief: '', notes: list, removed, transcript: '', unmatched: closed, skipped, bound: true };
   const brief = path.join(notes, BRIEF);
   const code = repo === undefined ? { top: '', code: '' } : codeState(repo);
   // 2026-11-18: every --brief run has its own generation, and a bound one saves the fingerprint of the repository's files.
@@ -594,7 +774,9 @@ export function renderCheck({ brief, report, recorded, rows }) {
     `Report: ${slash(report)}`,
     `Recorded: ${recorded}`, '',
     'No note is closed here (rule 5). CONFIRMED: fix it with a test. UNSURE: not proven either way; check the missing fact first (a reproducer, or the file the checker could not read), fix it only when the fact holds, and a product choice goes to the user.',
-    'REFUTED: build no fix now; ask the user with this evidence and a recommended answer, and their words close it.',
+    rows.length && rows.every((r) => r.guard)
+      ? 'REFUTED: build no fix; the note is closed by its own refuted line with this evidence (never a Blocker or a Question: the user decides those).'
+      : 'REFUTED: build no fix now; ask the user with this evidence and a recommended answer, and their words close it.',
     ...(rows.some(isQuestion) ? [QUESTION_LIST_RULE] : []),
     rows.length && rows.every((r) => r.guard) ? GUARD_RULE : K_RULE, '',
     ...rows.map(checkLine), '',
@@ -747,7 +929,7 @@ function main() {
       if (!reports.length) throw usage('--reports names no file');
       const b = writeBrief({ notes, reports, repo: o.repo === undefined ? undefined : path.resolve(o.repo), transcript: o.transcript === undefined ? undefined : path.resolve(o.transcript) });
       const removed = b.removed.length ? `REMOVED: ${b.removed.join(', ')} (the last check's files: a new --brief starts a new check)\n` : '';
-      if (!b.notes.length) { process.stdout.write('NOTE CHECK: no note to check\n' + removed); return; }
+      if (!b.notes.length) { process.stdout.write('NOTE CHECK: no note to check\n' + b.unmatched.map((u) => `NOT AN OPEN NOTE OF THE SESSION (already closed there): ${u.kind} · ${oneLine(u.text)}\n`).join('') + removed); return; }
       const report = quote(slash(path.join(notes, REPORT)));
       process.stdout.write(`NOTE CHECK BRIEF: ${slash(b.brief)} · ${b.notes.length} note(s)${b.transcript ? ` · the guards' NOTE numbers, from ${slash(b.transcript)}` : ''}\n` +
         launchLine(b.brief, b.notes.every((k) => k.guard)) + '\n' +
@@ -769,9 +951,16 @@ function main() {
       if (unbound) process.stderr.write(NOT_BOUND + '\n');
       process.stdout.write(`NOTE CHECK: ${rows.length} note(s) — ${count('CONFIRMED')} confirmed, ${refuted.length} refuted, ${count('UNSURE')} unsure\n` +
         rows.map(ask).join('') +
+        // 2026-11-19 (groups): each group with the verdict of every number of it. The ready answer of each refuted
+        // number is its own THE AUTHOR MAY NOW WRITE line above; a split group is said to be split.
+        placeGroups(rows).map((g) => {
+          const of = g.notes.map((n) => rows.find((r) => r.n === n));
+          const split = new Set(of.map((r) => r.verdict)).size > 1;
+          return `GROUP ${g.id} · ${g.place} · ${of.map((r) => tag(r) + ' ' + r.verdict).join(', ')} — ${split ? 'split: the checker judged these texts differently' : 'one verdict'}; answer every number of the group by its own verdict\n`;
+        }).join('') +
         (unshown.length ? `NOT SHOWN UNCHANGED: ${unshown.join(', ')} — nothing shows the code it cites unchanged since the brief (see the label in the list): its REFUTED does not stand; no author line\n` : '') +
         (changedNotes.length ? `CHANGED SINCE THE BRIEF: ${changedNotes.join(', ')} — the code it cites changed: check again (its REFUTED does not stand; no author line)\n` : '') +
-        (refuted.some((r) => !isQuestion(r)) ? REFUTED_RULE + '\n' : '') +
+        (refuted.some((r) => !isQuestion(r)) ? refutedRule(rows) + '\n' : '') +
         (rows.length && rows.every((r) => r.guard) ? GUARD_RULE : K_RULE) + '\n' +
         `WRITTEN: ${slash(out)}\n`);
     }

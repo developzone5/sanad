@@ -19,6 +19,9 @@
 // session had before (2026-11-17, audit S7), so the next task is never counted from what was typed up to its end. The task starts at the time
 // sanad-timer.mjs request wrote when Sanad routed it (sanad-task-start-<session id>); with none, the start is
 // a guess from the typed messages and the timer says "estimate".
+// 2026-11-20: `request` now starts the new timer itself (it is then the active one, so no edit starts another):
+// a task in another work tree than the session's folder had no timer for 45 minutes. The request file is
+// still read here when an older script wrote one.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -275,7 +278,14 @@ function repoTop(file) {
   while (dir && !fs.existsSync(dir)) { const up = path.dirname(dir); if (up === dir) return ''; dir = up; }
   try {
     return require('child_process').execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, windowsHide: true }).trim();
-  } catch (e) { return ''; }
+  } catch (e) {
+    // Git did not answer (slow, a safety setting): the nearest folder with a .git entry (a folder, or the
+    // file a linked work tree has) is the top. A folder with none is no repository: no timer.
+    for (let d = dir; ; d = path.dirname(d)) {
+      if (fs.existsSync(path.join(d, '.git'))) return d;
+      if (path.dirname(d) === d) return '';
+    }
+  }
 }
 
 /** At a tool call (check-lock-guard): a code edit with no active timer starts one. Returns its folder, or null. */
@@ -343,8 +353,22 @@ function stageOf(input, isCode) {
     if (runs('red-proof')) return 'proof';
     if (runs('pre-review')) return 'checks before review';
     if (runs('evidence')) return 'tests';
+    // 2026-11-19: the places list, the second look and the note check are stages too.
+    if (runs('places')) return 'places';
+    if (runs('siblings')) return 'second look';
+    if (runs('note-check') || runs('notes')) return 'notes';
   }
   return editedCodeFiles(input, isCode).length ? 'code' : '';
+}
+
+// A short id of the tree a run starts on: HEAD plus a hash of the uncommitted diff. '?' when git does not answer.
+function treeId(cwd) {
+  try {
+    const git = (args) => require('child_process').execFileSync('git', ['-C', cwd || process.cwd(), ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+    const head = git(['rev-parse', 'HEAD']).trim();
+    const diff = git(['diff', 'HEAD']);
+    return head.slice(0, 8) + (diff ? '+' + require('crypto').createHash('sha1').update(diff).digest('hex').slice(0, 8) : '');
+  } catch (e) { return '?'; }
 }
 
 /** At a tool call (check-lock-guard): a new stage of the task marks itself. Returns the stage marked, or ''. */
@@ -357,6 +381,9 @@ function autoStage(input, now = new Date(), { isCode } = {}) {
   const current = lastStage(t.file);
   // The timer's own first marks are the code stage already. A wait someone marked by hand ends here.
   const same = current === stage || (stage === 'code' && /^(?:first code edit|start \(auto\))/.test(current));
+  // 2026-11-19: every proof or pre-review start is a "run" side line with the tree id, so the report can tell
+  // a retry from overlapping work. The step itself is still added once.
+  if (stage === 'proof' || stage === 'checks before review') append(t.file, 'side', `run ${stage.split(' ')[0]} ${treeId(input.cwd)}`, now);
   if (same && t.last.kind !== 'wait') return '';
   append(t.file, 'step', stage, now);
   return stage;

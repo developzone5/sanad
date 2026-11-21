@@ -21,6 +21,8 @@
 // The last line and the exit code:
 //   0  PR CHECKS: PASS — required: <names> passed on <head commit, 10 characters> (<n> other passed, <m> skipped) · <url>
 //   3  PR CHECKS: NOT PROVEN — required check "<name>" was skipped
+//      PR CHECKS: NOT PROVEN — the required checks passed on <head>, but <n> owed item(s) are still open (<names>)
+//         (each one on its own `OWED — <item>: <why>` line above; --notes names the task, else this work tree's task)
 //      PR CHECKS: NOT PROVEN — <n> passed, <m> skipped, but no required check is named: run again with --require ...
 //   4  PR CHECKS: PENDING — required check "<name>" never reported (seen: <listed names>)
 //   1  PR CHECKS: FAIL — <failed check names> · <url>          (the failing log lines are above it)
@@ -51,7 +53,7 @@ const EMPTY_LOOKS = 3;      // looks with no check before "none" is believed
 const FAILED_ASKS = 3;      // failed calls in a row before the watch gives up
 const MAX_TIMEOUT_MIN = 24 * 60;
 const MAX_INTERVAL_SEC = 60 * 60;
-const USAGE = 'Usage: node pr-watch.mjs [--repo <path>] [--pr <number>] [--require "<name>[,<name>...]"] [--timeout-min <n, default 30>] [--interval-sec <n, default 30>]';
+const USAGE = 'Usage: node pr-watch.mjs [--repo <path>] [--notes <task notes folder>] [--pr <number>] [--require "<name>[,<name>...]"] [--timeout-min <n, default 30>] [--interval-sec <n, default 30>]';
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -382,7 +384,7 @@ const head = (pr) => String(pr.headRefOid || '').slice(0, 10) || 'an unknown com
 export const oneLine = (text) => String(text).replace(/[\u0000-\u0008\u000a-\u001f\u007f\u2028\u2029]+/g, ' ');
 
 // Watch one pull request to its result. Prints one line at a time through `print`; returns the exit code.
-export async function watch({ repo, pr, timeoutMin, intervalSec, require = [] }, print = (line) => process.stdout.write(line + '\n')) {
+export async function watch({ repo, pr, timeoutMin, intervalSec, require = [], owed = [] }, print = (line) => process.stdout.write(line + '\n')) {
   const out = (line) => print(oneLine(line));
   const first = readPr(repo, pr);
   if (first.missing) { out('PR CHECKS: NO PR — push the branch and open the PR first'); return EXIT.none; }
@@ -588,6 +590,13 @@ export async function watch({ repo, pr, timeoutMin, intervalSec, require = [] },
     }
     const keys = new Set(req.map((x) => x.key));
     const otherPassed = t.pass.filter((c) => !keys.has(keyOf(c.name))).length;
+    // 2026-11-19: a push went out with the proof at 7 of 48, and green CI read as done. A check the user
+    // pushed without stays owed until its own record exists: CI never clears it, and this is no PASS.
+    if (owed.length) {
+      for (const o of owed) out(`  OWED — ${o.id}: ${o.why}`);
+      out(`PR CHECKS: NOT PROVEN — the required checks passed on ${head(info)}, but ${owed.length} owed item${owed.length === 1 ? ' is' : 's are'} still open (${owed.map((o) => o.id).join(', ')}): a green CI run never clears an owed check · ${info.url}${already(info)}`);
+      return EXIT.none;
+    }
     out(`PR CHECKS: PASS — required: ${req.map((x) => x.name).join(', ')} passed on ${head(info)} (${otherPassed} other passed, ${t.skip.length} skipped) · ${info.url}${already(info)}${configUnread.length === 2 ? " (GitHub's configured required list could not be read)" : configUnread.length ? ` (GitHub's configured required list could not be read from: ${configUnread.join(', ')})` : ''}`);
     return EXIT.pass;
   }
@@ -618,8 +627,20 @@ export async function watch({ repo, pr, timeoutMin, intervalSec, require = [] },
   }
 }
 
+// What a push the user ordered left open (sanad.mjs owed), read from the task's records. With no task for
+// this work tree, or a list that cannot be read, nothing is owed here: the watch itself never fails on it.
+export async function owedOf({ repo, notes = '' }) {
+  try {
+    const { readFacts, owedItems, loadNotesTools } = await import('./sanad.mjs');
+    await loadNotesTools();
+    const facts = readFacts({ repo, notes, deep: true });
+    if (!facts.notesDir) return [];
+    return (await owedItems(facts)).items.map((i) => ({ id: i.id, why: i.why }));
+  } catch { return []; }
+}
+
 export function parseArgs(argv) {
-  const o = { repo: '.', pr: null, timeoutMin: 30, intervalSec: 30, require: [] };
+  const o = { repo: '.', pr: null, timeoutMin: 30, intervalSec: 30, require: [], notes: '' };
   const number = (key, value, max) => {
     const n = Number(value);
     if (!Number.isFinite(n) || n <= 0 || n > max) throw new Error(`${key} needs a number above 0, at most ${max}`);
@@ -627,8 +648,9 @@ export function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i], value = argv[i + 1];
-    if (!['--repo', '--pr', '--require', '--timeout-min', '--interval-sec'].includes(key) || value === undefined || value === '') throw new Error('Unknown or empty option: ' + key);
+    if (!['--repo', '--notes', '--pr', '--require', '--timeout-min', '--interval-sec'].includes(key) || value === undefined || value === '') throw new Error('Unknown or empty option: ' + key);
     if (key === '--repo') o.repo = value;
+    else if (key === '--notes') o.notes = path.resolve(value);
     else if (key === '--require') {
       const names = requiredFrom([value]);
       if (!names.length) throw new Error('--require needs at least one check name');
@@ -654,7 +676,7 @@ if (isMain(import.meta.url)) {
   }
   if (options) {
     // A crash must never look like a red check (exit 1): it is "could not ask".
-    try { process.exitCode = await watch(options); }
+    try { process.exitCode = await watch({ ...options, owed: await owedOf(options) }); }
     catch (error) {
       process.stdout.write(oneLine('PR CHECKS: could not ask GitHub — ' + (error && error.message ? error.message : String(error))) + '\n');
       process.exitCode = EXIT.error;

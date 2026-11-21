@@ -136,7 +136,7 @@ function tokenize(seg, tool) {
 // Strip env-var prefixes and benign wrappers so the real program is at col 0.
 function normalize(seg) {
   return String(seg).trim()
-    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/, '')
+    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*/, '')
     .replace(/^(?:sudo|time|env|command|timeout\s+\d+[smh]?)\s+/, '')
     .replace(/^&\s+/, '');                          // PowerShell call operator
 }

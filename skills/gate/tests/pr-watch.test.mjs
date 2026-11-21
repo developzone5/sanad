@@ -1086,3 +1086,21 @@ test('f1 must not change: both answers green is a PASS', () => {
   assert.equal(r.status, 0, r.all);
   assert.equal(r.last, `PR CHECKS: PASS — required: unit passed on 0123456789 (0 other passed, 0 skipped) · ${URL}`);
 });
+
+// 2026-11-19: a push went out with the proof at 7 of 48, and the green CI run read as done.
+test('a green required check with an owed proof names the owed proof and is not PASS', () => {
+  const sc = scenario({ checks: [[check('unit', 'pass', 901)]] });
+  const notes = path.join(path.dirname(sc.file), 'notes');
+  fs.mkdirSync(notes, { recursive: true });
+  fs.writeFileSync(path.join(notes, 'decisions.json'), JSON.stringify({ version: 1, decisions: [{ id: 'D1', kind: 'push-now', question: 'push before the proof ends?', words: 'push it now, the proof can finish after', source: 'user', notes: [], at: '2026-11-19T10:00:00.000Z' }] }));
+  const r = run(sc, '--require', 'unit', '--notes', notes);
+  assert.equal(r.status, 3, r.all);
+  assert.match(r.stdout, /^  OWED — proof: /m);
+  assert.match(r.last, /^PR CHECKS: NOT PROVEN — the required checks passed on 0123456789, but \d+ owed items are still open \(.*proof.*\): a green CI run never clears an owed check/);
+  assert.doesNotMatch(r.stdout, /PR CHECKS: PASS/);
+  // With no push-now decision the same run is a PASS, as before.
+  fs.rmSync(path.join(notes, 'decisions.json'));
+  const ok = run(scenario({ checks: [[check('unit', 'pass', 901)]] }), '--require', 'unit', '--notes', notes);
+  assert.equal(ok.status, 0, ok.all);
+  assert.match(ok.last, /^PR CHECKS: PASS — required: unit passed/);
+});
