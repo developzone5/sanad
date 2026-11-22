@@ -1030,6 +1030,44 @@ export function enclosingFunction(lines, at) {
   return defNameAt(lines, at) || enclosingDef(lines, at, at + 1, { wide: true }).name;
 }
 
+// 2026-11-22 (the review brief carries the code): the function line `at` (0-based) belongs to, with its span:
+// { name, start, end } (0-based, end included), or null at the top level. The body ends where its curly braces
+// close again; a body with no braces (`=> value;`, an expression-bodied C# member) ends at its first line that
+// ends with `;` while every bracket is closed. A signature over several lines (CSharpier's `)` on its own line,
+// then `{`) is part of the span. A one-line body (`function a() { return 1; }`) ends on its own line. A C# attribute
+// line belongs to the member under it; a line inside an object literal's member (`save: (id) => { … }`) to that
+// member (`api.save`).
+const curlyCount = (line) => {
+  const code = String(line || '').replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '').replace(/\/\/.*$/, '');
+  let open = 0, close = 0;
+  for (const c of code) { if (c === '{') open++; else if (c === '}') close++; }
+  return { open, close };
+};
+export function functionSpan(lines, at) {
+  let name = defNameAt(lines, at), start = name ? at : -1;
+  if (!name) {
+    const under = /^\s*\[/.test(String(lines[at] || '')) ? attributeTarget(lines, at) : -1;
+    if (under >= 0 && defNameAt(lines, under)) { name = defNameAt(lines, under); start = under; }
+  }
+  if (!name) {
+    const m = memberAt(lines, at);
+    if (m && m.member) { name = `${m.object}.${m.member}`; start = m.at; }
+  }
+  if (!name) { const d = enclosingDef(lines, at, at + 1, { wide: true }); name = d.name; start = d.at; }
+  if (!name || start < 0) return null;
+  let curly = 0, all = 0, opened = false, end = start;
+  for (let i = start; i < lines.length; i++) {
+    const c = curlyCount(lines[i]);
+    curly += c.open - c.close;
+    all += bracketBalance(lines[i]);
+    if (c.open > 0) opened = true;
+    end = i;
+    if (opened && curly <= 0) break;
+    if (!opened && all <= 0 && /;\s*,?\s*$/.test(lines[i])) break;
+  }
+  return { name, start, end: Math.max(end, at) };
+}
+
 // A JavaScript or TypeScript export is reached only through an import of its own file. A same-named
 // function in another file (each page's local `buildSchema`) or a word in a doc is not a caller
 // (2026-11-09: 35 such hits sized a change whose two functions had one caller each "big"). An import
@@ -1395,7 +1433,8 @@ export function callers(repo, symbols) {
     }
     const uses = list => list.reduce((n, r) => n + r.n, 0);
     const code = counted.filter(r => !TEST_FILE.test(r.file));
-    const row = { name, file, count: uses(code), tests: uses(counted) - uses(code), where: code.slice(0, 6).map(r => (r.file === file ? path.basename(r.file) : r.file) + ':' + r.line) };
+    // `places` (2026-11-22): every caller line with its repository path, for the review brief's code copy.
+    const row = { name, file, count: uses(code), tests: uses(counted) - uses(code), where: code.slice(0, 6).map(r => (r.file === file ? path.basename(r.file) : r.file) + ':' + r.line), places: code.map(r => r.file + ':' + r.line) };
     if (unresolved.length) row.unresolved = unresolved;
     return row;
   });
@@ -1433,6 +1472,7 @@ function memberCallers(repo, { name, file, object, member }) {
   row.count = sum(code);
   row.tests = sum(found) - row.count;
   row.where = code.slice(0, 6).map(r => (r.file === file ? path.basename(r.file) : r.file) + ':' + r.line);
+  row.places = code.map(r => r.file + ':' + r.line);
   return row;
 }
 const SKIP_PATH = /(?:^|\/)(?:node_modules|dist|build|bin|obj|\.claude|\.agents|docs\/db)\//i;

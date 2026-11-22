@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { main, readFacts, evidenceBlock, openCount } from '../scripts/sanad.mjs';
+import { main, readFacts, evidenceBlock, openCount, proofStartedEarly } from '../scripts/sanad.mjs';
 import { writeEntry, codeFingerprint } from '../scripts/proof-record.mjs';
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'sanad.mjs');
@@ -638,7 +638,8 @@ test('start prints the task folder file names once, one proof log per side; next
 });
 
 // 2026-11-20 (fix round 1b): the best design closed "not:" by a hand edit of siblings.md is open for `next` too.
-test('next counts the BEST DESIGN line closed "not:" with no owner words as an open second-look line', async () => {
+// 2026-11-22 (owner): a hint is advice; an older list's BEST DESIGN line locks nothing, and only a too-short reason is open.
+test('next counts a J line closed not: with a too-short reason as open, and a BEST DESIGN line of an older list locks nothing', async () => {
   const fx = fixture();
   start(fx);
   note(fx, 'lines.md', 'T1 the list shows the due date\n');
@@ -648,7 +649,24 @@ test('next counts the BEST DESIGN line closed "not:" with no owner words as an o
   note(fx, 'check.md', '[T1] the due date is shown\n');
   note(fx, 'size.txt', 'small\n');
   const f = readFacts({ repo: fx.repo, notes: fx.notes });
-  assert.equal(f.open.siblings, 1, 'a refused not: is open');
-  note(fx, 'siblings.md', list('reuse'));
-  assert.equal(readFacts({ repo: fx.repo, notes: fx.notes }).open.siblings, 0);
+  assert.equal(f.open.siblings, 0, 'a not: with its reason is closed, BEST DESIGN line or not');
+  note(fx, 'siblings.md', list('not: no'));
+  assert.equal(readFacts({ repo: fx.repo, notes: fx.notes }).open.siblings, 1, 'a too-short reason is open');
+});
+
+// 2026-11-22 (attack): the early review waited for a log line no proof ever wrote. It now reads the lines the proof
+// writes as it runs, for the tree under review only, and needs every side.
+test('early review: a log of this tree with the passing run and the old-code run red; another tree or a missing side is not', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'early-'));
+  const tree = 'a'.repeat(40), other = 'b'.repeat(40);
+  const log = (name, t, body) => { const p = path.join(dir, name); fs.writeFileSync(p, 'RED-PROOF-LOG: tree ' + t + ' at 2026-11-22T05:00:00.000Z\n' + body); return p; };
+  const both = '  ran green: exit 0 (5 s)\n  ran old code: exit 1 (6 s)\n';
+  const page = log('proof-page.log', tree, both);
+  assert.equal(proofStartedEarly([page], tree, 1), true);
+  assert.equal(proofStartedEarly([log('proof-old.log', other, both)], tree, 1), false, 'a log of another tree');
+  assert.equal(proofStartedEarly([log('proof-green.log', tree, '  ran green: exit 0 (5 s)\n')], tree, 1), false, 'old code not run yet');
+  assert.equal(proofStartedEarly([log('proof-same.log', tree, '  ran green: exit 0 (5 s)\n  ran old code: exit 0 (6 s)\n')], tree, 1), false, 'old code passed: no red');
+  assert.equal(proofStartedEarly([page], tree, 2), false, 'a page and a server side need two logs');
+  assert.equal(proofStartedEarly([page, log('proof-server.log', tree, both)], tree, 2), true);
+  assert.equal(proofStartedEarly([page], '', 1), false, 'no tree');
 });

@@ -129,7 +129,7 @@ export const STEPS = [
     ] },
   { id: 'tests-fix', loop: 'Step 3, items 1-2', lanes: ALL,
     done: (f) => f.git.ahead > 0 || f.git.changed,
-    lines: () => [{ text: 'write the tests, then the fix, in every place the list names', plain: true }] },
+    lines: () => [{ text: 'write the tests, then the fix of the rule in every place that shares it: each place on the list and any other with that rule or data', plain: true }] },
   { id: 'new-tests-once', loop: 'Step 3, item 2', lanes: CODE, beside: 'commit',
     done: (f) => f.git.ahead > 0 && f.git.clean,
     lines: (c) => [
@@ -267,10 +267,12 @@ export function due(f) {
   for (const s of open.slice(1)) if (s.beside === first.id || first.beside === s.id) out.push(s);
   // A step with no record of its own is printed until a later record exists, with the next step beside it.
   for (let i = open.indexOf(out[out.length - 1]); out[out.length - 1].unknown && out[out.length - 1].unknown(f) && i + 1 < open.length; i++) out.push(open[i + 1]);
-  // Decision 4: the review may start when the passing run and the old-code run are in the proof log.
-  if (first.id === 'proof' && f.switches.reviewEarly && f.proof.early && f.git.clean) {
+  // The review starts when the passing run and the old-code run are in the proof log, while the breaks finish
+  // (2026-11-22: the default; the switch sanad.reviewEarly is gone). The proof is often printed beside a step with no
+  // record of its own (the cheap checks), so it need not be the first one printed.
+  if (out.some((s) => s.id === 'proof') && f.proof.early && f.git.clean) {
     const review = steps.find((s) => s.id === 'review');
-    if (review && !review.done(f)) out.push(review);
+    if (review && !review.done(f) && !out.includes(review)) out.push(review);
   }
   return out;
 }

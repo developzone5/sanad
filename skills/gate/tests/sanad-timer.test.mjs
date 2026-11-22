@@ -564,13 +564,15 @@ test('workflow minutes = work minus read and plan and code', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('a stage over its budget prints OVER on its own line; nothing else changes', () => {
+// 2026-11-22 (owner): no time limit and no time target. The timer measures and reports minutes per stage;
+// nothing is called late, over or slow.
+test('a long stage is reported in minutes and never called over, late or slow', () => {
   const dir = tmp();
-  write(dir, [['10:00', 'step', 'proof'], ['10:05', 'step', 'end']]);
-  const text = report(dir, at('10:30'));
-  assert.match(text, /^OVER: proof 5\.0 min, budget 1\.0 min$/m);
-  const without = text.split('\n').filter((l) => !l.startsWith('OVER:'));
-  assert.match(without.join('\n'), /5\.0 min {2}proof/);
+  write(dir, [['10:00', 'step', 'proof'], ['10:45', 'step', 'review'], ['11:30', 'step', 'end']]);
+  const text = report(dir, at('12:00'));
+  assert.match(text, /^ +45 min {2}proof$/m);
+  assert.match(text, /^ +45 min {2}review$/m);
+  assert.doesNotMatch(text, /\bOVER\b|budget|\blate\b|\bslow\b|target/i);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -579,21 +581,6 @@ test('proof runs are counted per tool and per tree', () => {
   write(dir, [['10:00', 'step', 'code'], ['10:01', 'side', 'run proof aaa'], ['10:02', 'side', 'run proof aaa'], ['10:03', 'side', 'run proof bbb'], ['10:04', 'step', 'end']]);
   assert.match(report(dir, at('10:30')), /proof: 3 runs on 2 trees/);
   fs.rmSync(dir, { recursive: true, force: true });
-});
-
-test('a bad budgets.json says so and prints no OVER', () => {
-  const dir = tmp(), bad = path.join(tmp(), 'b.json');
-  write(dir, [['10:00', 'step', 'proof'], ['10:05', 'step', 'end']]);
-  const before = process.env.SANAD_BUDGETS_FILE;
-  try {
-    for (const body of [{ medium: { proof: 0 } }, { medium: { proof: 'x' } }]) {
-      fs.writeFileSync(bad, JSON.stringify(body));
-      process.env.SANAD_BUDGETS_FILE = bad;
-      const text = report(dir, at('10:30'));
-      assert.match(text, /budgets: budgets\.json: "proof" must be a number above 0; no OVER shown/);
-      assert.doesNotMatch(text, /OVER:/);
-    }
-  } finally { if (before === undefined) delete process.env.SANAD_BUDGETS_FILE; else process.env.SANAD_BUDGETS_FILE = before; fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('week adds up the timers of the last 7 days only', () => {

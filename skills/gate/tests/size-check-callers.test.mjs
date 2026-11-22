@@ -330,7 +330,7 @@ test('2026-11-19: --json holds every caller row of 40 changed functions; the tex
   assert.equal(r.allCallers.length, 40, 'one row per changed function');
   assert.deepEqual(r.allCallers.map(c => c.name), Array.from({ length: 40 }, (_, i) => `fn${String(i).padStart(2, '0')}`));
   // The 40th function has two callers and is not among the printed rows: only the data holds it.
-  assert.deepEqual(r.allCallers[39], { name: 'fn39', file: 'src/many.ts', count: 2, tests: 0, where: ['src/user.ts:4', 'src/user.ts:5'] });
+  assert.deepEqual(r.allCallers[39], { name: 'fn39', file: 'src/many.ts', count: 2, tests: 0, where: ['src/user.ts:4', 'src/user.ts:5'], places: ['src/user.ts:4', 'src/user.ts:5'] });
   assert.equal(r.callers.length, 12, 'the printed rows stay capped');
   assert.equal(r.moreSymbols, 28);
   const text = spawnSync(process.execPath, [script, '--repo', repo, '--base', 'base'], { encoding: 'utf8', env: process.env });

@@ -67,14 +67,14 @@ import { treeId } from './red-proof.mjs';
 import { refreshPlaces, checkPlaces, placeLine } from './places.mjs';
 // The size check still runs as a child process (sizeFacts: a timeout ends it); its sizes, signal labels and
 // text form come from the module itself, which places.mjs loads anyway.
-import { SIZES, SIGNALS, format, sizeTask } from './size-check.mjs';
+import { SIZES, SIGNALS, format, sizeTask, functionSpan, fileKind } from './size-check.mjs';
 import { isMain } from './is-main.mjs';
 // 2026-11-19: a pinned round. The one change set, the saved rounds and decisions, and the Big round's copy.
 import crypto from 'node:crypto';
 import { changeSet, foreignLine } from './change-set.mjs';
 import { paths as notePaths, readPins, addPin, readDecisions } from './notes-dir.mjs';
 import { makeCopy, dropCopies } from './review-copy.mjs';
-import { lateCheckLines } from './siblings.mjs';
+import { lateCheckLines, parseSiblings } from './siblings.mjs';
 // Read as a whole, so an export a later release adds (droppedLines) is used when it is there.
 import * as ticketLinesTool from './check-ticket-lines.mjs';
 
@@ -179,12 +179,117 @@ export function sizeFacts(repo, base, { script = path.join(here, 'size-check.mjs
     failed = e.code === 'ETIMEDOUT' ? `timed out after ${Math.round(timeout / 1000)} s`
       : (errLines.find(l => /^(?:SIZE: |\w*Error\b)/.test(l)) || errLines[0] || 'exit ' + e.status).replace(/^SIZE:\s*/, '');
   }
-  let text = out, signals = null;
-  try { const r = JSON.parse(out); text = format(r); signals = signalFiles(r); } catch { /* not its JSON: read as text */ }
+  let text = out, signals = null, rows = [];
+  try { const r = JSON.parse(out); text = format(r); signals = signalFiles(r); rows = Array.isArray(r.allCallers) ? r.allCallers : []; } catch { /* not its JSON: read as text */ }
   const line = re => (text.split(/\r?\n/).find(l => re.test(l)) || '').trim();
   const size = line(/^SIZE/);
   if (!failed && !size) failed = 'no SIZE line in its output';
-  return { stack: line(/^Stack:/), size, callers: line(/^\s*callers:/).replace(/^callers:\s*/, ''), failed, signals };
+  return { stack: line(/^Stack:/), size, callers: line(/^\s*callers:/).replace(/^callers:\s*/, ''), failed, signals, rows };
+}
+
+// 2026-11-22 (owner): the second look gives hints, never the design. The reviewer sees each hint and the author's
+// answer, so a hint closed "not: <why>" is judged: is the reason right, or is the hint the better way?
+export function hintsBlock(siblingsText) {
+  const list = parseSiblings(siblingsText);
+  const rows = [...list.jobs.map((r) => ({ id: 'J' + r.n, ...r })), ...list.rows.map((r) => ({ id: 'S' + r.n, ...r }))];
+  if (!rows.length) return [];
+  return ["## The second look's hints and the author's answers — judge each answer, a `not:` reason above all", '',
+    ...rows.map((r) => `- ${r.id} · ${r.body} → ${r.outcome || '(no answer yet)'}`), ''];
+}
+
+// 2026-11-22 (owner): the brief carries the code under review — the diff, the whole text of every changed
+// function and the whole text of each calling function — so a reviewer starts reading, not searching. Every text
+// is read at the pinned commit (the working tree when there is no pin yet). It is a copy for reading: the
+// reviewer still searches the repository for the places it does not show. Each function is copied whole and every
+// caller location of the size check is read; one total line cap keeps a huge change readable, and its cut line
+// says so. A diff that cannot be read is said, never shown as no change.
+const CODE_LINES_TOTAL = 20000;
+function fileAt(repo, ref, file) {
+  try {
+    return ref ? execFileSync('git', ['show', `${ref}:${file}`], { cwd: repo, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] })
+      : fs.readFileSync(path.join(repo, file), 'utf8');
+  } catch { return null; }
+}
+// The new-side line ranges (1-based, inclusive) of each file a `--unified=0` diff changes.
+export function changedRanges(diffText) {
+  const out = new Map();
+  let file = null;
+  for (const l of String(diffText).split(/\r?\n/)) {
+    const f = /^\+\+\+ (?:b\/)?(.+)$/.exec(l);
+    if (f) { file = f[1] === '/dev/null' ? null : f[1].trim(); if (file && !out.has(file)) out.set(file, []); continue; }
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(l);
+    if (h && file) { const s = Number(h[1]), n = h[2] === undefined ? 1 : Number(h[2]); out.get(file).push([s, s + Math.max(n, 1) - 1]); }
+  }
+  return out;
+}
+const fence = (text) => { let f = '```'; while (text.includes(f)) f += '`'; return f; };
+export function codeBlock({ repo, mergeBase, pin = '', rows = [] }) {
+  const range = pin ? [mergeBase, pin] : [mergeBase];
+  let failed = '';
+  const run = (args) => { try { return execFileSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true, maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { failed = failed || String(e.code || e.message || e).split(/\r?\n/)[0]; return ''; } };
+  const diff = run(['diff', ...range]);
+  // Before the commit, a new file git does not track yet is part of the change too.
+  const untracked = pin ? [] : run(['ls-files', '--others', '--exclude-standard']).split(/\r?\n/).filter(Boolean).filter((f) => fileKind(f) === 'code');
+  const head = ['## Code under review — a copy for reading; the commit counts', ''];
+  if (failed && !diff.trim()) return [...head, `- The diff could not be read here (${failed}): read it yourself with \`git diff ${range.join(' ')}\`.`, ''];
+  if (!diff.trim() && !untracked.length) return [];
+  const ref = pin || '';
+  const at = pin ? `commit ${pin.slice(0, 12)}` : 'the working tree';
+  const out = [...head,
+    `- Every text below is read at ${at}. Search the repository yourself for the places this copy does not show.`, '',
+    ...(diff.trim() ? ['### Diff', '', fence(diff) + 'diff', diff.replace(/\s+$/, ''), fence(diff), ''] : [])];
+  let used = 0, cut = false;
+  const shown = new Set();
+  const cache = new Map();
+  const linesOf = (file) => { if (!cache.has(file)) { const t = fileAt(repo, ref, file); cache.set(file, t == null ? null : t.split(/\r?\n/)); } return cache.get(file); };
+  const block = (title, file, span, lines) => {
+    const key = `${file}:${span.start}`;
+    if (shown.has(key)) return [];
+    shown.add(key);
+    if (used >= CODE_LINES_TOTAL) { cut = true; return []; }
+    const body = lines.slice(span.start, span.end + 1).join('\n');
+    used += span.end - span.start + 1;
+    return [`#### ${title}`, '', fence(body), body, fence(body), ''];
+  };
+  const changed = [];
+  for (const file of untracked) {
+    const lines = linesOf(file);
+    if (lines) changed.push(...block(`${file} (new, not in git yet: the whole file)`, file, { start: 0, end: lines.length - 1 }, lines));
+  }
+  for (const [file, ranges] of changedRanges(run(['diff', '--unified=0', ...range]))) {
+    if (fileKind(file) !== 'code') continue;
+    const lines = linesOf(file);
+    if (!lines) continue;
+    for (const [s, e] of ranges) {
+      for (let i = s - 1; i <= Math.min(e - 1, lines.length - 1); i++) {
+        const span = functionSpan(lines, i);
+        if (!span) continue;
+        changed.push(...block(`${file} · ${span.name} (lines ${span.start + 1}-${span.end + 1})`, file, span, lines));
+        i = Math.max(i, span.end);
+      }
+    }
+  }
+  if (changed.length) out.push('### Changed functions — the whole text', '', ...changed);
+  const callerText = [];
+  for (const row of rows) {
+    if (!row) continue;
+    // `places` holds every caller line with its repository path; an older size check gave only `where` (the first six,
+    // a caller in the function's own file named by its base name).
+    const full = Array.isArray(row.places);
+    for (const w of full ? row.places : Array.isArray(row.where) ? row.where : []) {
+      const m = /^(.+):(\d+)$/.exec(String(w));
+      if (!m) continue;
+      const file = !full && !m[1].includes('/') && path.posix.basename(String(row.file || '')) === m[1] ? row.file : m[1];
+      const lines = linesOf(file);
+      if (!lines) continue;
+      const span = functionSpan(lines, Number(m[2]) - 1);
+      if (!span) continue;
+      callerText.push(...block(`${file} · ${span.name} (line ${m[2]} uses ${row.name})`, file, span, lines));
+    }
+  }
+  if (callerText.length) out.push('### Callers of the changed functions — the whole calling function', '', ...callerText);
+  if (cut) out.push(`(the copy stops at ${CODE_LINES_TOTAL} lines: read the rest in the repository)`, '');
+  return out;
 }
 
 // Each signal's files, as the size check's JSON names them: base names, at most three per signal; for a function
@@ -283,7 +388,7 @@ export function decisionLines(decisions = []) {
   return decisions.filter(d => d && one(d.words)).map(d => `${d.id || 'D?'} (${one(d.kind) || 'decision'})${one(d.question) ? ': ' + one(d.question) : ''} — the user: "${one(d.words)}"${Array.isArray(d.notes) && d.notes.length ? ` [${d.notes.join(', ')}]` : ''}`);
 }
 const focusedBlock = ['## Focused brief (small change)', '',
-  'Trace the changed hunks, each caller and each Check line; do not re-derive the whole screen or file. About 15 tool calls and 2 minutes; stop once every line is traced.'];
+  'Trace the changed hunks, each caller and each Check line; do not re-derive the whole screen or file. About 15 tool calls; stop once every line is traced.'];
 const isFocused = (facts, size) => /^(?:tiny|small)$/.test(chooseSize(facts, size).size);
 const callersLine = facts => facts.failed ? `SIZE CHECK FAILED: ${facts.failed}` : `Callers: ${facts.callers || 'none yet (no change yet)'}`;
 const tidy = lines => lines.filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n') + '\n';
@@ -351,7 +456,7 @@ export function onLightLane(repo, base) {
   } catch { return false; }
 }
 
-export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines = [], checks, outside, facts, size, proof = [], changed, places = null, pin = '', copy = '', dropped = [], lightLane = false }) {
+export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines = [], checks, outside, facts, size, proof = [], changed, places = null, pin = '', copy = '', dropped = [], lightLane = false, code = [], hints = [] }) {
   const gone = new Set(dropped.map(d => d.n));
   return tidy([
     ROLE, '', diffLine({ repo, branch, base, mergeBase, pin, copy }), '',
@@ -363,18 +468,20 @@ export function buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines 
     '## Check — each line names its source ([Tn] a ticket line, [change], [rule: ...], [design] the author\'s choice); its tests carry the tag [Cn]', '',
     ...checks.map((c, i) => `- C${i + 1}. ${c}`), '',
     ...designBlock(checks),
+    ...hints,
     ...placesBlock(places),
     ...known(outside),
     ...(proof.length ? ['## Proof run (red-proof.mjs)', '', ...proof.map(p => '    ' + p), ''] : lightLane ? ['## Proof run (red-proof.mjs)', '', LIGHT_LANE_LINE, ''] : []),
     '## Rules', '', ...RULES, '',
     ...(isFocused(facts, size) ? focusedBlock : []),
+    ...code,
   ]);
 }
 
 // `checks`: only its [design] lines reach fresh eyes, under "attack these" (an author claim, never a goal).
 // `lateChecks` (2026-11-19): the check lines added after the second look (lateCheckLines of siblings.mjs). The fresh
 // brief shows only their rule text, with no source tag: no sibling search ever read them.
-export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size, changed, places = null, checks = [], pin = '', copy = '', dropped = [], lateChecks = [] }) {
+export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside, facts, size, changed, places = null, checks = [], pin = '', copy = '', dropped = [], lateChecks = [], code = [], hints = [] }) {
   const freshKnown = knownFresh(outside);
   // 2026-11-19: on a change with one review (not big) the risk reviewer's after-save question is one more rule here.
   const oneReview = /^(?:tiny|small|medium)$/.test(chooseSize(facts, size).size);
@@ -386,12 +493,14 @@ export function buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside
     '## Ticket (verbatim)', '', ticket.trim(), '',
     ...droppedBlock(dropped),
     ...designBlock(checks),
+    ...hints,
     ...placesBlock(places),
     ...(lateChecks.length ? ['## Rules added after the sibling search — search the repo for siblings of each one yourself', '', ...lateChecks.map(c => '- ' + String(c.text ?? c).replace(/^(?:\[[^\]]+\]\s*)+/, '')), ''] : []),
     ...freshKnown.before,
     '## Rules', '', ...RULES, ...afterSave, '',
     ...(isFocused(facts, size) ? [...focusedBlock.map(l => l.replace(', each caller and each Check line', ' and every place that uses the changed code')), ''] : []),
     ...freshKnown.after,
+    ...code,
   ]);
 }
 // 2026-11-19: the known items of the fresh brief. An item in a touched file is an earlier diagnosis of the same
@@ -707,7 +816,7 @@ function noteRows(notes) {
 // `notes`: { list: [...] } from sessionNotes (notes.mjs), or { failed: <why> }. With no readable note the brief says
 // so and tells the reviewer where the reports are; it never shows an empty list as "no earlier notes".
 // `callers`: { text } from the size check's range form, or { failed }.
-export function buildRecheckBrief({ repo, branch, from, to, round, fromRound = '', files = [], callers = {}, notes = {}, decided = [], decisions = [], notesDir = '' }) {
+export function buildRecheckBrief({ repo, branch, from, to, round, fromRound = '', files = [], callers = {}, notes = {}, decided = [], decisions = [], notesDir = '', code = [] }) {
   const list = Array.isArray(notes.list) ? notes.list : [];
   const why = notes.failed || (list.length ? '' : 'the notes reader gave no note for this task');
   return tidy([
@@ -728,7 +837,8 @@ export function buildRecheckBrief({ repo, branch, from, to, round, fromRound = '
     '- Each caller of a changed function: does the fix change a result that caller relies on? A hole the fix opens outside the changed lines is a finding.',
     '- Each new file and each new test: can the test fail? Name the product change it would let through.',
     '- A `refuted` or `user` answer is not a fix: check only that the code still matches what the answer says.',
-    '- A problem you see outside the fix is still reported, on its own line, with the words "outside the fix".',
+    '- A problem you see outside the fix is still reported, on its own line, with the words "outside the fix".', '',
+    ...code,
   ]);
 }
 
@@ -926,7 +1036,7 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
         const branchNow = git(repo, ['branch', '--show-current']) || '(detached)';
         const briefFile = path.join(notesDir, `brief-recheck-${saved.round}.md`), launchFile = path.join(notesDir, 'launch.md');
         const engineNow = resolveEngine(notesDir, o.engine);
-        fs.writeFileSync(briefFile, buildRecheckBrief({ repo, branch: branchNow, from: last.commit, to: head, round: saved.round, fromRound: last.round, files, callers: range.failed ? { failed: range.failed } : { text: range.callers }, notes, decided: outside.decided, decisions, notesDir: notesDir.replace(/\\/g, '/') }));
+        fs.writeFileSync(briefFile, buildRecheckBrief({ repo, branch: branchNow, from: last.commit, to: head, code: codeBlock({ repo, mergeBase: last.commit, pin: head, rows: range.rows }), round: saved.round, fromRound: last.round, files, callers: range.failed ? { failed: range.failed } : { text: range.callers }, notes, decided: outside.decided, decisions, notesDir: notesDir.replace(/\\/g, '/') }));
         fs.writeFileSync(launchFile, buildRecheckLaunch({ brief: briefFile.replace(/\\/g, '/'), repo, round: saved.round, engine: engineNow, risk, files }));
         const code = files.filter(f => isCodeFile(f.name) && !TEST_FILE.test(f.name));
         process.stdout.write(refNote + (facts.failed ? `SIZE CHECK FAILED: ${facts.failed}\n` : '') + `ENGINE: ${engineNow}\n` +
@@ -963,7 +1073,12 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
       }
       pinLines += `PIN: round ${saved.round} · commit ${head} · ref ${pinRef(task, saved.round)}${copy ? ` · copy ${copy}` : ''}\n`;
     }
-    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: routed, proof, changed: changedFiles, places, pin: head, copy, dropped, lightLane }));
+    // 2026-11-22: the code under review, read at the pinned commit, goes into both briefs.
+    const code = codeBlock({ repo, mergeBase, pin: head, rows: facts.rows });
+    // 2026-11-22: the second look's hints and how the author answered each one (a not: carries its reason).
+    let hints = [];
+    try { const sf = notePaths(notesDir).siblings; if (fs.existsSync(sf)) hints = hintsBlock(fs.readFileSync(sf, 'utf8')); } catch { /* no list: no hints */ }
+    fs.writeFileSync(out, buildBrief({ repo, branch, base, mergeBase, ticket, ticketLines, checks, outside, facts, size: routed, proof, changed: changedFiles, places, pin: head, copy, dropped, lightLane, code, hints }));
     // The check lines the second look never read (siblings.md in the notes folder). No list, or a list of an earlier
     // release, gives none.
     let lateChecks = [];
@@ -974,7 +1089,7 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
       }
     } catch { /* a list that cannot be read is the second look's own check to report */ }
     const outsideFile = (o.outside || git(repo, ['config', '--get', 'sanad.outsideList']) || '').replace(/\\/g, '/');
-    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside: { ...outside, file: outsideFile }, facts, size: routed, changed: changedFiles, places, checks, pin: head, copy, dropped, lateChecks }));
+    fs.writeFileSync(fresh, buildFreshBrief({ repo, branch, base, mergeBase, ticket, outside: { ...outside, file: outsideFile }, facts, size: routed, changed: changedFiles, places, checks, pin: head, copy, dropped, lateChecks, code, hints }));
     // 2026-11-17: the notes folder is the folder of --out; a saved report names itself, the flag only says so.
     const reqTime = Math.max(fs.statSync(o.lines).mtimeMs, fs.statSync(o.check).mtimeMs);
     const designerDone = designerReport(path.dirname(out), reqTime) || (o['designer-done'] ? '--designer-done' : '');
