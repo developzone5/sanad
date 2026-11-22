@@ -974,7 +974,12 @@ async function main() {
   const runFailed = (r) => !r || r.timedOut || r.error || r.status !== 0;
   // --check-plan (2026-11-19): only the checks that come before any run. No log, no run record, no test machine, no copy.
   const checkPlan = opts.includes('--check-plan');
-  const say = (line) => { line = hide(line); said.push(line); process.stdout.write(line + '\n'); };
+  // 2026-11-22: each line also goes into the --log file as it is said (the exit handler still writes the whole log
+  // again), so `sanad next` sees the passing run and the old-code run while the breaks still run (early review).
+  const say = (line) => {
+    line = hide(line); said.push(line); process.stdout.write(line + '\n');
+    if (state.logPath) { try { fs.appendFileSync(state.logPath, line + '\n'); } catch { /* the exit handler writes it */ } }
+  };
   const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
   // A file swapped in the working folder right now (its backup folder), and the test processes running:
   // a stop or an exit puts the file back and stops them (2026-11-12, S13).

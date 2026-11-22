@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const script = process.env.RED_PROOF_TEST_SCRIPT || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'red-proof.mjs');
@@ -1335,4 +1335,31 @@ test('--plan with a commit: the copies are that commit, not the HEAD the folder 
   const missing = run(['--repo', repo, '--local', '--plan', planFile, '--parallel', '2', '--', process.execPath, 'check.cjs']);
   assert.equal(missing.status, 2, missing.stdout);
   assert.match(missing.stdout, /the synced commit 0123456789ab is not on this machine/);
+});
+
+// 2026-11-22 (attack): the log is written line by line while the proof runs, so `sanad next` sees the passing run
+// and the old-code run before a slow break ends, and the review can start early.
+test('the log holds the green and old-code runs while a slow break still runs', async () => {
+  const { repo } = fixture();
+  fs.writeFileSync(path.join(repo, 'check.cjs'), [
+    'const v = require("./app.cjs");',
+    'if (v === 3) { const end = Date.now() + 8000; while (Date.now() < end) { /* a slow break */ } }',
+    'if (v !== 2) { console.log(" FAIL  src/app.test.cjs > app > is fixed" + String.fromCharCode(10) + "AssertionError: expected 1 to be 2"); process.exit(1); }',
+    'process.exit(0);', ''].join('\n'));
+  const breaks = path.join(repo, '.git', 'slow-breaks.json');
+  fs.writeFileSync(breaks, JSON.stringify([{ name: 'slow', file: 'app.cjs', find: 'exports = 2', put: 'exports = 3', mustFail: ['is fixed'] }]));
+  const log = path.join(repo, '.git', 'proof.log');
+  const child = spawn(process.execPath, [script, '--repo', repo, '--old', 'HEAD', '--files', 'app.cjs', '--breaks', breaks, '--then-green', '--log', log, '--', process.execPath, 'check.cjs'],
+    { windowsHide: true, env: { ...process.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: '1' } });
+  let exited = false, exitAt = 0, seenAt = 0;
+  const ended = new Promise((resolve) => child.on('exit', () => { exited = true; exitAt = Date.now(); resolve(); }));
+  for (let i = 0; i < 150 && !exited; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    const text = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+    if (/^\s*ran green: exit 0\b/m.test(text) && /^\s*ran old code: exit [1-9]/m.test(text) && !exited) { seenAt = Date.now(); break; }
+  }
+  await ended;
+  // Seen while the 8-second break still ran: well before the end, not in the instant of the final write.
+  assert.ok(seenAt && exitAt - seenAt > 3000, 'the two first runs were in the log seconds before the proof ended (seen ' + (seenAt ? (exitAt - seenAt) + ' ms' : 'never') + ' before the end):\n' + fs.readFileSync(log, 'utf8'));
+  assert.match(fs.readFileSync(log, 'utf8'), /^RED-PROOF-LOG: tree [0-9a-f]{40,64} /m, 'the final log keeps its tree line');
 });

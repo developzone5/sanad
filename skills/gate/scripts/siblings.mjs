@@ -18,10 +18,10 @@
 //
 // 2026-11-20 (timed medium task, twice): the second look listed three same-job designs; the author closed the best one
 // (J2, one unpaged read) "not: …" and built another. Three of four reviewers then asked for J2 and the review found 3
-// bugs that J2 avoids. Promise: the second look ends with one BEST DESIGN line, "BEST DESIGN: J<n> — <why>" or
-// "BEST DESIGN: none — <why>" (J<n> counts the SAME JOB lines of the report, the first is J1). It is kept in
-// siblings.md. --check and --close refuse "J<n>=not: …" on the BEST DESIGN line unless the owner's words are recorded
-// in the notes folder (notes.mjs decide --kind design --words "<the owner's words>"); the refusal prints that command.
+// bugs that J2 avoids. A BEST DESIGN pick with an owner-words lock followed; 2026-11-22 (owner, after a timed test in
+// which the locked pick made the fix narrower than a plain session's) it is gone. Promise now: the second look gives
+// hints and never picks the design; the author designs, closes each J line `reuse` or `not: <why>`, and the reviewer
+// sees each reason. When the brief carries the author's design (<notes>/design.md), the second look checks it for gaps.
 //   node siblings.mjs --brief --notes <dir> --repo <repo>
 //       Writes <notes>/siblings-brief.md from <notes>/lines.md (ticket lines), <notes>/check.md (check lines)
 //       and <notes>/places.md (the places, from places.mjs), with fixed instructions, and prints the one launch
@@ -68,14 +68,13 @@ import { readLines, droppedOf, checkLines } from './check-ticket-lines.mjs';
 import crypto from 'node:crypto';
 import { parsePlaces, placeLine, declarations, readLabel } from './places.mjs';
 import { isMain } from './is-main.mjs';
-import { readDecisions } from './notes-dir.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MIN_REASON = 12;
 export const BRIEF = 'siblings-brief.md';
 export const LIST = 'siblings.md';
 export const REPORT = 'siblings-report.md';
-export const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', at most three, the nearest to this job first, or write the single line 'SAME JOB: none' after searching. Last, name the one design you judge best for this ticket: 'BEST DESIGN: J<n> — <one line why>' (n counts your SAME JOB lines, the first is J1), or 'BEST DESIGN: none — <why>'. The author may close that design with 'not:' only on the owner's own words. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines, 'SAME JOB:' lines and the 'BEST DESIGN:' line, or 'SIBLINGS: none' and 'SAME JOB: none'. About 4 minutes; do not edit.";
+export const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', at most three, the nearest to this job first, or write the single line 'SAME JOB: none' after searching. These are hints: the author designs the change, and you do not choose the design. When the brief carries the author's design, check it for gaps and missed places: each one is a SIBLING line. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines and 'SAME JOB:' lines, or 'SIBLINGS: none' and 'SAME JOB: none'. Do not edit.";
 // A planning seat, never a review (2026-11-14): a prompt that starts "You are the independent reviewer" is
 // counted by the stop and push hooks as a finished review, so this check, run before any code, could have
 // stood in for the real review of the code written after it.
@@ -124,7 +123,7 @@ export function ticketRows(linesText) {
 }
 
 // `ticket`: the lines as strings (T1 first), or { n, text } rows that keep their own number.
-export function buildBrief({ repo, ticket, checks, list, dropped = [] }) {
+export function buildBrief({ repo, ticket, checks, list, dropped = [], design = '' }) {
   const order = (p) => list.names.indexOf(p.name) * 1e6 + p.n;
   const live = list.places.filter((p) => p.mark !== 'gone').sort((a, b) => order(a) - order(b));
   return [
@@ -141,12 +140,15 @@ export function buildBrief({ repo, ticket, checks, list, dropped = [] }) {
     ...(checks.length ? checks.map((c, i) => `- C${i + 1}. ${c}`) : ['- none yet: the check lines are written after this look']), '',
     '## Places already on the list (places.mjs)', '',
     ...(live.length ? live.map((p) => '- ' + placeLine(p)) : ['- none: no product file uses these names']), '',
+    // 2026-11-22: the author's own design, when written, is what the second look checks for gaps; it never picks one.
+    // Indented as a block, so a "- T1." or "- C1." line of the design is never read back as a ticket or check line.
+    ...(String(design).trim() ? ["## The author's design (design.md) — check it for gaps and missed places", '', ...String(design).trim().split(/\r?\n/).map((l) => '    ' + l), ''] : []),
   ].join('\n');
 }
 
 export function launchLine(brief) {
   return `LAUNCH: Agent braintrust-expert · prompt: ${PROMPT_START} Read and follow only the brief at ${slash(brief)}. ` +
-    'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING, OUTSIDE PR, SAME JOB and BEST DESIGN lines (or SIBLINGS: none and SAME JOB: none).';
+    'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING, OUTSIDE PR and SAME JOB lines (or SIBLINGS: none and SAME JOB: none).';
 }
 
 export function writeBrief({ notes, repo }) {
@@ -165,8 +167,10 @@ export function writeBrief({ notes, repo }) {
   if (!list) throw usage(`places.md in ${notes} is not a places list (no Repo: and Names: header): make it with places.mjs`);
   const brief = path.join(notes, BRIEF);
   const dropped = ticket.filter((t) => t.dropped).map((t) => t.n);
-  fs.writeFileSync(brief, buildBrief({ repo: top, ticket: live, checks, list, dropped }));
-  return { brief, ticket, checks, dropped, places: list.places.filter((p) => p.mark !== 'gone').length };
+  const designFile = path.join(notes, 'design.md');
+  const design = fs.existsSync(designFile) ? readText(designFile) : '';
+  fs.writeFileSync(brief, buildBrief({ repo: top, ticket: live, checks, list, dropped, design }));
+  return { brief, ticket, checks, dropped, design: Boolean(String(design).trim()), places: list.places.filter((p) => p.mark !== 'gone').length };
 }
 
 // A report line without list marks, quotes or bold: "- `SIBLING: …`" and "**SIBLINGS: none**" read plainly.
@@ -194,10 +198,9 @@ const SIBLING_LINE = /^SIBLINGS?(?:\s*\d+)?\s*[*_`~]*\s*:[*_`~]*\s*(.*)$/i;
 const SIBLING_BRACKETED = /^SIBLINGS?\s*[\])]\s*:?\s*(.*)$/i;
 const SIBLING_WORD = /^SIBLINGS?\b/i;
 const JOB = /^SAME JOB:\s*(.*)$/i;
-// "BEST DESIGN: J2 — why" or "BEST DESIGN: none — why" (2026-11-20).
-// Round 2, R3 (2026-11-20): Markdown emphasis and code marks (* _ and backticks) around the label and the J id
-// ("**BEST DESIGN:** **J2** — why", "BEST DESIGN: `J2` — why", "_BEST DESIGN_: J2 — why") are removed before the shape rules run.
-const BEST = /^BEST DESIGN\s*[*_`]*\s*:[*_`]*\s*[*_`]*(?:J(\d+)|(none))[*_`]*(?!\w)\s*(?:[—–:-]\s*)?(.*)$/i;
+// 2026-11-22 (owner): the second look gives hints, never the design. A BEST DESIGN line of an older report or list
+// (bold or code marks around it too) is passed over.
+const BEST_LINE = /^[*_`]*BEST DESIGN\b/i;
 // "<file>:<line> · <function or field> — <why>"; a line range (12-20) counts as a line.
 const SHAPED = /^(.+?):(\d+(?:[-–]\d+)?) · (.+?) — (.+)$/;
 // A report line's body: the agent's own arrows become "->" (the first → on a list line starts its outcome), and
@@ -212,16 +215,7 @@ export function parseReport(text) {
   let none = false, jobNone = false, best = null;
   for (const row of String(text).split(/\r?\n/)) {
     const l = bare(row);
-    const bm = BEST.exec(l);
-    // 2026-11-20 (fix round): a line that starts with BEST DESIGN in another shape is malformed, never "no line" (the agent was rerun).
-    if (!bm && /^BEST DESIGN\b/i.test(l) && !/[<>]/.test(l)) throw usage(`the BEST DESIGN line is malformed: "${l.slice(0, 100)}". The shape is "BEST DESIGN: J<n> — <why>" or "BEST DESIGN: none — <why>" (J<n> is a SAME JOB line's number, the first is J1). Fix the line and record again.`);
-    if (bm) {
-      // 2026-11-20 (fix round): exactly one BEST DESIGN line, with J<n> or none and a reason of at least three words.
-      if (best) throw usage('the report has two BEST DESIGN lines: give exactly one, then record again.');
-      if (bm[3].trim().split(/\s+/).filter(Boolean).length < 3) throw usage(`the BEST DESIGN line has no reason (at least three words after the dash): "${l.slice(0, 100)}". Write "BEST DESIGN: J<n> — <why>" or "BEST DESIGN: none — <why>" and record again.`);
-      best = { n: bm[2] ? 0 : Number(bm[1]), why: bm[3].trim() };
-      continue;
-    }
+    if (BEST_LINE.test(l)) continue;
     if (NONE.test(l)) { none = true; continue; }
     if (JOB_NONE.test(l)) { jobNone = true; continue; }
     const o = OUTSIDE.exec(l);
@@ -261,8 +255,7 @@ export function parseSiblings(text) {
     if (JOB_NONE.test(line.trim())) { jobNone = true; continue; }
     const rec = /^Recorded: (.*)$/.exec(line);
     if (rec) { recorded = rec[1].trim(); continue; }
-    const bm = BEST.exec(line.trim());
-    if (bm) { best = { n: bm[2] ? 0 : Number(bm[1]), why: bm[3].trim() }; continue; }
+    if (BEST_LINE.test(line.trim())) continue;
     const m = /^([SJ])(\d+) · (.*)$/.exec(line);
     if (!m) continue;
     const arrow = m[3].indexOf('→');
@@ -314,9 +307,7 @@ export function parseOutside(text) {
   return String(text).split(/\r?\n/).map((l) => /^- OUTSIDE PR:\s*(.*)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
 }
 
-export const bestLine = (b) => `BEST DESIGN: ${b.n ? 'J' + b.n : 'none'}${b.why ? ' — ' + b.why : ''}`;
-
-export function renderSiblings({ brief, report, recorded, rows, outside = [], jobs = [], jobNone = false, sources = '', lineHashes = null, checkHashes = null, best = null }) {
+export function renderSiblings({ brief, report, recorded, rows, outside = [], jobs = [], jobNone = false, sources = '', lineHashes = null, checkHashes = null }) {
   return [
     '# Siblings — places with the same rule or defect that the places list missed', '',
     `Brief: ${slash(brief)}`,
@@ -330,7 +321,7 @@ export function renderSiblings({ brief, report, recorded, rows, outside = [], jo
     "Write the outcome after each →: `P<n>` (add the sibling's name with places.mjs --names; n is the place it gets in the sibling's own file) or `none: <why it is not the same rule>`.",
     'siblings.mjs --record keeps every outcome when it records again; pre-review.mjs --siblings checks this file.', '',
     ...(rows.length ? rows.map(siblingLine) : ['SIBLINGS: none']), '',
-    ...(jobs.length || jobNone ? [JOB_HEADING, '', ...(jobs.length ? jobs.map(jobLine) : ['SAME JOB: none']), ...(best ? ['', bestLine(best)] : []), ''] : []),
+    ...(jobs.length || jobNone ? [JOB_HEADING, '', ...(jobs.length ? jobs.map(jobLine) : ['SAME JOB: none']), ''] : []),
     ...(outside.length ? [OUTSIDE_HEADING, '', ...outside.map((o) => '- OUTSIDE PR: ' + o), ''] : []),
   ].join('\n');
 }
@@ -381,51 +372,24 @@ export function recordSiblings({ report, notes, now = new Date() }) {
     rows.push({ n: next++, body: b, outcome: '', ...(at ? { holds: at } : {}) });
   }
   const jobs = old.jobs;
-  const jobsInReport = found.jobs.slice();
   let nextJob = jobs.reduce((n, r) => Math.max(n, r.n), 0) + 1;
   for (const b of found.jobs) if (!jobs.some((r) => r.body === b)) jobs.push({ n: nextJob++, body: b, outcome: '' });
   const jobNone = !jobs.length && (found.jobNone || old.jobNone);
-  // 2026-11-20: the report's J<n> counts its own SAME JOB lines; the list's number for that line is looked up by its words.
-  let best = old.best;
-  if (found.best) {
-    if (found.best.n === 0) best = { n: 0, why: found.best.why };
-    else {
-      const body = jobsInReport[found.best.n - 1];
-      const row = body === undefined ? null : jobs.find((r) => r.body === body);
-      if (!row) throw usage(`the BEST DESIGN line names J${found.best.n}, but the report has ${jobsInReport.length} SAME JOB line(s): name one of them, or "BEST DESIGN: none — <why>", and record again.`);
-      best = { n: row.n, why: found.best.why };
-    }
-  }
-  if (jobs.length && !best) throw usage(`${report} has SAME JOB lines but no "BEST DESIGN: J<n> — <why>" line (or "BEST DESIGN: none — <why>"): the second look must end with the design it judges best. Ask the agent for it, save its answer there and record again.`);
   const outside = parseOutside(oldText);
   for (const b of found.outside) if (!outside.includes(b)) outside.push(b);
-  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside, jobs, jobNone, sources: sources || old.sources, lineHashes: lineHashes || old.lineHashes, checkHashes: checkHashes || old.checkHashes, best });
+  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside, jobs, jobNone, sources: sources || old.sources, lineHashes: lineHashes || old.lineHashes, checkHashes: checkHashes || old.checkHashes });
   fs.writeFileSync(out, oldText.includes('\r\n') ? text.replace(/\n/g, '\r\n') : text);
-  return { out, rows, outside, jobs, jobNone, best };
-}
-
-// 2026-11-20: a test for "J<n> has the owner's design words": the notes folder holds a design decision with words whose
-// question names that J (notes.mjs decide --kind design --question "BEST DESIGN J<n>"; decide itself refuses words the
-// owner did not type). Another J's decision does not count, and neither does one older than the list (`since`, the list's
-// Recorded time): the words must come after the design they answer. No decisions file, or one that cannot be read, has none.
-// (--for is not used: its numbers are note numbers, and a J id there would answer note N<n>.)
-export function designDecided(notes, since = '') {
-  return (n) => {
-    if (!notes || !n) return false;
-    const mark = new RegExp(String.raw`\bJ${n}\b`, 'i');
-    try { return readDecisions(notes).some((d) => d && d.kind === 'design' && String(d.words || '').trim() && mark.test(String(d.question || '')) && (!since || String(d.at || '') >= since)); } catch { return false; }
-  };
+  return { out, rows, outside, jobs, jobNone };
 }
 
 // Why a J line is still open ('' = closed): `reuse` (the design follows that pattern) or `not: <reason>`.
-// 2026-11-20: `ctx` = { best, decided, notes }. The BEST DESIGN line's J cannot be closed "not: …" by the author alone.
-export const designCommand = (notes, n) => `node ${slash(path.join(here, 'notes.mjs'))} decide --kind design --question "BEST DESIGN J${n || '<n>'}" --words "<the owner's exact words>" --notes ${slash(notes || '<notes folder>')}`;
-export function jobOpenReason(row, ctx = {}) {
+// 2026-11-22 (owner): a hint is advice. The author closes any J line "not: <why>" without the owner's words; the
+// reason goes to the reviewer with the hint.
+export function jobOpenReason(row) {
   const o = row.outcome.trim();
   if (!o) return 'no outcome';
   if (/^reuse\b/i.test(o)) return '';
   const not = /^not:\s*(.*)$/i.exec(o);
-  if (not && ctx.best && ctx.best.n === row.n && !(typeof ctx.decided === 'function' ? ctx.decided(row.n) : ctx.decided)) return `J${row.n} is the BEST DESIGN of the second look (${ctx.best.why || 'no reason given'}): close it "reuse", or record the owner's words for not using it: ${designCommand(ctx.notes, row.n)}`;
   if (not) return not[1].trim().length >= MIN_REASON ? '' : `the reason after not: needs at least ${MIN_REASON} characters`;
   return 'write reuse or not: <why this pattern does not fit>';
 }
@@ -536,7 +500,7 @@ export function openReason(row, places, { ignoreCase } = {}) {
 // read). The list is stale when a ticket line that is not dropped today is not among the recorded ones. The check
 // lines: any change makes it stale, as since 2026-11-18; with `late` (the owner's switch) a check line the second
 // look never read is a NOTE line and no reason to run again. A list of the release before has one hash for all.
-export function checkSiblings({ rows, jobs, jobNone, sources, lineHashes, checkHashes, best }, { places, sources: current, now, late = false, decided = false, notes = '' } = {}) {
+export function checkSiblings({ rows, jobs, jobNone, sources, lineHashes, checkHashes }, { places, sources: current, now, late = false } = {}) {
   const open = rows.map((r) => ({ r, why: openReason(r, places) })).filter((x) => x.why);
   const lines = open.map(({ r, why }) => `OPEN: S${r.n} · ${r.body.split(' — ')[0]}${why === 'no outcome' ? '' : ' — ' + why}`);
   // 2026-11-18 (audit): recorded for other ticket lines or check lines than the ones given now.
@@ -555,7 +519,7 @@ export function checkSiblings({ rows, jobs, jobNone, sources, lineHashes, checkH
   lines.push(`SIBLINGS: ${rows.length} found, ${open.length + (stale ? 1 : 0)} open`);
   let jobsOpen = [], searchMissing = false;
   if (jobs) {
-    jobsOpen = jobs.map((r) => ({ r, why: jobOpenReason(r, { best, decided, notes }) })).filter((x) => x.why);
+    jobsOpen = jobs.map((r) => ({ r, why: jobOpenReason(r) })).filter((x) => x.why);
     searchMissing = !jobs.length && !jobNone;
     for (const { r, why } of jobsOpen) lines.push(`OPEN: J${r.n} · ${r.body.split(' — ')[0]}${why === 'no outcome' ? '' : ' — ' + why}`);
     if (searchMissing) lines.push('OPEN: SAME JOB — the same-job search is missing: record a report from the current brief (SAME JOB lines or SAME JOB: none)');
@@ -569,7 +533,7 @@ export function checkSiblings({ rows, jobs, jobNone, sources, lineHashes, checkH
 // 2026-11-19 (13 outcomes went through a hand-made script): many outcomes at once. `sets`: [{ which: 'S1,S3',
 // outcome }]. Each outcome is judged as --check judges it (openReason, jobOpenReason); one refused outcome and
 // nothing is written. Returns { written: ['S1', …], refused: ['S1 — <why>', …] }. Only the named lines change.
-export function closeSiblings(file, sets, { places, decided = false } = {}) {
+export function closeSiblings(file, sets, { places } = {}) {
   if (!fs.existsSync(file)) throw usage('no such siblings list: ' + file);
   const text = readText(file);
   const list = parseSiblings(text);
@@ -588,7 +552,7 @@ export function closeSiblings(file, sets, { places, decided = false } = {}) {
   }
   const refused = [];
   for (const [key, { row, outcome }] of want) {
-    const why = key[0] === 'S' ? openReason({ ...row, outcome }, places) : jobOpenReason({ ...row, outcome }, { best: list.best, decided, notes: path.dirname(path.resolve(file)) });
+    const why = key[0] === 'S' ? openReason({ ...row, outcome }, places) : jobOpenReason({ ...row, outcome });
     if (why) refused.push(`${key} — ${why}`);
   }
   if (refused.length) return { written: [], refused };
@@ -658,32 +622,31 @@ function main() {
     if (o.brief) {
       const notes = path.resolve(o.notes);
       const b = writeBrief({ notes, repo: path.resolve(o.repo) });
-      process.stdout.write(`SIBLINGS BRIEF: ${b.brief} · T1..T${b.ticket.length}${b.dropped.length ? ` (${b.dropped.map((n) => 'T' + n).join(', ')} dropped)` : ''} · ${b.checks.length ? `C1..C${b.checks.length}` : 'no check line yet'} · ${b.places} place(s)\n` +
+      process.stdout.write(`SIBLINGS BRIEF: ${b.brief} · T1..T${b.ticket.length}${b.dropped.length ? ` (${b.dropped.map((n) => 'T' + n).join(', ')} dropped)` : ''} · ${b.checks.length ? `C1..C${b.checks.length}` : 'no check line yet'} · ${b.places} place(s)${b.design ? ' · your design (design.md)' : ''}\n` +
+        (b.design ? '' : `NOTE: no design.md: write your design in a few lines as ${slash(path.join(notes, 'design.md'))} and run --brief again, so the second look checks it for gaps\n`) +
         launchLine(b.brief) + '\n' +
         `THEN: save the agent's final message as ${slash(path.join(notes, REPORT))}, then run: node ${slash(path.join(here, 'siblings.mjs'))} --record ${slash(path.join(notes, REPORT))} --notes ${slash(notes)}\n`);
     } else if (o.record) {
-      const { out, rows, outside, jobs, jobNone, best } = recordSiblings({ report: path.resolve(o.record), notes: path.resolve(o.notes) });
+      const { out, rows, outside, jobs, jobNone } = recordSiblings({ report: path.resolve(o.record), notes: path.resolve(o.notes) });
       const r = checkSiblings({ rows });
       process.stdout.write(rows.map((row) => '  ' + siblingLine(row).trimEnd() + '\n').join('') +
         `SIBLINGS: ${r.count} found, ${r.open.length} open — written to ${out}${r.count ? '; write P<n> or none: <reason> after each →' : ''}\n` +
         jobs.map((row) => '  ' + jobLine(row).trimEnd() + '\n').join('') +
-        (jobs.length ? `SAME JOB: ${jobs.length} found — the design reuses each one, or says why not: write reuse or not: <why> after each →\n` : jobNone ? 'SAME JOB: none — the agent found no earlier work of the same kind\n' : '') +
-        (best ? bestLine(best) + (best.n ? ' — close that J with reuse, or with the owner words for not using it' : '') + '\n' : '') +
+        (jobs.length ? `SAME JOB: ${jobs.length} found — hints for the design: write reuse or not: <why> after each (the reviewer sees the reason) →\n` : jobNone ? 'SAME JOB: none — the agent found no earlier work of the same kind\n' : '') +
         (outside.length ? `OUTSIDE PR: ${outside.length} line(s) outside the ticket, kept apart — not this task's work; they go to the user's end list (loop.md Step 3.5, item 5)\n` : ''));
     } else if (o.close) {
       const file = path.resolve(o.close);
       // The places list beside the siblings list is read when none is named, so a P number is always judged.
       const beside = path.join(path.dirname(file), 'places.md');
       const places = placesOf(o.places || (fs.existsSync(beside) ? beside : ''));
-      const notesDir = path.dirname(file);
-      const done = closeSiblings(file, o.set, { places, decided: designDecided(notesDir, parseSiblings(readText(file)).recorded) });
+      const done = closeSiblings(file, o.set, { places });
       if (done.refused.length) {
         process.stdout.write(done.refused.map((l) => 'REFUSED: ' + l + '\n').join('') + 'SIBLINGS: nothing written — correct the refused outcome(s) and run --close again\n');
         process.exitCode = 1;
         return;
       }
       const list = readSiblings(file);
-      const r = checkSiblings(list, { places, decided: designDecided(notesDir, list.recorded), notes: notesDir });
+      const r = checkSiblings(list, { places });
       process.stdout.write([...list.rows.map((row) => ({ id: 'S' + row.n, line: siblingLine(row) })), ...list.jobs.map((row) => ({ id: 'J' + row.n, line: jobLine(row) }))]
         .filter((x) => done.written.includes(x.id)).map((x) => '  ' + x.line.trimEnd() + '\n').join('') +
         `CLOSED: ${done.written.length} line(s) written to ${slash(file)}\n` + r.text + '\n');
@@ -700,9 +663,8 @@ function main() {
         if (now) now.checksRead = Boolean(checkFile);
       }
       const late = lateChecksOn(o.repo ? path.resolve(o.repo) : places ? places.repo : process.cwd());
-      const notesDir = path.dirname(path.resolve(o.check));
       const list = readSiblings(path.resolve(o.check));
-      const r = checkSiblings(list, { places, now, late, decided: designDecided(notesDir, list.recorded), notes: notesDir });
+      const r = checkSiblings(list, { places, now, late });
       process.stdout.write(r.text + '\n');
       process.exitCode = r.ok ? 0 : 1;
     }

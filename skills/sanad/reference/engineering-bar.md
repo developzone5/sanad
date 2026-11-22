@@ -55,7 +55,7 @@ No invented evidence: every "builds clean / tests pass / it works" claim is back
 Read the actual staged diff end to end as a hostile reviewer before the hand-off:
 - Leftover debug: stray prints, log spam, commented-out blocks, temporary anonymous-access attributes, hardcoded test data.
 - Secrets in any tracked file, including config and migrations. A later removal does NOT scrub a committed secret from history; it must be rotated.
-- Scope creep: restate the agreed task in one line; the diff does that and ONLY that. No drive-by renames, reformatting or package bumps. A real bug found mid-task is a one-line follow-up note, not an inline fix.
+- Scope creep: restate the agreed task in one line; the diff does that and ONLY that. No drive-by renames, reformatting or package bumps. A bug found mid-task that is related to the ticket is fixed here with a test, on every sibling path; a bug not related to the ticket goes to the user's end list.
 - Orphaned old code, dead imports, the missing test the change requires.
 
 ## Conflicts and one-way doors — the full list

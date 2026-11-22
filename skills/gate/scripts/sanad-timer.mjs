@@ -30,7 +30,6 @@ import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { isMain } from './is-main.mjs';
 
 const FILE = 'timer.tsv';
@@ -99,21 +98,8 @@ export function sessionTimer() {
   return '';
 }
 
-// Budgets: seconds per stage and size (budgets.json). The size is SANAD_TASK_SIZE, else medium.
-const budgetsFile = () => process.env.SANAD_BUDGETS_FILE || path.join(path.dirname(fileURLToPath(import.meta.url)), 'budgets.json');
-/** Returns { map: Map(stage -> seconds) } or { error: text }. A zero, text or missing value is an error: no OVER then. */
-export function loadBudgets(size = process.env.SANAD_TASK_SIZE || 'medium') {
-  let data;
-  try { data = JSON.parse(fs.readFileSync(budgetsFile(), 'utf8')); } catch (e) { return { error: `budgets.json cannot be read (${e.code || e.message})` }; }
-  const row = data && data[size];
-  if (!row || typeof row !== 'object') return { error: `budgets.json has no size "${size}"` };
-  const map = new Map();
-  for (const [stage, v] of Object.entries(row)) {
-    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return { error: `budgets.json: "${stage}" must be a number above 0` };
-    map.set(stage, v);
-  }
-  return { map };
-}
+// 2026-11-22 (owner): no time limit and no time target. The stage budgets (budgets.json) and the OVER line
+// are gone; the timer only measures and reports minutes per stage.
 
 /** Names the timer the hooks mark idle time on. A different timer that was running pauses. */
 export function setActive(dir, now = new Date()) {
@@ -226,12 +212,6 @@ export function report(dir, now = new Date()) {
   const work = total - waited;
   const read = byStage.get('read and plan') || 0, code = byStage.get('code') || 0;
   extra.push(`workflow minutes ${fmt(Math.max(0, work - read - code)).trim()} (work ${fmt(work).trim()} minus read and plan ${fmt(read).trim()} and code ${fmt(code).trim()})`);
-  const budgets = loadBudgets();
-  if (budgets.error) extra.push(`budgets: ${budgets.error}; no OVER shown`);
-  else for (const [name, n] of byStage) {
-    const limit = budgets.map.get(name);
-    if (limit && n * 60 > limit) extra.push(`OVER: ${name} ${fmt(n).trim()} min, budget ${fmt(limit / 60).trim()} min`);
-  }
   const perTool = new Map();
   for (const [, tool, tree] of runs) { const e = perTool.get(tool) || { n: 0, trees: new Set() }; e.n++; e.trees.add(tree || '?'); perTool.set(tool, e); }
   for (const [tool, e] of perTool) extra.push(`${tool}: ${e.n} run${e.n === 1 ? '' : 's'} on ${e.trees.size} tree${e.trees.size === 1 ? '' : 's'}`);
@@ -255,8 +235,11 @@ export function week(timersDir, now = new Date()) {
     t.timers++;
     t.work += num(/total \(work (\d+(?:\.\d+)?),/);
     t.workflow += num(/^workflow minutes (\d+(?:\.\d+)?)/m);
-    t.proof += num(/[ ·]proof (\d+(?:\.\d+)?)/);
-    t.review += num(/[ ·]review (\d+(?:\.\d+)?)/);
+    // 2026-11-22: the minutes of a stage are its own rows ("  2.0 min  proof"). The old pattern read them from
+    // the OVER line, so a proof under its budget counted 0; with no OVER line it counted 0 always.
+    const stage = (name) => [...text.matchAll(new RegExp(`^\\s*(\\d+(?:\\.\\d+)?) min {2}${name}$`, 'gm'))].reduce((s, m) => s + Number(m[1]), 0);
+    t.proof += stage('proof');
+    t.review += stage('review');
   }
   const f = (n) => n.toFixed(1);
   return `WEEK: ${t.timers} timers · work ${f(t.work)} min · workflow ${f(t.workflow)} min · proof ${f(t.proof)} min · review ${f(t.review)} min`;

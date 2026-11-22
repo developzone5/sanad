@@ -24,7 +24,7 @@ const slash = (p) => p.replace(/\\/g, '/');
 const real = (p) => fs.realpathSync.native(p).toLowerCase();
 const sLines = (file) => fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => /^S\d/.test(l));
 
-const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', at most three, the nearest to this job first, or write the single line 'SAME JOB: none' after searching. Last, name the one design you judge best for this ticket: 'BEST DESIGN: J<n> — <one line why>' (n counts your SAME JOB lines, the first is J1), or 'BEST DESIGN: none — <why>'. The author may close that design with 'not:' only on the owner's own words. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines, 'SAME JOB:' lines and the 'BEST DESIGN:' line, or 'SIBLINGS: none' and 'SAME JOB: none'. About 4 minutes; do not edit.";
+const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', at most three, the nearest to this job first, or write the single line 'SAME JOB: none' after searching. These are hints: the author designs the change, and you do not choose the design. When the brief carries the author's design, check it for gaps and missed places: each one is a SIBLING line. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines and 'SAME JOB:' lines, or 'SIBLINGS: none' and 'SAME JOB: none'. Do not edit.";
 
 // A repo where focusFirstError is used by the chip group form, and a notes folder with the three sources:
 // the ticket lines, the check lines and the places list (made by places.mjs).
@@ -308,7 +308,7 @@ test('--record writes each SAME JOB line as an open J line; --check needs reuse 
     'J2 · src/ms/MicrosoftIdentityChanges.ts:40 · MicrosoftIdentityChanges — queued identity changes, one worker drains them → ',
   ], 'the quoted instruction is no line');
   assert.match(fs.readFileSync(list, 'utf8'), /^## Same kind of job done before — write `reuse`/m);
-  assert.match(r.stdout, /^SAME JOB: 2 found — the design reuses each one, or says why not/m);
+  assert.match(r.stdout, /^SAME JOB: 2 found — hints for the design: write reuse or not: <why> after each/m);
   let c = run(['--check', list]);
   assert.equal(c.status, 1, c.stdout);
   assert.deepEqual(c.stdout.split(/\r?\n/).filter((l) => l.startsWith('OPEN:')), [
@@ -927,128 +927,63 @@ test('a report saved as UTF-16 or with CRLF is recorded with its per-line hashes
   }
 });
 
-// 2026-11-20 (timed medium task, twice): the author closed the best same-job design "not: …" and built another; three of
-// four reviewers then asked for the one the author had refused. The second look now ends with one BEST DESIGN line, and
-// that J cannot be closed "not:" without the owner's recorded words.
-const BEST_REPORT = 'SIBLINGS: none\n' +
+// 2026-11-22 (owner): the second look gives hints and never picks the design. A timed test showed a locked design
+// pick made the fix narrower than a plain session's. The author closes any J line "reuse" or "not: <why>", with no
+// owner words; the reviewer sees each reason. The author's own design (design.md) goes into the brief to be checked.
+const HINTS = 'SIBLINGS: none\n' +
   'SAME JOB: src/outbox/EmailOutbox.ts:12 · EmailOutbox — a table row in the same save, sent later by a worker\n' +
   'SAME JOB: src/ms/MicrosoftIdentityChanges.ts:40 · MicrosoftIdentityChanges — queued identity changes, one worker drains them\n';
 
-test('BEST DESIGN: the brief asks for it; --record refuses same-job lines with no BEST DESIGN line and keeps the J number', () => {
-  const f = briefed(BEST_REPORT);
+test('hints: the brief asks for no design pick, and a report with SAME JOB lines and no BEST DESIGN line records', () => {
+  const f = briefed(HINTS);
   const brief = fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8');
-  assert.match(brief, /'BEST DESIGN: J<n> — <one line why>'/);
-  let r = run(['--record', f.report, '--notes', f.notes]);
-  assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.match(r.stderr, /has SAME JOB lines but no "BEST DESIGN: J<n> — <why>" line/);
-  assert.equal(fs.existsSync(f.list), false, 'nothing written');
-  fs.writeFileSync(f.report, BEST_REPORT + 'BEST DESIGN: J3 — there is no third line\n');
-  r = run(['--record', f.report, '--notes', f.notes]);
-  assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.match(r.stderr, /names J3, but the report has 2 SAME JOB line/);
-  fs.writeFileSync(f.report, BEST_REPORT + '**BEST DESIGN: J2 — one worker drains every change**\n');
-  r = run(['--record', f.report, '--notes', f.notes]);
+  assert.doesNotMatch(brief, /BEST DESIGN/);
+  assert.match(brief, /you do not choose the design/);
+  const r = run(['--record', f.report, '--notes', f.notes]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(fs.readFileSync(f.list, 'utf8'), /^BEST DESIGN: J2 — one worker drains every change$/m);
-  assert.match(r.stdout, /^BEST DESIGN: J2 — /m);
+  assert.doesNotMatch(fs.readFileSync(f.list, 'utf8'), /BEST DESIGN/);
+  assert.match(r.stdout, /^SAME JOB: 2 found — hints for the design: write reuse or not: <why> after each \(the reviewer sees the reason\)/m);
 });
 
-test('BEST DESIGN: Markdown emphasis and code marks around the label and the J id are removed before parsing', () => {
-  for (const line of ['**BEST DESIGN:** **J2** — one worker drains every change', 'BEST DESIGN: `J2` — one worker drains every change', '_BEST DESIGN_: J2 — one worker drains every change']) {
-    const f = briefed(BEST_REPORT + line + '\n');
+test('hints: a BEST DESIGN line in an older report or list is passed over, in any shape', () => {
+  for (const line of ['BEST DESIGN: J2 — one worker drains every change', '**BEST DESIGN:** **J2** — x', 'BEST DESIGN — J2: wrong shape', 'BEST DESIGN: J9 — no such line']) {
+    const f = briefed(HINTS + line + '\n' + line + '\n');
     const r = run(['--record', f.report, '--notes', f.notes]);
     assert.equal(r.status, 0, line + '\n' + r.stdout + r.stderr);
-    assert.match(fs.readFileSync(f.list, 'utf8'), /^BEST DESIGN: J2 — one worker drains every change$/m, line);
+    assert.doesNotMatch(fs.readFileSync(f.list, 'utf8'), /BEST DESIGN/, line);
   }
 });
 
-test('BEST DESIGN: "BEST DESIGN: none — <why>" is an answer, and a report with no same-job line needs none', () => {
-  const f = briefed(BEST_REPORT + 'BEST DESIGN: none — each one is a different system\n');
+test('hints: any J line closes "not: <why>" with no owner words, also one an older list marked BEST DESIGN', () => {
+  const f = briefed(HINTS);
   assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
-  assert.match(fs.readFileSync(f.list, 'utf8'), /^BEST DESIGN: none — each one is a different system$/m);
-  const g = briefed('SIBLINGS: none\nSAME JOB: none\n');
-  assert.equal(run(['--record', g.report, '--notes', g.notes]).status, 0);
-});
-
-test('BEST DESIGN: --check and --close refuse "not:" on the best J unless the owner\'s design words are recorded; the refusal prints the command', () => {
-  const f = briefed(BEST_REPORT + 'BEST DESIGN: J2 — one worker drains every change\n');
-  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
+  // A list of the release before carried the pick and locked that J.
+  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/(J2 · [^\n]*\n)/, '$1\nBEST DESIGN: J2 — one worker drains every change\n'));
   const why = 'not: it sends to Microsoft Graph, a different system with its own ordering';
-  // --close: the best J refuses, J1 (not the best) takes the same words; nothing is written when one is refused.
-  const before = fs.readFileSync(f.list, 'utf8');
   let r = run(['--close', f.list, '--set', 'J1=reuse', '--set', 'J2=' + why]);
-  assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stdout, /^REFUSED: J2 — J2 is the BEST DESIGN of the second look \(one worker drains every change\)/m);
-  assert.match(r.stdout, /notes\.mjs decide --kind design --question "BEST DESIGN J2" --words "<the owner's exact words>" --notes /);
-  assert.equal(fs.readFileSync(f.list, 'utf8'), before);
-  r = run(['--close', f.list, '--set', 'J2=reuse', '--set', 'J1=' + why]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  // --check: the same list, with the best J closed "not:" by hand, is open.
-  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^(J2 · .*?→).*$/m, '$1 ' + why));
-  let c = run(['--check', f.list]);
-  assert.equal(c.status, 1, c.stdout);
-  assert.match(c.stdout, /^OPEN: J2 · .* — J2 is the BEST DESIGN of the second look/m);
-  assert.match(c.stdout, /^SAME JOB: 2 found, 1 open$/m);
-  // The owner's recorded words (a design decision in the same notes folder) lift the refusal.
-  fs.writeFileSync(path.join(f.notes, 'decisions.json'), JSON.stringify({ version: 1, decisions: [{ id: 'D1', kind: 'design', question: '', words: 'use the paged roster, not the worker', question: 'BEST DESIGN J2', source: 'typed by the author', notes: [], at: new Date().toISOString() }] }));
-  c = run(['--check', f.list]);
-  assert.equal(c.status, 0, c.stdout + c.stderr);
-  assert.match(c.stdout, /^SAME JOB: 2 found, 0 open$/m);
-});
-
-// 2026-11-20 (fix round): the owner's design words unlock only the J line they name, and the report has exactly one
-// BEST DESIGN line with a reason.
-test('BEST DESIGN: a design decision for J1 does not unlock J2; one that names J2 does', () => {
-  const f = briefed(BEST_REPORT + 'BEST DESIGN: J2 — one worker drains every change\n');
-  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
-  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^(J1 · .*?→).*$/m, '$1 reuse').replace(/^(J2 · .*?→).*$/m, '$1 not: it sends to Microsoft Graph, a different system'));
-  const decide = (question) => fs.writeFileSync(path.join(f.notes, 'decisions.json'), JSON.stringify({ version: 1, decisions: [{ id: 'D1', kind: 'design', question, words: 'use the paged roster, not the worker', source: 'typed by the author', notes: [], at: new Date().toISOString() }] }));
-  decide('BEST DESIGN J1');
-  let c = run(['--check', f.list]);
-  assert.equal(c.status, 1, c.stdout);
-  assert.match(c.stdout, /^OPEN: J2 · .* — J2 is the BEST DESIGN/m);
-  assert.match(c.stdout, /decide --kind design --question "BEST DESIGN J2" --words/);
-  decide('BEST DESIGN J12');
-  assert.equal(run(['--check', f.list]).status, 1, 'J12 is not J2');
-  decide('BEST DESIGN J2');
-  c = run(['--check', f.list]);
-  assert.equal(c.status, 0, c.stdout + c.stderr);
-});
-
-test('BEST DESIGN: two BEST DESIGN lines, or one with no reason, are refused', () => {
-  const f = briefed(BEST_REPORT + 'BEST DESIGN: J1 — the outbox is how this repo sends later\nBEST DESIGN: J2 — one worker drains all\n');
-  let r = run(['--record', f.report, '--notes', f.notes]);
-  assert.equal(r.status, 2, r.stdout + r.stderr);
-  assert.match(r.stderr, /two BEST DESIGN lines/);
-  for (const line of ['BEST DESIGN: J1', 'BEST DESIGN: J1 — ok', 'BEST DESIGN: none —']) {
-    fs.writeFileSync(f.report, BEST_REPORT + line + '\n');
-    r = run(['--record', f.report, '--notes', f.notes]);
-    assert.equal(r.status, 2, line + r.stdout + r.stderr);
-    assert.match(r.stderr, /BEST DESIGN line has no reason/);
-  }
-  assert.equal(fs.existsSync(f.list), false, 'nothing written');
-});
-
-// 2026-11-20 (fix round 1b): the owner's words must come AFTER the list, and a wrong-shape BEST DESIGN line is called
-// malformed, with the right shape.
-test('BEST DESIGN: a design decision made before the list was recorded does not unlock it', () => {
-  const f = briefed(BEST_REPORT + 'BEST DESIGN: J2 — one worker drains every change\n');
-  assert.equal(run(['--record', f.report, '--notes', f.notes]).status, 0);
-  fs.writeFileSync(f.list, fs.readFileSync(f.list, 'utf8').replace(/^(J1 · .*?→).*$/m, '$1 reuse').replace(/^(J2 · .*?→).*$/m, '$1 not: it sends to Microsoft Graph, a different system'));
-  const decide = (at) => fs.writeFileSync(path.join(f.notes, 'decisions.json'), JSON.stringify({ version: 1, decisions: [{ id: 'D1', kind: 'design', question: 'BEST DESIGN J2', words: 'use the paged roster, not the worker', source: 'typed by the author', notes: [], at }] }));
-  decide('2000-01-01T00:00:00.000Z');
-  assert.equal(run(['--check', f.list]).status, 1, 'older than the list');
-  decide(new Date(Date.now() + 1000).toISOString());
+  assert.match(r.stdout, /^SAME JOB: 2 found, 0 open$/m);
   const c = run(['--check', f.list]);
   assert.equal(c.status, 0, c.stdout + c.stderr);
+  // A reason too short to tell the reviewer anything is still refused.
+  r = run(['--close', f.list, '--set', 'J1=not: no']);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^REFUSED: J1 — the reason after not: needs at least \d+ characters/m);
 });
 
-test('BEST DESIGN: a line with the wrong shape is malformed and the right shape is printed', () => {
-  const f = briefed(BEST_REPORT);
-  for (const line of ['BEST DESIGN — J2: one worker drains it', 'BEST DESIGN J2 one worker drains it all', 'BEST DESIGN: second one is best because it is simple']) {
-    fs.writeFileSync(f.report, BEST_REPORT + line + '\n');
-    const r = run(['--record', f.report, '--notes', f.notes]);
-    assert.equal(r.status, 2, line + r.stdout + r.stderr);
-    assert.match(r.stderr, /BEST DESIGN line is malformed: .*"BEST DESIGN: J<n> — <why>"/);
-  }
+test('hints: the author\'s design note (design.md) goes into the brief for the gap check', () => {
+  const f = fixture();
+  // A design line shaped like a check line ("- C1. …") must not be read back as one when the report is recorded.
+  fs.writeFileSync(path.join(f.notes, 'design.md'), 'Page the roster on the server; keep the add list from offering members.\n- C1. a line that only looks like a check line\n');
+  const b = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
+  assert.equal(b.status, 0, b.stdout + b.stderr);
+  const brief = fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8');
+  assert.match(brief, /^## The author's design \(design\.md\) — check it for gaps and missed places\n\n {4}Page the roster on the server; keep the add list from offering members\.\n {4}- C1\. a line that only looks like a check line$/m);
+  const report = path.join(f.notes, 'siblings-report.md');
+  fs.writeFileSync(report, 'SIBLINGS: none\nSAME JOB: none\n');
+  const rec = run(['--record', report, '--notes', f.notes]);
+  assert.equal(rec.status, 0, rec.stdout + rec.stderr);
+  const g = fixture();
+  assert.equal(run(['--brief', '--notes', g.notes, '--repo', g.repo]).status, 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(g.notes, 'siblings-brief.md'), 'utf8'), /^## The author's design/m);
 });

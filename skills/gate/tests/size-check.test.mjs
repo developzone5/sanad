@@ -495,8 +495,11 @@ test('plan mode with --names: --json carries the callers in the fields a diff gi
   assert.equal(r.size, 'big');
   assert.deepEqual(r.signals.callersMany, ['lib.ts:formatDate ×11']);
   assert.equal(r.callers.length, 1, out.stdout);
-  const { where, ...row } = r.callers[0];
+  const { where, places, ...row } = r.callers[0];
   assert.deepEqual(row, { name: 'formatDate', file: 'src/lib.ts', count: 11, tests: 1 });
+  // 2026-11-22: `places` holds every caller line with its repository path (the review brief's code copy reads it).
+  assert.equal(places.length, 11, JSON.stringify(places));
+  assert.ok(places.every(p => /^src\/u\d+\.ts:2$/.test(p)), JSON.stringify(places));
   assert.equal(where.length, 6, 'the first six places, as on a diff: ' + JSON.stringify(where));
   assert.equal(r.moreSymbols, 0);
   const diff = JSON.parse(planCli(repo, '--base', 'base', '--json').stdout);

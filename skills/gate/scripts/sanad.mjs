@@ -28,7 +28,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isMain } from './is-main.mjs';
-import { parseSiblings, jobOpenReason, designDecided } from './siblings.mjs';
+import { parseSiblings, jobOpenReason } from './siblings.mjs';
 import { requestStart, report as timerReport } from './sanad-timer.mjs';
 import { readRecord, codeFingerprint, recordKey } from './proof-record.mjs';
 import { foreignLine as foreignText } from './change-set.mjs';
@@ -148,13 +148,28 @@ function setTaskDir(top, notes) {
 }
 
 // 2026-11-20 (fix round): J lines of siblings.md that carry an outcome and are still open by the rules of
-// siblings.mjs --check (the BEST DESIGN line closed "not:" with no owner words after the list, a too-short reason), so
-// `next` and `ready` do not say 0 open while pre-review refuses. An unreadable list adds none.
-export function refusedJobs(text, notes) {
+// siblings.mjs --check (a reason after not: that is too short), so `next` and `ready` do not say 0 open while
+// pre-review refuses. An unreadable list adds none.
+// 2026-11-22 (early review is the default): the review may start when, for the tree under review, a proof log shows
+// the passing run ("ran green: exit 0") and the old-code run red ("ran old code: exit <n>", n above 0), while its
+// breaks still run (red-proof.mjs writes the log line by line). A log of another tree counts for nothing; with a page
+// and a server side, each side needs such a log.
+export function proofStartedEarly(logs, tree, sides = 1) {
+  if (!tree) return false;
+  let early = 0;
+  for (const l of logs) {
+    const t = readText(l);
+    const m = /^RED-PROOF-LOG: tree ([0-9a-f]{40,64}) /m.exec(t);
+    if (!m || m[1] !== tree) continue;
+    if (/^\s*ran green: exit 0\b/m.test(t) && /^\s*ran old code: exit [1-9]\d*\b/m.test(t)) early++;
+  }
+  return early > 0 && early >= Math.max(1, sides);
+}
+
+export function refusedJobs(text) {
   try {
     const list = parseSiblings(text);
-    const decided = designDecided(notes, list.recorded);
-    return list.jobs.filter((r) => r.outcome.trim() && jobOpenReason(r, { best: list.best, decided, notes })).length;
+    return list.jobs.filter((r) => r.outcome.trim() && jobOpenReason(r)).length;
   } catch { return 0; }
 }
 
@@ -308,7 +323,7 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
   return {
     top, notesDir: dir, task, lane, size, last, base,
     testsOnly, textProof,
-    switches: { stopRound: sw.stopround, testsOnlyLane: on(sw.testsonlylane), designChoice: on(sw.designchoice), reviewEarly: on(sw.reviewearly), lateCheckLines: String(sw.latechecklines || '').trim().toLowerCase() !== 'false', remoteHost: sw.remotehost || '' },
+    switches: { stopRound: sw.stopround, testsOnlyLane: on(sw.testsonlylane), designChoice: on(sw.designchoice), lateCheckLines: String(sw.latechecklines || '').trim().toLowerCase() !== 'false', remoteHost: sw.remotehost || '' },
     stop: stopRound(sw.stopround), switchHits,
     has: {
       lines: fs.existsSync(at('lines.md')), places: fs.existsSync(at('places.md')), siblings: fs.existsSync(at('siblings.md')),
@@ -320,7 +335,7 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
     pins, lastPin, pinAtHead, round: pins.length, reviewReported: pinAtHead && reviewReported(lastPin, read.reviews, reports, reportFiles), reviewSeats: reviewProgress(lastPin, read.reviews, reports, reportFiles),
     // 2026-11-20 (timed task): every proof log of the folder (proof*.log), so the review step names them all.
     proofLogs: dir ? (() => { try { return fs.readdirSync(dir).filter((n) => /^proof.*\.log$/i.test(n)).sort().map((n) => at(n)); } catch { return []; } })() : [],
-    proof: { done: proofDone, missingSides, entries: ents.length, breaks: proved.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: logs.some((l) => /^RED-PROOF-OLD:/m.test(readText(l))), progress, logs },
+    proof: { done: proofDone, missingSides, entries: ents.length, breaks: proved.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
     checks: { code: undefined, all: undefined },
     suite: { done: Boolean(receipt || ci), receipt, ci, mark: task.suite || '' },
     notes: { known: read.known, all, open: read.known ? all.filter(isOpen) : [] },

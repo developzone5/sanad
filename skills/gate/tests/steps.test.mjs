@@ -152,10 +152,13 @@ test('after a clean re-check the full proof and the suite are printed; a suite t
   assert.doesNotMatch(text(ci), /the full suite, once/);
 });
 
-test('the review starts with the proof only with the owner switch and both first runs in the log', () => {
+// 2026-11-22 (owner): early review is the default; there is no switch for it.
+test('the review starts with the proof once both first runs are in the log, with no switch', () => {
   assert.deepEqual(ids(facts({ checks: { code: true } })), ['proof']);
-  assert.deepEqual(ids(facts({ checks: { code: true }, proof: { early: true } })), ['proof']);
-  assert.deepEqual(ids(facts({ checks: { code: true }, proof: { early: true }, switches: { reviewEarly: true } })), ['proof', 'review']);
+  assert.deepEqual(ids(facts({ checks: { code: true }, proof: { early: true } })), ['proof', 'review']);
+  assert.ok(!ids(facts({ checks: { code: true }, proof: { early: true }, git: { clean: false } })).includes('review'), 'not on an unsaved tree');
+  // The cheap checks have no record of their own, so the proof is printed beside them, not first: the review still starts.
+  assert.ok(ids(facts({ checks: { code: undefined }, proof: { early: true } })).includes('review'), 'proof beside the checks');
 });
 
 test('a path with a space, a dollar sign, a backtick or Arabic letters is one shell word', () => {
