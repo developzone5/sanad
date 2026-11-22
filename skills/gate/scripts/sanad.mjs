@@ -340,6 +340,7 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
     suite: { done: Boolean(receipt || ci), receipt, ci, mark: task.suite || '' },
     notes: { known: read.known, all, open: read.known ? all.filter(isOpen) : [] },
     decisions, pushed,
+    selfRead: dir ? String((readJson(at(SELF_READ)) || {}).commit || '') : '',
   };
 }
 
@@ -456,7 +457,7 @@ export async function statusLines(f) {
 function parse(argv) {
   const o = { cmd: argv[0] || '', repo: '.', notes: '', sideCommand: [] };
   const flags = new Set(['--last', '--server']);
-  const known = new Set(['--repo', '--notes', '--base', '--engine', '--ticket', '--suite', '--suite-ci', '--side', '--cwd', '--fix-files', '--out', '--receipts']);
+  const known = new Set(['--repo', '--notes', '--base', '--engine', '--ticket', '--suite', '--suite-ci', '--side', '--cwd', '--fix-files', '--out', '--receipts', '--found']);
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') { o.sideCommand = argv.slice(i + 1); break; }
@@ -467,7 +468,21 @@ function parse(argv) {
   return o;
 }
 
-export const USAGE = 'Usage: sanad.mjs start --repo <repo> --notes <dir> [--base <ref>] [--engine claude|codex] [--ticket <file>] [--suite <words>] [--suite-ci <job>] [--receipts <dir>] [--side <name> [--cwd <dir>] [--server] [--fix-files <a,b>] -- <test command>]\n       sanad.mjs next|status|ready|owed|pr-body [--repo <repo>] [--notes <dir>] [--last] [--out <file>]';
+export const USAGE = 'Usage: sanad.mjs start --repo <repo> --notes <dir> [--base <ref>] [--engine claude|codex] [--ticket <file>] [--suite <words>] [--suite-ci <job>] [--receipts <dir>] [--side <name> [--cwd <dir>] [--server] [--fix-files <a,b>] -- <test command>]\n       sanad.mjs next|status|ready|owed|pr-body [--repo <repo>] [--notes <dir>] [--last] [--out <file>]\n       sanad.mjs self-read [--repo <repo>] [--notes <dir>] --found <what you found and fixed, or none>';
+
+// 2026-11-22 (owner, PR 3 item 1): the author reads its own diff against the "Every change" lines of review-checklist.md
+// and fixes what it finds before the checks, the proof and the review. The record holds the commit read, so a later
+// commit makes the step due again. It is the step printer's record only: no guard reads it.
+export const SELF_READ = 'self-read.json';
+function selfRead(f, found, print) {
+  if (!f.notesDir) { print('SANAD: no task for this work tree — run start first'); return 3; }
+  if (!f.git.clean || !(f.git.ahead > 0) || !f.git.head) { print('SELF-READ: not recorded — commit the change first: the record is for one commit, and only a clean tree has one'); return 1; }
+  const said = String(found || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (said.length < 4) { print('SELF-READ: not recorded — --found needs what you found and fixed, or "none"'); return 2; }
+  fs.writeFileSync(path.join(f.notesDir, SELF_READ), JSON.stringify({ commit: f.git.head, found: said, at: new Date().toISOString() }, null, 2) + '\n');
+  print(`SELF-READ: recorded for commit ${f.git.head.slice(0, 10)} — ${said}`);
+  return 0;
+}
 
 function start(o) {
   if (!o.notes) throw new Error('start needs --notes <dir>');
@@ -504,7 +519,7 @@ function start(o) {
 export async function main(argv, print = (line) => process.stdout.write(line + '\n'), { sessionNotes } = {}) {
   let o;
   try { o = parse(argv); } catch (error) { process.stderr.write(`SANAD: ${error.message}\n${USAGE}\n`); return 2; }
-  if (!['start', 'next', 'status', 'ready', 'owed', 'pr-body'].includes(o.cmd)) { process.stderr.write(USAGE + '\n'); return 2; }
+  if (!['start', 'next', 'status', 'ready', 'owed', 'pr-body', 'self-read'].includes(o.cmd)) { process.stderr.write(USAGE + '\n'); return 2; }
   try {
     if (o.cmd === 'start') { for (const l of [...start(o), ...nextLines(readFacts({ repo: o.repo, notes: path.resolve(o.notes) }))]) print(l); return 0; }
     const ask = { repo: path.resolve(o.repo), notes: o.notes ? path.resolve(o.notes) : '', last: Boolean(o.last), deep: o.cmd !== 'next', ...(sessionNotes ? { sessionNotes } : {}) };
@@ -513,6 +528,7 @@ export async function main(argv, print = (line) => process.stdout.write(line + '
     // After the first review the notes decide the step: read them, with the scanner's reader.
     if (!ask.deep && !sessionNotes && f.pins.length) { await loadNotesTools(); f = readFacts(ask); }
     if (o.cmd === 'next') { for (const l of nextLines(f)) print(l); return 0; }
+    if (o.cmd === 'self-read') return selfRead(f, o.found, print);
     if (!f.notesDir) { print('SANAD: no task for this work tree — run start first'); return 3; }
     if (o.cmd === 'status') { for (const l of await statusLines(f)) print(l); return 0; }
     if (o.cmd === 'ready') {

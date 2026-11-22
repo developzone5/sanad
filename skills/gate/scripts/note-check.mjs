@@ -380,7 +380,8 @@ export function collectNotes(files, reportNotes) {
   for (const file of files) {
     const report = readReport(file);
     for (const [index, found] of reportNotes(report).entries()) {
-      if (list.some((k) => k.text === found.text)) continue;
+      // A line that only says there is none ("EXTRA TEST: none.") is closed by the guards: nothing to check.
+      if (found.none || list.some((k) => k.text === found.text)) continue;
       const note = { n: list.length + 1, kind: found.kind, from: path.basename(file), text: found.text, ...(found.asks ? { asks: true } : {}) };
       if (found.text.length >= limit) {
         const whole = wholeNote(report, index, reportNotes, limit);

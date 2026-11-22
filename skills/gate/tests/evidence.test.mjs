@@ -209,7 +209,7 @@ else { process.stdout.write(${JSON.stringify(vitestOut([{ file: SLOW }]))}); pro
   // The hook credits only the helper under a .claude folder; the spec folder has a space in its name.
   const scripts = path.join(root, 'home', '.claude', 'skills', 'gate', 'scripts');
   fs.mkdirSync(scripts, { recursive: true });
-  for (const name of ['evidence.mjs', 'run-summary.mjs', 'is-main.mjs']) fs.copyFileSync(fileURLToPath(new URL('../scripts/' + name, import.meta.url)), path.join(scripts, name));
+  for (const name of ['evidence.mjs', 'run-summary.mjs', 'is-main.mjs', 'test-machine-lock.mjs']) fs.copyFileSync(fileURLToPath(new URL('../scripts/' + name, import.meta.url)), path.join(scripts, name));
   const script = path.join(scripts, 'evidence.mjs').replace(/\\/g, '/');
   fs.mkdirSync(path.join(root, 'check specs'), { recursive: true });
   const specArg = path.join(root, 'check specs').replace(/\\/g, '/') + '/frontend-full.json';

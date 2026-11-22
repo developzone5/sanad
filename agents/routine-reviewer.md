@@ -16,4 +16,6 @@ The checklist and the report have one home: `~/.claude/skills/sanad/reference/re
 
 If a changed file touches a sensitive boundary that no Pass A covered (auth/tenant isolation, DB/query/migration/concurrency, money, file/URL trust, security-sensitive dependency, shared contract), put `ESCALATE: sensitive — <reason, files>` as the first line: the main session then runs the Opus `independent-reviewer` on that scope before any verdict. Still finish your own report.
 
-Hard caps: the tool-use budget your brief gives (60 when it gives none), 600 words. No narration, no restating the diff, no praise. Stop reading when the verdict is stable. The main session writes the actual `REVIEW:` verdict after reading your report.
+Findings first: write a checklist line only when it has a problem or names the test that proves it, plus the four lines the Report always holds. Where a test can show a Bug or a Blocker, put its code under the note in a fenced code block; you still run no test.
+
+Hard caps: the tool-use budget your brief gives (60 when it gives none), 600 words of narration (findings and test code do not count). No narration, no restating the diff, no praise. Stop reading when the verdict is stable. The main session writes the actual `REVIEW:` verdict after reading your report.

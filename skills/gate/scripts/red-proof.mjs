@@ -170,6 +170,7 @@ import { keepRunRecord } from './run-record.mjs';
 import { bashEnv, gitBash } from './git-bash.mjs';
 import { selectCommand } from './proof-select.mjs';
 import { changeSet, foreignLine } from './change-set.mjs';
+import { holdTestMachine } from './test-machine-lock.mjs';
 
 // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
 // missing element, a type, reference or build error, or a timeout means the test itself (or the
@@ -1486,6 +1487,9 @@ async function main() {
       '--base', 'HEAD', '--cwd', q(rel ? remoteRepo + '/' + rel : remoteRepo), '--log', q(dir + '/' + logName),
       '--', q(exe), ...command.slice(1).map(q)].join(' ');
     if (opts.includes('--show-remote')) { say(`RED-PROOF: on ${remoteHost} this runs: ${remoteCmd}`); process.exit(0); }
+    // 2026-11-22 (owner): never beside a test run on the test machine; held until this process ends. A wait that runs
+    // out stops the proof (exit 2); it never runs beside the other run.
+    if (!(await holdTestMachine(remoteHost, 'proof', 'red-proof', { say }))) process.exit(2);
     const dbContainer = gitText(['config', '--get', 'sanad.remoteDbContainer']);
     const watchDb = dotnetRun && !warm && Boolean(dbContainer);
     let dbReady = false, dbPreflight;

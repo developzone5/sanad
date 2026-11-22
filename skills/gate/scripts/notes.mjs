@@ -81,10 +81,11 @@ function reportFileNotes(files, scan) {
     const text = readReport(file);
     const read = scan.reportNotes(text);
     const seat = path.basename(file);
-    if (!read.some((n) => /^(?:Blocker|Bug|Gap)$/.test(n.kind)) && FAIL_REPORT.test(text.replace(/\r/g, ''))) {
+    if (!read.some((n) => !n.none && /^(?:Blocker|Bug|Gap)$/.test(n.kind)) && FAIL_REPORT.test(text.replace(/\r/g, '').replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, ''))) {
       out.push({ kind: 'Blocker', text: 'the reviewer said FAIL but no finding line could be read: ask it to restate each finding as a line that starts with Blocker, Bug, Gap or Question', seat });
     }
-    for (const n of read) out.push({ kind: n.kind, text: n.text, seat, ...(n.asks ? { asks: true } : {}) });
+    // A line that only says there is none keeps its number, closed (state 'none'), as the guards keep it.
+    for (const n of read) out.push({ kind: n.kind, text: n.text, seat, ...(n.asks ? { asks: true } : {}), ...(n.none ? { none: true } : {}) });
   }
   return out;
 }
@@ -136,7 +137,7 @@ export function sessionNotes({ repo, transcript, reports = [], notes } = {}) {
     Object.assign(list, { source: 'session', transcript: found, checked: true, scan: r, searched });
   } else {
     if (!files.length) throw usage(repo !== undefined ? `no session log of ${slash(repo)} holds a review note: pass --transcript <file.jsonl>, or --reports <files> on a host with no session log` : 'the notes cannot be read: give --transcript <file.jsonl>, --repo <path> or --reports <file1,file2,...>');
-    list = reportFileNotes(files, scan).map((n, i) => ({ n: i + 1, seat: n.seat, kind: n.kind, state: 'open', answer: '', place: placeOf(n.text), text: oneLine(n.text), ...(n.asks ? { asks: true } : {}) }));
+    list = reportFileNotes(files, scan).map((n, i) => ({ n: i + 1, seat: n.seat, kind: n.kind, state: n.none ? 'none' : 'open', answer: '', place: placeOf(n.text), text: oneLine(n.text), ...(n.asks ? { asks: true } : {}) }));
     Object.assign(list, { source: 'reports', transcript: '', checked: false, scan: null });
   }
   list.groups = groupNotes(list);
@@ -264,7 +265,8 @@ function goalCount(notesDir) {
 export function reviewLine(list, { goals, untested = 0, reviewed = true }) {
   // No finished reviewer run on record: no PASS and no FAIL, the review has not happened.
   if (!reviewed) return { pass: false, open: [], line: NO_REVIEW };
-  const bugs = list.filter((n) => /^(?:Blocker|Bug)$/i.test(n.kind));
+  // A "Bug: none." line (state 'none') is no bug.
+  const bugs = list.filter((n) => n.state !== 'none' && /^(?:Blocker|Bug)$/i.test(n.kind));
   const open = list.filter((n) => n.state === 'open');
   const tested = goals - untested;
   const pass = !open.length && untested === 0;
@@ -381,11 +383,14 @@ async function runAnswer(o, out, err) {
   const sel = { fixed: o.fixed ? resolveTargets(o.fixed, list) : [], what: o.what, user: o.user ? resolveTargets(o.user, list) : [], words, refuted: o.refuted ? resolveTargets(o.refuted, list) : [] };
   const twice = [...sel.fixed, ...sel.user, ...sel.refuted].filter((n, i, all) => all.indexOf(n) !== i);
   if (twice.length) throw usage(`NOTE ${twice[0]} has two answers in one run: give each note one answer`);
-  const { lines, refused } = judgeAnswers(list, sel);
-  if (refused.length) {
-    err(refused.map((r) => `STILL OPEN: NOTE ${r.n} — ${r.reason}`).join('\n') + '\nNOTES: no answer written: every note of one run must be accepted (fix the cause, then run answer again)\n');
-    return 1;
-  }
+  const judged = judgeAnswers(list, sel);
+  const refused = judged.refused;
+  // 2026-11-22 (owner): a note the guards accept as answered closes, even when another note of the same run is still
+  // open (a fixed note no longer waits for a note that waits for the owner). The open ones are named, and the run
+  // still ends with exit 1, so nothing is called done.
+  const lines = judged.lines.filter((l) => !refused.some((r) => r.n === l.n));
+  if (refused.length) err(refused.map((r) => `STILL OPEN: NOTE ${r.n} — ${r.reason}`).join('\n') + '\n');
+  if (!lines.length) { err('NOTES: no answer written: no note of this run was accepted (fix the cause, then run answer again)\n'); return 1; }
   // A group is answered with one text: each of its texts is shown, so one answer never hides a second finding.
   for (const g of list.groups) {
     const hit = g.notes.filter((n) => lines.some((l) => l.n === n));
@@ -393,7 +398,7 @@ async function runAnswer(o, out, err) {
   }
   out(lines.map((l) => l.line).join('\n') + '\n' + (list.checked ? '' : lines.map((l) => `NOT CHECKED: NOTE ${l.n} — ${NOT_CHECKED}`).join('\n') + '\n'));
   err('SEND: these NOTE lines as one message with no tool call, unless the guards of this release read them from this run.\n');
-  return 0;
+  return refused.length ? 1 : 0;
 }
 
 async function runAsk(o, out) {

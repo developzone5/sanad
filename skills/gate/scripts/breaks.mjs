@@ -8,9 +8,10 @@ import { isMain } from './is-main.mjs';
 import { breakHits, markNewTests } from './red-proof.mjs';
 
 const COMMON = ['--breaks', '--repo'];
-const ADD = ['--file', '--line', '--to', '--put', '--put-file', '--must-fail'];
+const ADD = ['--file', '--line', '--to', '--put', '--put-file', '--put-from', '--must-fail'];
+const PUTS = ['--put', '--put-file', '--put-from'];
 const USAGE = [
-  'Usage: breaks.mjs add --breaks <file> --repo <repo> --file <f> --line <n> [--to <n>] (--put <text> | --put-file <file>) --must-fail <words>',
+  'Usage: breaks.mjs add --breaks <file> --repo <repo> --file <f> --line <n> [--to <n>] (--put <text> | --put-file <file> | --put-from <reviewed commit>:<a>[-<b>]) --must-fail <words>',
   '       breaks.mjs seed --breaks <file> --repo <repo> --base <ref>',
 ].join('\n');
 
@@ -31,8 +32,8 @@ function options(args) {
   }
   const required = [...COMMON, ...(command === 'add' ? ['--file', '--line', '--must-fail'] : ['--base'])];
   for (const flag of required) if (!opts.has(flag)) throw new Error(`Missing ${flag}.\n${USAGE}`);
-  if (command === 'add' && opts.has('--put') === opts.has('--put-file')) {
-    throw new Error('Supply one of --put or --put-file. Use --put-file for code with quotes or shell symbols.');
+  if (command === 'add' && PUTS.filter((f) => opts.has(f)).length !== 1) {
+    throw new Error('Supply one of --put, --put-file or --put-from. Use --put-file for code with quotes or shell symbols.');
   }
   return { command, opts };
 }
@@ -84,8 +85,34 @@ function addEntry(repo, output, opts) {
   if (hits !== 1) throw new Error(`Selected text matches ${hits} time(s) in ${file}; it must match exactly once. Use --to to add more lines.`);
   const name = opts.get('--must-fail');
   if (!name.trim()) throw new Error('--must-fail needs words from a test title.');
-  const put = replacement ? readText(replacement) : opts.get('--put');
+  const put = replacement ? readText(replacement) : opts.has('--put-from') ? reviewedLines(repo, file, opts.get('--put-from')) : opts.get('--put');
   return { name, file, find, put, mustFail: [name] };
+}
+
+// 2026-11-22 (owner, PR 3 item 3): a bug the fix itself brought in passes on the base, so "red on the old code" cannot
+// prove the reviewer's test for it. The break puts the REVIEWED commit's lines back instead: --put-from
+// <commit>:<a>[-<b>] reads lines a..b of the same file as that commit holds them, never typed. The commit must be a
+// review pin (refs/sanad/review/<task>/<round>, written by review-brief --pin), so the text is what the reviewer read.
+function reviewedLines(repo, file, spec) {
+  const m = /^([^:\s]+):(\d+)(?:-(\d+))?$/.exec(String(spec));
+  if (!m) throw new Error('--put-from needs <reviewed commit>:<first line>[-<last line>], e.g. 4f52a6d0:38-41.');
+  const sha = gitOut(repo, ['rev-parse', '--verify', '-q', `${m[1]}^{commit}`]);
+  if (!sha) throw new Error(`--put-from: ${m[1]} is not a commit of this repository.`);
+  const pins = gitOut(repo, ['for-each-ref', '--format=%(objectname)', 'refs/sanad/review/']).split(/\r?\n/).filter(Boolean);
+  if (!pins.includes(sha)) throw new Error(`--put-from: ${m[1]} is not a reviewed commit (no review pin under refs/sanad/review/ holds it). Use the commit the reviewers read.`);
+  // A file, not a folder: `git show` of a folder prints its listing (attack, 2026-11-22).
+  if (gitOut(repo, ['cat-file', '-t', `${sha}:${file}`]) !== 'blob') throw new Error(`--put-from: ${file} is not a file in the reviewed commit ${sha.slice(0, 10)}.`);
+  let text;
+  try { text = execFileSync('git', ['-C', repo, 'cat-file', 'blob', `${sha}:${file}`], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 }); }
+  catch { throw new Error(`--put-from: ${file} is not a file in the reviewed commit ${sha.slice(0, 10)}.`); }
+  const from = lineNumber(m[2], '--put-from'), to = m[3] ? lineNumber(m[3], '--put-from') : from;
+  const lines = text.split(/(\r?\n)/);
+  const count = Math.floor(lines.length / 2) + (lines.at(-1) === '' ? 0 : 1);
+  if (to < from || to > count) throw new Error(`--put-from: lines ${from}-${to} are outside ${file} at ${sha.slice(0, 10)} (${count} lines).`);
+  return lines.slice(2 * (from - 1), 2 * to - 1).join('');
+}
+function gitOut(repo, args) {
+  try { return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return ''; }
 }
 
 function seedEntries(repo, base) {

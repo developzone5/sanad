@@ -291,7 +291,7 @@ function invoke(hook, entries, options = {}) {
   const codePaths = { exports: {} };
   vm.runInNewContext(source('lib/code-paths.cjs'), { require: (n) => n === 'fs' ? fakeFs : realRequire(n), module: codePaths }, { timeout: 2000 });
   const scanModule = { exports: {} };
-  vm.runInNewContext(source('lib/transcript-scan.js'), { require: (n) => n === 'fs' ? fakeFs : n === './verification-target.cjs' ? verificationTarget.exports : n === './shell-command.cjs' ? shellCommand.exports : n === './code-paths.cjs' ? codePaths.exports : realRequire(n), module: scanModule, Buffer }, { timeout: 2000 });
+  vm.runInNewContext(source('lib/transcript-scan.js'), { require: (n) => n === 'fs' ? fakeFs : n === './verification-target.cjs' ? verificationTarget.exports : n === './shell-command.cjs' ? shellCommand.exports : n === './code-paths.cjs' ? codePaths.exports : n === './session-root.cjs' ? realRequire(path.join(hooks, 'lib', 'session-root.cjs')) : realRequire(n), module: scanModule, Buffer }, { timeout: 2000 });
   let stdout = '';
   const halt = Symbol('exit');
   try {

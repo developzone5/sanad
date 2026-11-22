@@ -5,12 +5,12 @@ What a reviewer checks in Sanad Step 3.5 ([loop.md](loop.md)). The whole-diff an
 ## Report
 
 1. `RECOMMEND: PASS|FAIL`
-2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. A confirmed defect, a rare one included, is a Blocker or a Bug, never "info" or "accepted"; one open Blocker or Bug means FAIL. A rare case (no ticket line covers it, and no effect on access, security or saved data) ends its line with `(RARE)`: it stays a counted note, and the user answers all of them in one list, fix now or a known limit in the PR text. A `Question` is only for what the quoted ticket, QA and spec lines leave open, and it quotes that line; a question those lines already answer is not listed: check the change against that answer.
+2. Findings, most severe first, one line each: `Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`. A finding under a checklist line names it in round brackets after the kind: `Bug (CLIENT STATE) — …`. Where a test can show a Bug or a Blocker, put that test's code under the note, always inside a fenced code block (```): the author adds it and runs it on the reviewed code. A confirmed defect, a rare one included, is a Blocker or a Bug, never "info" or "accepted"; one open Blocker or Bug means FAIL. A rare case (no ticket line covers it, and no effect on access, security or saved data) ends its line with `(RARE)`: it stays a counted note, and the user answers all of them in one list, fix now or a known limit in the PR text. A `Question` is only for what the quoted ticket, QA and spec lines leave open, and it quotes that line; a question those lines already answer is not listed: check the change against that answer.
 3. A test for a case this change does not touch, that the ticket does not name: `EXTRA TEST: <the product change the tests would let through> — <the test that should fail>`. A missing test for a correctness or security rule this change adds, widens or newly exposes (access, tenant, a concurrent or repeated request, a rollback, a failure path) is a `Gap`, whatever the ticket says.
-4. The checklist below, one short line each: `✓`, `✗ <what>` or `– n/a <why>`. On a re-check: only the lines the changed files touch, and the state of every earlier note.
-5. `NOT VERIFIED:` one line. `OUTSIDE PR:` defects on paths the change neither touches, shows nor makes reachable, one line each; the main session puts each to the user before the push. A defect on a path the change adds, changes, shows or makes reachable is a finding in item 2, even when the line is older than the branch.
+4. The checklist below, checked in full, written short: only a line with a problem (`✗ <what>`) or one that names the test that proves it (`✓ <test name>`); leave out a bare `✓` and every n/a line. Four lines are always written, because they show the work was done: `COVERAGE:` (one line per check line), `USERS FOUND BY SEARCH:` (name the searches you ran), `DATABASE:` when its trigger applies, and `NOT VERIFIED:`. On a re-check: only the lines the changed files touch, and the state of every earlier note.
+5. `NOT VERIFIED:` one line, always. `OUTSIDE PR:` defects on paths the change neither touches, shows nor makes reachable, one line each; the main session puts each to the user before the push. A defect on a path the change adds, changes, shows or makes reachable is a finding in item 2, even when the line is older than the branch.
 
-Every line of items 2 and 3 is a note. The author must fix it or bring the user's own words; the author cannot close it alone. No praise, no restating the diff. Caps: the tool-use budget the brief gives (60 when it gives none), 600 words.
+Every line of items 2 and 3 is a note. The author must fix it or bring the user's own words; the author cannot close it alone. No praise, no restating the diff. Caps: the tool-use budget the brief gives (60 when it gives none), 600 words of narration: the findings and test code do not count.
 
 ## Every change
 
@@ -32,7 +32,7 @@ Every line of items 2 and 3 is a note. The author must fix it or bring the user'
 
 ## Only for this type of change
 
-The trigger is in brackets. When it does not apply, write `– n/a <why>`.
+The trigger is in brackets. When it does not apply, leave the line out (`DATABASE:` is written whenever its trigger applies).
 
 - `WRITERS:` [a shared entity, model or concurrency change] every writer, including other features, login updates, jobs and bulk or raw SQL, and whether the new rule changes its success or failure path.
 - `MEANING:` [a user-visible number, ranking or threshold changes] `one unit = <before> → <after>`, and the test where one actor repeats the action N times beside N actors doing it once. A label that no longer names the unit is a finding.

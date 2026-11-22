@@ -104,19 +104,71 @@ test('answer --fixed with no edit after the note: exit 1, no answer printed, the
   assert.deepEqual(scan.openNotesAfter(scan.scanTranscript(fixed), ok.stdout), []);
 });
 
-test('answer for a group gives one NOTE line per note number, and one refused note stops the whole run', () => {
+// 2026-11-22 (owner): a note the guards accept closes, even when another note of the same run stays open. Before, one
+// refused note stopped the whole run, so fixed notes stayed open while another note waited for the owner.
+test('answer for a group gives one NOTE line per note number; a refused note stays open and the accepted one is still written', () => {
   const file = session([...reviewerRun('a', report(SAME), 1), ...change(3), ...reviewerRun('b', report(SAME), 5)]);
-  // Note 1 has an edit and a pass after it; note 2 (the same place, a later report) has none: nothing is written.
+  // Note 1 has an edit and a pass after it; note 2 (the same place, a later report) has none.
   const r = run(['answer', '--fixed', 'G1', '--what', 'the empty list returns early; test SaveRoleTests.Empty', '--transcript', file]);
   assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.equal(r.stdout, '');
+  assert.equal(r.stdout, 'NOTE 1: fixed — the empty list returns early; test SaveRoleTests.Empty\n');
   assert.match(r.stderr, /^STILL OPEN: NOTE 2 — /m);
   assert.doesNotMatch(r.stderr, /STILL OPEN: NOTE 1 /);
+  // The guards read the written line the same way: note 1 closes, note 2 stays open.
+  assert.deepEqual(scan.openNotesAfter(scan.scanTranscript(file), r.stdout).map((n) => n.n), [2]);
   const both = session([...reviewerRun('a', report(SAME), 1), ...reviewerRun('b', report(SAME), 3), ...change(6)]);
   const ok = run(['answer', '--fixed', 'G1', '--what', 'the empty list returns early; test SaveRoleTests.Empty', '--transcript', both]);
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
   assert.deepEqual(ok.stdout.trim().split('\n').map((l) => l.slice(0, 15)), ['NOTE 1: fixed —', 'NOTE 2: fixed —']);
   assert.match(ok.stderr, /G1 · src\/save\.ts:12 · one answer for 2 notes/);
+});
+
+test('a fixed note and a note that waits for the owner in one run: the fixed one is written, the other stays open', () => {
+  const file = session([...reviewerRun('a', report(SAME, QUESTION), 1), ...change(4)]);
+  const r = run(['answer', '--fixed', 'N1', '--what', 'the empty list returns early; test SaveRoleTests.Empty', '--user', 'N2', '--words', 'the owner never typed these words', '--transcript', file]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.equal(r.stdout, 'NOTE 1: fixed — the empty list returns early; test SaveRoleTests.Empty\n');
+  assert.match(r.stderr, /^STILL OPEN: NOTE 2 — the quoted words are not in a message the user typed after this report/m);
+  assert.deepEqual(scan.openNotesAfter(scan.scanTranscript(file), r.stdout).map((n) => n.n), [2]);
+  // No note accepted: nothing is written, as before.
+  const none = run(['answer', '--user', 'N2', '--words', 'the owner never typed these words', '--transcript', file]);
+  assert.equal(none.status, 1);
+  assert.equal(none.stdout, '');
+  assert.match(none.stderr, /NOTES: no answer written/);
+});
+
+// 2026-11-22 (owner, PR 3 item 3): a Bug brings its test as code in a fenced block. Lines in that code that look like
+// a note or a verdict are an example: they give no extra note, and no verdict of their own.
+const FENCED_REPORT = [
+  'RECOMMEND: FAIL', '',
+  'Bug (CLIENT STATE) — src/save.ts:12 — an empty role list → the request is still sent — return early',
+  '```ts',
+  "test('Bug — an empty list sends nothing', async () => {",
+  "  // RECOMMEND: PASS",
+  "  // EXTRA TEST: two roles in one school",
+  "  // Gap — b.ts:9 — no test",
+  '  expect(await saveRole([])).toBe(0);',
+  '});',
+  '```',
+].join('\n');
+test('a Bug with its test in a fenced block: one note, and the fenced lines give no note and no verdict', () => {
+  const file = session(reviewerRun('a', FENCED_REPORT, 1));
+  const open = scan.scanTranscript(file).openReviewNotes || [];
+  assert.deepEqual(open.map((n) => [n.n, n.kind]), [[1, 'Bug']]);
+  assert.match(open[0].text, /^Bug \(CLIENT STATE\) — src\/save\.ts:12/);
+  // A PASS report that quotes a test holding "RECOMMEND: FAIL" and a Bug-shaped line: no note at all.
+  const pass = session(reviewerRun('b', ['RECOMMEND: PASS', '', 'no findings', '```js', '// RECOMMEND: FAIL', 'Bug — x.ts:1 — a → b', '```'].join('\n'), 1));
+  assert.deepEqual(scan.scanTranscript(pass).openReviewNotes || [], []);
+});
+
+test('"EXTRA TEST: none." is closed by the guards and keeps its number; a PASS report quoting a bare FAIL verdict in a fence gives no Blocker', () => {
+  const file = session(reviewerRun('a', ['RECOMMEND: FAIL', '', 'EXTRA TEST: none.', SAME, 'Gap: none.', GAP].join('\n'), 1));
+  const r = scan.scanTranscript(file);
+  assert.deepEqual(r.reviewNotes.map((n) => [n.n, n.kind, n.outcome]), [[1, 'EXTRA TEST', 'none'], [2, 'Bug', null], [3, 'Gap', 'none'], [4, 'Gap', null]]);
+  assert.deepEqual(r.openReviewNotes.map((n) => n.n), [2, 4]);
+  assert.deepEqual(listed(file).notes.map((n) => n.n), [2, 4]);
+  const pass = session(reviewerRun('b', ['RECOMMEND: PASS', '', 'no findings', '```', 'RECOMMEND: FAIL', '```'].join('\n'), 1));
+  assert.deepEqual(scan.scanTranscript(pass).openReviewNotes, []);
 });
 
 test('answer --user: words that are not in the session log are refused; the owner\'s real words print the line', () => {
@@ -260,10 +312,10 @@ test('answer --refuted prints the line only for a note the note check refuted, w
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
   assert.equal(ok.stdout, 'NOTE 1: refuted — ' + evidence + '\n');
   assert.deepEqual(scan.openNotesAfter(scan.scanTranscript(file), ok.stdout).map((n) => n.n), [2]);
-  // Note 2 was not refuted by the check: no line, and nothing is written for note 1 in the same run either.
+  // Note 2 was not refuted by the check: no line for it, exit 1; note 1's line is still written (2026-11-22, owner).
   const no = run(['answer', '--refuted', 'N1,N2', '--transcript', file]);
   assert.equal(no.status, 1, no.stdout + no.stderr);
-  assert.equal(no.stdout, '');
+  assert.equal(no.stdout, 'NOTE 1: refuted — ' + evidence + '\n');
   assert.match(no.stderr, /^STILL OPEN: NOTE 2 — only a note the note check refuted can be closed as refuted/m);
   // After the typed line the list equals the scanner's open notes again.
   const closed = session([...reviewerRun('a', report(SAME, GAP), 1), ...checkerRun('chk', 'REFUTED 1 — ' + evidence, 4), say(ok.stdout.trim(), 7)]);

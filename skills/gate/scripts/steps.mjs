@@ -12,7 +12,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isRare } from './notes.mjs';
 
 export const LANES = ['text', 'small', 'medium', 'big'];
 // Today's loop.md stop rule. `git config sanad.stopRound <n>` changes it; task.json never does.
@@ -20,6 +19,7 @@ export const DEFAULT_STOP_ROUND = 3;
 // Review rounds never stop before round 2 (owner switch rule): a 1 or a 0 is not a valid stop round.
 export const MIN_STOP_ROUND = 2;
 export const GATE_DIR = path.dirname(fileURLToPath(import.meta.url)).replace(/\\/g, '/');
+const CHECKLIST = path.resolve(GATE_DIR, '..', '..', 'sanad', 'reference', 'review-checklist.md').replace(/\\/g, '/');
 
 /** One shell word for Git Bash: a space, a dollar sign, a backtick or Arabic letters stay as they are. */
 export function q(value) {
@@ -38,19 +38,27 @@ export function stopRound(value) {
   return Number.isInteger(n) && n >= MIN_STOP_ROUND ? n : DEFAULT_STOP_ROUND;
 }
 
-const SECURITY = /\b(?:security|auth\w*|access|permission|tenant|inject\w*|xss|csrf|idor|secret|token|password)\b/i;
+// 2026-11-22 (attack): "author" (authors, authored, authoring, authorship) and "accessible" are no security words;
+// every other auth… word is (AuthMiddleware, authorize, authentication), and so are access, JWT and session tokens.
+const SECURITY = /\b(?:security|auth(?!or(?:s|ed|ing|ship)?\b)\w*|access(?:es|ed)?|permissions?|privileg\w*|roles?|tenants?|inject\w*|xss|csrf|idor|jwts?|secrets?|tokens?|passwords?)\b/i;
+// A note on a ticket line: its [Tn] tag, or the words that name one.
+const TICKET_LINE = /\[T\d+\]|\bticket line\b|\bT\d+\b(?=[\s:,.)])/i;
 /**
- * The notes that go to the owner in one list from the stop round on: new in this round, not a Blocker, not
- * a security note, no ticket line, and a fix that would not change access, saved data or a promised result.
- * They stay open: only the owner's words close them.
+ * The notes that go to the owner in one list from the stop round on: every open note of this round except a Blocker,
+ * a security note and a note on a ticket line, which still reopen a round. They stay open: only the owner's words
+ * close them. (2026-11-22, owner: with the stop round at 2, a re-run still ran 4 rounds, because every note that was
+ * not rare opened another one.)
  */
 export function askOwner(notes, round, stop = DEFAULT_STOP_ROUND) {
   if (!(round >= stop)) return [];
-  return (notes || []).filter((n) => n && n.open !== false && (n.round ?? round) === round
-    && !/^blocker$/i.test(String(n.kind || '')) && !n.security && !SECURITY.test(String(n.text || ''))
-    // isRare also tells that a note shows no effect on saved data, access, security or a ticket line.
-    && isRare({ text: `${String(n.text || '')} (RARE)` })
-    && !n.ticketLine && !/\[T\d+\]/.test(String(n.text || '')) && !n.changesOutcome && !n.confirmedBug);
+  return (notes || []).filter((n) => n && n.open !== false && (n.round ?? round) === round && !reopensRound(n));
+}
+
+/** A note that still opens a review round past the stop round: a Blocker, a security note or a ticket-line note. */
+export function reopensRound(n) {
+  if (!n) return false;
+  const text = String(n.text || '');
+  return /^blocker$/i.test(String(n.kind || '')) || Boolean(n.security) || SECURITY.test(text) || Boolean(n.ticketLine) || TICKET_LINE.test(text);
 }
 
 // A side's proof line. `since` makes it the fix round's short form (PARTIAL).
@@ -139,6 +147,15 @@ export const STEPS = [
   { id: 'commit', loop: 'Step 3, item 3', lanes: ALL,
     done: (f) => f.git.ahead > 0 && f.git.clean,
     lines: (c) => [{ text: `git -C ${p(c.repo)} status --short   (then stage the named files and commit)`, plain: true }] },
+  // 2026-11-22 (owner, PR 3 item 1): the author reads its own diff first, before the checks, the proof and the review.
+  // Never skipped; the record is for the commit read, so a later commit makes the step due again.
+  { id: 'self-read', loop: 'Step 3, item 3', lanes: ALL,
+    done: (f) => f.git.clean && f.git.ahead > 0 && Boolean(f.selfRead) && f.selfRead === f.git.head,
+    lines: (c) => [
+      { text: `git -C ${p(c.repo)} diff ${q(c.base || 'BASE')}...HEAD` },
+      { text: `read it as a hostile reviewer against the "Every change" lines of ${p(CHECKLIST)}; fix what you find (test first) and commit`, plain: true },
+      { text: `${tool(c, 'sanad.mjs')} self-read --repo ${p(c.repo)} --notes ${p(c.notes)} --found FOUND   (FOUND: what you found and fixed, or none)` },
+    ] },
   { id: 'checks-before-proof', loop: 'Step 3, item 3', lanes: ALL, beside: 'breaks', unknown: (f) => f.checks.code === undefined,
     done: (f) => f.checks.code === true || f.proof.done || f.pinAtHead,
     lines: (c) => [{ text: preReview(c, ' --before-proof --part code'), background: true }] },
@@ -249,7 +266,11 @@ export function due(f) {
   const steps = pathFor(f.lane, { testsOnlyLight: lightLane(f), designChoice: f.switches.designChoice, textProof: Boolean(f.textProof) && !lightLane(f) });
   const active = (s) => !s.when || s.when(f);
   const fix = steps.find((s) => s.id === 'fix-round');
-  if (fix && active(fix)) return [fix];
+  if (fix && active(fix)) {
+    // 2026-11-22 (attack): a fix committed after a review is read by its author too, before the re-check.
+    const read = steps.find((s) => s.id === 'self-read');
+    return read && f.git.clean && !read.done(f) ? [read] : [fix];
+  }
   let open = steps.filter((s) => active(s) && !s.done(f));
   const out = [];
   if (f.pins.length) {
