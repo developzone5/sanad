@@ -127,6 +127,29 @@ else
   done <<< "$e2e_runs"
 fi
 
+# Replay (2026-11-19): the base and the candidate readers answer every saved command, reviewer report and
+# session; each difference is printed with its command or line. It only prints, unless the owner set
+# `git config --global sanad.replayBlocks true`: then a difference not on the release's approved lines
+# (claude/scripts/replay/approved.txt) stops the install here, before any live write. SANAD_REPLAY=none skips it.
+REPLAY_JS="$CAND/claude/scripts/replay/replay.mjs"
+if [ "${SANAD_REPLAY:-}" = "none" ]; then echo "REPLAY: skipped (SANAD_REPLAY=none)"
+elif [ ! -f "$REPLAY_JS" ]; then echo "REPLAY: skipped (the candidate has no replay script)"
+else
+  replay_args=(run --base "$BASE" --cand "$CAND" --corpus "${SANAD_STATE_DIR:-$HOME/.claude/state}/replay-corpus")
+  [ -f "$CAND/claude/scripts/replay/approved.txt" ] && replay_args+=(--approved "$CAND/claude/scripts/replay/approved.txt")
+  replay_rc=0; node "$REPLAY_JS" "${replay_args[@]}" || replay_rc=$?
+  replay_blocks="$(git config --global --get sanad.replayBlocks 2>/dev/null || true)"
+  if [ "$replay_rc" = 4 ] && [ "$replay_blocks" = "true" ]; then
+    echo "ABORTED: the replay found differences that are not approved; nothing was changed."; exit 3
+  fi
+  if [ "$replay_rc" != 0 ] && [ "$replay_rc" != 4 ]; then   # 0 = clean or approved, 4 = not approved; the rest is an error
+    if [ "$replay_blocks" = "true" ]; then
+      echo "ABORTED: the replay crashed (exit $replay_rc); nothing was changed."; exit 3
+    fi
+    echo "REPLAY: it crashed (exit $replay_rc); the install goes on because sanad.replayBlocks is not true."
+  fi
+fi
+
 # The second drift guard (2026-11-17, audit I2): see drift_guard above. Still nothing written here.
 drift_guard || { echo "ABORTED: live files changed during the end-to-end runs; nothing was changed."; exit 1; }
 

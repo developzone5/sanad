@@ -137,9 +137,17 @@ test('with a break that names a test in each such file the proof runs; pre-revie
   assert.equal(old.status, 0, old.stdout);
   assert.match(old.stdout, /RED-PROOF: RED ✓/);
   // A --breaks run of the same command replaces its own record entry, so that entry's proof does not count for it.
+  // 2026-11-19, rewritten on purpose: each break's result is now also saved by itself, for the exact tree it ran
+  // on. On the same tree the save test stays proven by the break that was caught there, so a run that leaves
+  // that break out is not refused (it was, exit 2).
   const again = proof(process.execPath, [['cleans', ['cleans the list']]], ['--parallel', '1']);
-  assert.equal(again.status, 2, again.stdout);
-  assert.match(again.stdout, /UNPROVEN ✗ src\/save\.test\.cjs/);
+  assert.equal(again.status, 0, again.stdout);
+  assert.doesNotMatch(again.stdout, /UNPROVEN/);
+  // After any edit of the code no saved result is for today's tree: the same run is refused, as before.
+  fs.appendFileSync(path.join(repo, 'app.cjs'), '// edited\n');
+  const edited = proof(process.execPath, [['cleans', ['cleans the list']]], ['--parallel', '1']);
+  assert.equal(edited.status, 2, edited.stdout);
+  assert.match(edited.stdout, /UNPROVEN ✗ src\/save\.test\.cjs/);
 });
 
 test('the test files a command runs: dotnet the C# ones, others the rest; the files its own words name, when it names some', async () => {

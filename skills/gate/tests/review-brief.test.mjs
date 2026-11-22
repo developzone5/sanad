@@ -92,7 +92,8 @@ test('the framed brief: numbered Check lines, pinned diff, callers, both known l
 // 2026-11-12 (user: the workflow must not depend on a list of old bugs): the missed-bug classes left the brief.
 test('the fresh brief carries no author framing: no Check lines, no callers, no proof, no missed-bug classes', () => {
   const fresh = buildFreshBrief({ ...base, missed: ['wrong scope — catch: grep the guard'] });
-  assert.doesNotMatch(fresh, /## Check|Callers:|Proof run|C1\./);
+  // 2026-11-19: the fresh brief now holds a callers line (facts, not the author's framing); Check lines, proof and missed classes stay out.
+  assert.doesNotMatch(fresh, /## Check|Proof run|C1\./);
   assert.match(fresh, /fresh eyes/);
   assert.doesNotMatch(fresh, /Bug classes this project missed|wrong scope/);
   assert.match(fresh, /git diff a{40}/);
@@ -296,9 +297,10 @@ test('a big change with no risk file named puts every changed file that is not a
   const unknown = riskBlock(buildLaunch({ ...riskArgs, size: 'big', facts: { stack: '', size: '', callers: '', failed: 'x', signals: null }, changed: riskChanged }));
   assert.match(unknown, /\nRisk files \(the size check gave no signals: every changed file that is not a test\):\n- Api\/Controllers\/FilesController\.cs\n- Api\/Services\/Storage\.cs \(new, not in git yet[^\n]*\n- web\/src\/Page\.tsx\nTrace list \(the size check gave no signals: answer each question that applies; n\/a for the rest\):\n1\. /);
   const questions = unknown.split(/\nTrace list[^\n]*\n/)[1].split('\n');
-  assert.equal(questions.length, 16, 'fifteen signal questions and the closing one');
+  // 2026-11-19: one more signal question, for a change that saves and then calls another system (afterSave).
+  assert.equal(questions.length, 17, 'sixteen signal questions and the closing one');
   assert.ok(questions.includes(`1. ${ACCESS_Q}`) && questions.some(q => q.endsWith(FILES_Q)));
-  assert.equal(questions[questions.length - 1], `16. ${CLOSING_Q}`);
+  assert.equal(questions[questions.length - 1], `17. ${CLOSING_Q}`);
   // Routed big, measured with no risk signal: the same, with its own reason.
   assert.match(riskBlock(buildLaunch({ ...riskArgs, size: 'big', facts: { ...riskFacts, signals: { clientState: ['Page.tsx'] } }, changed: riskChanged })), /\nRisk files \(the size check named no risk file: every changed file that is not a test\):\n/);
   const empty = buildLaunch({ ...riskArgs, size: 'big', facts: riskFacts, changed: [] });
@@ -640,7 +642,9 @@ const stripEngine = t => t.replace(/^Engine: [^\n]*\n\n/m, '');
 
 // MUST NOT CHANGE (fails only on the engine line on the old code): the Claude plan is byte for byte today's.
 test('the Claude plan is unchanged except its engine line', () => {
-  const gold = { small: 'e63e00d983b7d592c25f66b326c13151bef8daebcc6dd02d892f86b4e8d90caf', medium: 'f14462e6112ef3469d1bab02d8f4c97d456fd358f5f43662e9bf072e9db6a09a', big: 'b7555de1e041891584586b65b6b96b96c46b7118e7f698b959ab87c33dcd2ac6' };
+  const gold = { small: 'e63e00d983b7d592c25f66b326c13151bef8daebcc6dd02d892f86b4e8d90caf', medium: 'f14462e6112ef3469d1bab02d8f4c97d456fd358f5f43662e9bf072e9db6a09a', big: '382c90e7fde2b895c7023137f50b5b64b2e968d553451bb16563ba30f9df98d7' };
+  // 2026-11-19 (the pinned-review release): the big hash was updated on purpose. The Big plan's risk and whole-diff
+  // seats each got their own question, and the trace list with no signal named holds the after-save question.
   // 2026-11-19: small and medium hashes are untouched (those plans hold no Codex line). The big hash was updated once: it is
   // built with an EMPTY codex home, and the Big plan's Codex line then carries the "no model setting found" note line.
   for (const size of ['small', 'medium', 'big']) {

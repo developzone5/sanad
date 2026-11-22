@@ -49,13 +49,42 @@ test('a lock in the old format (no start time) keeps the id check alone', async 
   assert.equal(await ask({ pid: NO_PROCESS }), '', 'a gone id does not, as before');
 });
 
+// Every gate script a script loads: its './x.mjs' imports, and theirs, the way proofScripts (red-proof.mjs) follows
+// them (`import … from`, `export … from` and `import('./x.mjs')`). 2026-11-19: this test copied a fixed list of six
+// names, so each new import of pre-review.mjs, or of a script it imports, broke it with "Cannot find module".
+function gateImports(dir, first) {
+  const list = [first];
+  for (let i = 0; i < list.length; i++) {
+    const text = fs.readFileSync(path.join(dir, list[i]), 'utf8');
+    for (const m of text.matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+['"]\.\/([\w.-]+\.mjs)['"]|\bimport\s*\(\s*['"]\.\/([\w.-]+\.mjs)['"]\s*\)/gm)) {
+      const name = m[1] || m[2];
+      if (!list.includes(name)) list.push(name);
+    }
+  }
+  return list;
+}
+
 // Without its helper (an install that missed hooks/lib), the check keeps the id alone and still answers:
 // the sync is never let through over a check that may still run.
 test('without the helper: the id check alone, never a crash', async () => {
   const copy = path.join(root, 'copy', 'skills', 'gate', 'scripts', 'pre-review.mjs');
   fs.mkdirSync(path.dirname(copy), { recursive: true });
-  fs.copyFileSync(script, copy);
   // The gate scripts pre-review imports go with it (the missing helper is hooks/lib, outside this folder).
-  for (const f of ['is-main.mjs', 'git-bash.mjs', 'pre-review-cache.mjs', 'size-check.mjs', 'stack.mjs', 'check-ticket-lines.mjs']) fs.copyFileSync(path.join(path.dirname(script), f), path.join(path.dirname(copy), f));
+  const scripts = gateImports(path.dirname(script), 'pre-review.mjs');
+  for (const f of scripts) fs.copyFileSync(path.join(path.dirname(script), f), path.join(path.dirname(copy), f));
   assert.equal(await ask({ pidStartedAt: iso(ownStart() - 3600000) }, copy), other);
+  // The copied folder holds every './x.mjs' file that any copied script names, and nothing of hooks/lib.
+  const copied = new Set(fs.readdirSync(path.dirname(copy)));
+  for (const f of scripts) for (const needed of gateImports(path.dirname(script), f)) assert.ok(copied.has(needed), `${f} needs ${needed}`);
+  for (const f of ['size-check.mjs', 'stack.mjs', 'check-ticket-lines.mjs', 'is-main.mjs', 'git-bash.mjs', 'pre-review-cache.mjs']) assert.ok(copied.has(f), `${f} is still copied`);
+  assert.equal(fs.existsSync(path.join(root, 'copy', 'hooks')), false);
+});
+
+test('the import follower reads static, re-export and dynamic imports, each once', () => {
+  const dir = fs.mkdtempSync(path.join(root, 'imports-'));
+  fs.writeFileSync(path.join(dir, 'a.mjs'), "import fs from 'node:fs';\nimport { b } from './b.mjs';\nexport { c } from './c.mjs';\nconst d = await import('./d.mjs');\n// import { no } from './comment-only.mjs' is not at a line start\n");
+  fs.writeFileSync(path.join(dir, 'b.mjs'), "import {\n  c,\n} from './c.mjs';\nimport { a } from './a.mjs';\nexport const b = 1;\n");
+  fs.writeFileSync(path.join(dir, 'c.mjs'), 'export const c = 1;\n');
+  fs.writeFileSync(path.join(dir, 'd.mjs'), "import { e } from '../outside/e.mjs';\nexport const d = 1;\n");
+  assert.deepEqual(gateImports(dir, 'a.mjs'), ['a.mjs', 'b.mjs', 'c.mjs', 'd.mjs']);
 });

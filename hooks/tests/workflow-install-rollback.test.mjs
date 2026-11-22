@@ -392,6 +392,82 @@ test('I2: a manifest that cannot be read at rollback time is NOT "rolled back": 
   assert.doesNotMatch(result.stdout, /^ROLLED BACK:/m);
 });
 
+// P11: the replay step. The candidate carries the real replay script and a reader that answers one saved
+// command differently from the base reader.
+function withReplay(f, blocks) {
+  const reader = word => "exports.splitSegments = c => [c]; exports.segmentIsVerify = () => false; exports.reportNotes = () => [];" +
+    "exports.scanTranscript = () => ({}); exports.shellEditPaths = c => c.includes('honest') && " + word + " ? ['x.cs'] : [];\n";
+  for (const folder of [f.base, f.live]) f.put(folder, 'claude/hooks/lib/transcript-scan.js', reader('false'));
+  f.put(f.cand, 'claude/hooks/lib/transcript-scan.js', reader('true'));
+  f.put(f.cand, 'claude/scripts/replay/replay.mjs', fs.readFileSync(path.resolve(here, '../../scripts/replay/replay.mjs')));
+  const corpus = path.join(f.root, 'state', 'replay-corpus', 'commands');
+  fs.mkdirSync(corpus, {recursive:true});
+  fs.writeFileSync(path.join(corpus, '1.txt'), 'echo honest');
+  if (blocks) fs.writeFileSync(path.join(f.root, 'empty.gitconfig'), '[sanad]\n\treplayBlocks = true\n');
+  return {SANAD_REPLAY: ''};
+}
+const noLogs = f => ({HOME: path.join(f.root, 'home'), USERPROFILE: path.join(f.root, 'home')});
+
+test('P11: a replay difference is printed and the install goes on when sanad.replayBlocks is unset', async t => {
+  const f = fixture(t);
+  withReplay(f, false);
+  const result = await f.run('replay-print', {SANAD_REPLAY: '', ...noLogs(f)});
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^REPLAY DIFF command "echo honest"/m);
+  assert.match(result.stdout, /^INSTALLED /m);
+});
+
+test('P11: with sanad.replayBlocks set and a difference not approved, nothing live is changed', async t => {
+  const f = fixture(t);
+  withReplay(f, true);
+  const before = f.snapshot();
+  const result = await f.run('replay-block', {SANAD_REPLAY: '', ...noLogs(f)});
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /^REPLAY DIFF command "echo honest"/m);
+  assert.match(result.stdout, /^ABORTED: the replay found differences .*nothing was changed.$/m);
+  assert.deepEqual(f.snapshot(), before, 'no live file changed');
+  assert.ok(!fs.existsSync(path.join(f.backups, 'replay-block')), 'no backup folder either');
+});
+
+test('P11: a replay that crashes stops the install when sanad.replayBlocks is set', async t => {
+  const f = fixture(t);
+  withReplay(f, true);
+  f.put(f.cand, 'claude/hooks/lib/transcript-scan.js', 'this is not javascript (\n');
+  const before = f.snapshot();
+  const result = await f.run('replay-crash-block', {SANAD_REPLAY: '', ...noLogs(f)});
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /^ABORTED: the replay crashed/m);
+  assert.deepEqual(f.snapshot(), before, 'no live file changed');
+});
+
+test('P11: a replay that crashes prints its message and the install goes on when sanad.replayBlocks is unset', async t => {
+  const f = fixture(t);
+  withReplay(f, false);
+  f.put(f.cand, 'claude/hooks/lib/transcript-scan.js', 'this is not javascript (\n');
+  const result = await f.run('replay-crash-print', {SANAD_REPLAY: '', ...noLogs(f)});
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^REPLAY: crashed: /m);
+  assert.match(result.stdout, /^INSTALLED /m);
+});
+
+test('P11: a candidate with no replay script prints one skipped line and installs', async t => {
+  const f = fixture(t);
+  const result = await f.run('replay-none', {SANAD_REPLAY: ''});
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^REPLAY: skipped \(the candidate has no replay script\)$/m);
+});
+
 describe('workflow-install rollback', { concurrency: 4 }, () => {
   for (const [name, fn] of queued) it(name, fn);
+});
+
+test('P11: a replay that exits 1 (a start failure) is an error and stops the install when sanad.replayBlocks is set', async t => {
+  const f = fixture(t);
+  withReplay(f, true);
+  f.put(f.cand, 'claude/scripts/replay/replay.mjs', 'process.exit(1);\n');
+  const before = f.snapshot();
+  const result = await f.run('replay-exit1-block', {SANAD_REPLAY: '', ...noLogs(f)});
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /^ABORTED: the replay crashed \(exit 1\)/m);
+  assert.deepEqual(f.snapshot(), before, 'no live file changed');
 });

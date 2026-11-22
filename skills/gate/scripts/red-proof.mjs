@@ -13,8 +13,9 @@
 //   fix round  (--breaks <json> --changed-since <git ref>, 2026-11-16: in a fix round of a big task every re-proof
 //              ran all 48 breaks, about 15 minutes, though each fix touched one or two files; four rounds lost
 //              about an hour): only the breaks the change since <ref> can reach run; the old code and green run
-//              as usual. It says RED-PROOF: PARTIAL, never PROVED, and never writes the proof record: run the
-//              full proof (without --changed-since) once before the final review.
+//              as usual. It says RED-PROOF: PARTIAL, never PROVED, and never writes the proof's own entry (it saves
+//              the result of each break it ran, see below): run the full proof (without --changed-since) once
+//              before the final review.
 //
 // Why a script: a red run typed as a plain test command is kept as a failed check by the push
 // guard forever, and a hand-written "swap; test; restore" compound can never be re-run green.
@@ -31,8 +32,9 @@
 // What counts (2026-11-12, after an audit found proofs that read PROVED on a stopped database):
 //   - A run that failed on the environment (no database connection, a crashed test host, out of
 //     memory) proves nothing either way: the proof stops with ENVIRONMENT, exit 6.
-//   - The old code is RED only when at least one named test fails by an assertion. A run that names
-//     no failing test, runs no test, or only crashes is NOT RED.
+//   - The old code is normally RED when a named test fails. It can also be red by build when green
+//     passes and every compiler error is a test using a new name absent from the old code. A build
+//     failure proves a test only with a caught break that names it (2026-11-20).
 //   - A break is caught only when every test a mustFail part names fails, matched by the test's own
 //     title (vitest: the last part of "file > describe > test"; dotnet: the method or DisplayName),
 //     and every test in the changed test files whose title holds that part fails. A break that does
@@ -57,6 +59,17 @@
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --warm [--parallel <n>] [--cwd <dir>] -- <test command>
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --restore <backup-dir>
 //   node ~/.claude/skills/gate/scripts/red-proof.mjs --repo <path> --drop-copies
+// --check-plan (2026-11-19, with the proof's own options and command): only the checks that come before any run
+//   (each break filled in, each find matches once, no AMBIGUOUS part, no UNPROVEN check, every mustFail part names a
+//   test). It ends with the line `PLAN OK` (exit 0) or the refusal (exit 2); no test machine, no copy, no log, no record.
+// --strict-tests (2026-11-19): a new test that is red on no old code and named by no caught break fails the proof (its row
+//   TEST NOT PROVEN is always printed).
+// --fresh (2026-11-19): run every break again; without it a local run skips the breaks this exact tree already
+//   caught (it says RESUMED k of n breaks from saved results of this tree).
+// --at <commit> (2026-11-19): the proof is for that commit. It is refused before any run when HEAD is another
+//   commit or the work tree differs from it (the sync to the test machine sends the working tree).
+// A usage refusal (a bad option, an unknown ref, --at not met, FOREIGN? files) ends with the exact last line
+//   `RED-PROOF: REFUSED — nothing ran`, exit 2. A passing green run that ran no test reads `GREEN ✗ no test ran`.
 // --breaks file: [{ "name": "...", "file": "<repo-relative>", "find": "<exact text, once>",
 //   "put": "<replacement>", "mustFail": ["<part of a test's own title>", ...] }, ...]
 //   A mustFail part may come from a test's method name or from its xUnit DisplayName, never from a
@@ -70,9 +83,10 @@
 //   end: "RED-PROOF: PARTIAL ✓ — <k> of <n> break(s) caught …" with exit 0, or the usual failure and exit code. No
 //   break changed is allowed: the old code and green still run (with neither asked, nothing runs, exit 0). The
 //   breaks are checked whole first (each matches once, no ambiguous or unproven part). The run record holds
-//   `partial: true`; the proof record is left as it is. On the test machine only the kept breaks are sent.
+//   `partial: true`; the proof's entry in the record is left as it is. On the test machine only the kept breaks are sent.
 // --old with a fix file that only adds lines, and adds names the tests use (a new message, a new
 // constant): that file stays at the fix for the old-code run, so the old code compiles; the run says so.
+// 2026-11-20: a related file may hide the fix. Keep it only if its diff also just adds lines.
 // The tests are read as code: a name only a comment or a string's text holds is not a use (2026-11-15).
 // --warm: at the task's start, the kept copies (below) are brought to the tree and built once.
 // A passing --breaks run records, under its command and folder, the tests its breaks made fail (each by its
@@ -80,7 +94,15 @@
 // code under test (see proof-record.mjs); pre-review's test check reads that record. A --breaks run that starts
 // and does not end PROVED leaves that entry as not ok, with the reason (2026-11-17: an older success outlived a
 // failed re-proof); a --changed-since run does so only when one of its own runs failed. A run with no --breaks
-// (old code only, one --break) leaves the record alone. The test command runs without a shell and without typed input; pass the real
+// (old code only, one --break) leaves the record alone.
+// One result per break (2026-11-19: every result was read after all runs, so a stop or one run past the limit lost
+// the finished breaks): a run here (--local, or no test machine) judges each break when its own run ends and saves
+// its result at once (proof-record.mjs writeBreakResult: caught, not-caught, invalid or timeout, for the exact code
+// tree the runs test), and saves that the passing run passed on that tree (writeRunFacts). A machine or database
+// failure (exit 6) takes back what its run saved (takeBackRun). On the test machine nothing is stored: a caught
+// break's RED-PROOF-CAUGHT line goes out when its run ends. THE LIMITS that stay: the machine that asked still
+// writes its record only when the whole proof there ends, and a second start still runs every break again.
+// The test command runs without a shell and without typed input; pass the real
 // executable (node <entrypoint>, dotnet, ...), not a .cmd shim. cmd.exe without /c is refused
 // (2026-11-09: Git Bash turns /c into C:/, and cmd.exe then waited for typed input for 25 minutes):
 // write //c in Git Bash, or better, put test settings in --test-env instead of a .cmd wrapper.
@@ -109,9 +131,9 @@
 // --timeout-min <n> (default 15, decimals allowed): the limit for each run and for the compile check.
 // A stuck run stops sooner (2026-11-15): once two red runs have finished in their own copies, a red run still
 // going at twice the slowest of them (never under a fifth of the limit) is stopped and named stuck (exit 5).
-// The database (2026-11-15): a dotnet proof on the test machine first runs remote-preflight.sh --db when
-// git config sanad.remoteDbContainer is set; a database that does not come up stops it before any run
-// (ENVIRONMENT, exit 6), and the preflight renews the hold that keeps the database up.
+// The database (2026-11-20, skipped tests passed before Docker was ready): start it beside the compile
+// check and green run. Before it is ready, only passing green with zero skips can start the red runs.
+// Otherwise wait, then run green again. If the database stays down, stop with ENVIRONMENT, exit 6.
 // --test-env <path> (2026-11-09: opt-in MySQL tests need a connection string with a password):
 // KEY=VALUE lines (# comments, blank lines and a leading `export ` allowed; one pair of quotes around a
 // value is removed) added to every run's environment. Only the names are printed; a value of 6 or more
@@ -137,13 +159,17 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { canonicalTop, changedTestFiles, codeFingerprint, csClassList, declaredTests, defaultBase, enclosingTest, helperCallers, namedBy, proofHint, provenHas, provenTests, readRecord, recordKey, testFileHashes, testSpans, writeEntry } from './proof-record.mjs';
+import { StringDecoder } from 'node:string_decoder';
+import { createInterface } from 'node:readline';
+import { breakId, breakStates, canonicalTop, changedTestFiles, codeFingerprint, csClassList, declaredTests, defaultBase, enclosingTest, helperCallers, namedBy, proofHint, provenHas, provenTests, readRecord, recordKey, takeBackRun, testFileHashes, testSpans, withdrawRunFacts, writeBreakResult, writeEntry, writeRunFacts } from './proof-record.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { newLines, nothingChecks } from './new-lines.mjs';
 import { codeLines, codeOnly } from './size-check.mjs';
 import { isMain } from './is-main.mjs';
 import { keepRunRecord } from './run-record.mjs';
 import { bashEnv, gitBash } from './git-bash.mjs';
+import { selectCommand } from './proof-select.mjs';
+import { changeSet, foreignLine } from './change-set.mjs';
 
 // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
 // missing element, a type, reference or build error, or a timeout means the test itself (or the
@@ -170,6 +196,43 @@ const INVALID_REASON = /\bReferenceError\b|\bSyntaxError\b|\bis not defined\b|Ca
 const INVALID_OUTPUT = /\berror CS\d{3,5}\b|\berror TS\d{3,5}\b|Build FAILED|Transform failed with \d+ errors?/;
 // A run in which no test ran (2026-11-12, S7: a test file in --files made "No test files found" read red).
 const NO_TESTS = /No test files found|No tests found|No test matches the given testcase filter|No test is available in/;
+// Signs that a runner ran at least one test: the dotnet totals of a project, the vitest totals.
+const TESTS_RAN = /^\s*(?:Passed!|Failed!)\s|^\s*Total tests:\s*[1-9]|^\s*Test Run (?:Successful|Failed)|^\s*Tests\s+\d+ (?:passed|failed)/m;
+// A run that passed and ran no test (2026-11-19: a filter that matches nothing exits 0, and it read GREEN). The
+// runner says so (NO_TESTS) and nothing in the output shows a test that ran: in a solution run, one project with
+// no matching test prints the same words while another project runs its tests, and that run is a real one.
+export function ranNoTest(result) {
+  if (!result || result.timedOut || result.error || result.status !== 0) return false;
+  const output = (result.stdout || '') + (result.stderr || '');
+  return NO_TESTS.test(output) && !TESTS_RAN.test(output) && !failureReasons(output).length;
+}
+// 2026-11-20: zero skips must come from the runner's totals. Green counts as "proven without the database" only
+// when EVERY summary line of the run is readable and NONE shows a skip (round 2, R1: a run of several projects
+// prints one summary each, and a skip shows as `Skipped!`, `Skipped: N` or `N skipped` on any of them).
+function skippedNone(result) {
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`.replace(/\x1b\[[0-9;]*m/g, '');
+  let summaries = 0;
+  for (const line of output.split(/\r?\n/)) {
+    if (/^\s*Skipped!/.test(line)) return false;
+    const dotnet = /^\s*(?:Passed!|Failed!)\s*-/.test(line);
+    const vitest = /^\s*Tests[:\s]/.test(line) && /\b\d+\s+(?:passed|failed|skipped|total)\b/.test(line);
+    const counts = [...line.matchAll(/\bSkipped:\s*(\d+)|\b(\d+)\s+skipped\b/g)].map(m => Number(m[1] ?? m[2]));
+    if (counts.some(n => n > 0)) return false;
+    if (dotnet) { if (!/\bSkipped:\s*\d+(?=\s*(?:,|$))/.test(line)) return false; summaries++; }
+    else if (vitest) { if (!counts.length) return false; summaries++; }
+  }
+  return summaries > 0;
+}
+// A run whose output shows its build finished (2026-11-19: a copy was marked built after any run that ended, also
+// one whose build failed, and the next run in that copy compiled the whole solution): the run passed, or tests
+// ran (a failing test is named, or the runner printed its totals) and no build error is in the output.
+export function buildFinished(result) {
+  if (!result || result.timedOut || result.error) return false;
+  if (result.status === 0) return true;
+  const output = (result.stdout || '') + (result.stderr || '');
+  if (INVALID_OUTPUT.test(output)) return false;
+  return TESTS_RAN.test(output) || failureReasons(output).length > 0;
+}
 export function failureReasons(text) {
   const lines = String(text).replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/);
   const found = new Map();
@@ -340,7 +403,10 @@ export function markNewTests(text, baseText, file = '') {
   return declaredTests(text, file).map(d => {
     const k = JSON.stringify(d.titles), n = before.get(k) || 0;
     if (n) before.set(k, n - 1);
-    return { file, titles: d.titles, isNew: !n };
+    const item = { file, line: d.line, titles: d.titles, isNew: !n };
+    // The class of a C# test rides on the item without showing in its fields (2026-11-20: two classes with one method name).
+    if (d.klass) Object.defineProperty(item, 'klass', { value: d.klass, enumerable: false });
+    return item;
   });
 }
 
@@ -472,6 +538,183 @@ export function readCaughtLine(line) {
   } catch { return null; }
 }
 
+// The failing test names of the old-code run, as the test machine says them to the machine that asked (the old
+// code run there, the new tests known here): base64 JSON, like caughtLine. readOldRedLine gives the names, or null.
+export function oldRedLine(names) {
+  return 'RED-PROOF-OLDRED: ' + Buffer.from(JSON.stringify({ names: names.map(String) }), 'utf8').toString('base64url');
+}
+export function readOldRedLine(line) {
+  const m = /^RED-PROOF-OLDRED: ([A-Za-z0-9_-]+)$/.exec(String(line).trim());
+  if (!m) return null;
+  try {
+    const sent = JSON.parse(Buffer.from(m[1], 'base64url').toString('utf8'));
+    return sent && Array.isArray(sent.names) ? sent.names.filter(n => typeof n === 'string') : null;
+  } catch { return null; }
+}
+// 2026-11-20 (V1): the passing run's own line. The test machine prints it when its passing run ends well, so the machine
+// that asked saves the passing-run fact then, not only when the whole command ends (a stopped proof kept nothing).
+export const greenLine = () => 'RED-PROOF-GREEN: passed';
+export const isGreenLine = (line) => String(line).trim() === 'RED-PROOF-GREEN: passed';
+
+// 2026-11-20 (V1): every caught-break line the proof prints ends in a fixed tail with the break's id and the id of the
+// code tree it was caught on: `[break=<16 hex> tree=<40-64 hex>]`. A later run skips a break only when the session log
+// holds such a line from an earlier red-proof command (sessionCaught). The record alone is a file the author can write.
+export const caughtTail = (id, tree) => ` [break=${id} tree=${tree}]`;
+const TAIL_LINE = /^[ \t]*(?:BREAK ✓|ran) .*\[break=([0-9a-f]{16}) tree=([0-9a-f]{40,64})\][ \t]*\r?$/gm;
+// The break ids and tree ids of the caught lines in a text, as "<id> <tree>" keys.
+export function caughtTails(text) {
+  // A caught break has its tail on its run line and again on the report line: each key once (2026-11-20, U2).
+  return [...new Set([...String(text).matchAll(TAIL_LINE)].map(m => m[1] + ' ' + m[2]))];
+}
+// The caught lines this session's log holds, from the results of earlier red-proof commands only (a tool call whose
+// command names red-proof, and the result that answers it). Reads the newest session log of the repository, the way
+// note-check.mjs finds it (transcriptCandidates), in chunks, and looks at tool results the way the hooks' scanner does
+// (the result's content and the host's stdout/stderr fields). { found, why, keys }: found is false when no log is
+// found or it cannot be read; then no break is resumed. THE LIMIT that stays: a command that names red-proof can print
+// such a line by hand; the author writes that command in the open, where the review reads it.
+// 2026-11-20 (U2): does a shell command RUN red-proof.mjs: a command word `node` (or `node.exe`, after env, timeout, time or
+// nohup) with red-proof.mjs as its script argument. A mention inside cat, grep, echo, type, Get-Content, a comment or a
+// quoted string given to another program is no run. Words are split at ; && || | and line breaks outside quotes.
+export function runsRedProof(command) {
+  const text = String(command ?? '');
+  const segs = [];
+  let words = [], cur = '', has = false, quote = '', i = 0;
+  const endWord = () => { if (has) words.push(cur); cur = ''; has = false; };
+  const endSeg = () => { endWord(); if (words.length) segs.push(words); words = []; };
+  for (; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = '';
+      else if (c === '\\' && quote === '"' && i + 1 < text.length && /[\\$"`]/.test(text[i + 1])) cur += text[++i];
+      else cur += c;
+      continue;
+    }
+    if (c === '"' || c === "'") { quote = c; has = true; continue; }
+    if (c === '#' && !has) { while (i < text.length && text[i] !== '\n') i++; endSeg(); continue; }
+    if (c === ';' || c === '|' || c === '&' || c === '\n' || c === '\r') {
+      // A lone `&` at the start of a segment is the PowerShell call operator; any other of these ends the segment.
+      if (c === '&' && !has && !words.length && text[i + 1] !== '&') continue;
+      endSeg(); while (i + 1 < text.length && (text[i + 1] === c || (c === '&' && text[i + 1] === '&'))) i++; continue;
+    }
+    if (c === ' ' || c === '\t') { endWord(); continue; }
+    cur += c; has = true;
+  }
+  endSeg();
+  const base = (w) => String(w).split(/[\\/]/).pop().toLowerCase();
+  const WRAP = new Set(['env', 'timeout', 'time', 'nohup', 'command', 'exec']);
+  return segs.some(w => {
+    let k = 0;
+    while (k < w.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[k]) || WRAP.has(base(w[k])) || (k > 0 && /^-?[0-9.]+[smhd]?$/.test(w[k])))) k++;
+    if (k >= w.length || !/^(node|nodejs)(\.exe)?$/.test(base(w[k]))) return false;
+    for (let j = k + 1; j < w.length; j++) {
+      if (w[j] === '--') continue;
+      if (/^-/.test(w[j]) || /^[0-9]+$/.test(w[j])) continue;
+      return base(w[j]) === 'red-proof.mjs';
+    }
+    return false;
+  });
+}
+export async function sessionCaught(repo) {
+  const out = { found: false, why: '', keys: new Set() };
+  let file = '';
+  try { file = (await import('./note-check.mjs')).transcriptCandidates(repo)[0] || ''; }
+  catch { out.why = 'the session log finder could not be loaded'; return out; }
+  if (!file) { out.why = 'no session log was found'; return out; }
+  const ids = new Set();
+  const feed = (l) => {
+    if (l.startsWith('{"type":"api-request')) return;
+    const call = l.includes('"tool_use"') && l.includes('red-proof');
+    const result = l.includes('"tool_result"') && l.includes('tree=');
+    if (!call && !result) return;
+    let entry; try { entry = JSON.parse(l); } catch { return; }
+    const content = entry && entry.message && entry.message.content;
+    if (!Array.isArray(content)) return;
+    for (const b of content) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'tool_use' && b.id && b.input && typeof b.input.command === 'string' && runsRedProof(b.input.command)) ids.add(b.id);
+      else if (b.type === 'tool_result' && b.tool_use_id && ids.has(b.tool_use_id)) {
+        let s = '';
+        if (typeof b.content === 'string') s += b.content;
+        else if (Array.isArray(b.content)) for (const c of b.content) if (c && typeof c.text === 'string') s += c.text + '\n';
+        const r = entry.toolUseResult;
+        if (r && typeof r === 'object') { if (typeof r.stdout === 'string') s += '\n' + r.stdout; if (typeof r.stderr === 'string') s += '\n' + r.stderr; }
+        // The result must hold a report line of the run itself (a RED-PROOF: line), not only text that looks like a caught line.
+        if (/^[ 	]*RED-PROOF: /m.test(s)) for (const k of caughtTails(s)) out.keys.add(k);
+      }
+    }
+  };
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const dec = new StringDecoder('utf8'), buf = Buffer.alloc(4 * 1024 * 1024);
+    let carry = '';
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (!n) break;
+      const parts = (carry + dec.write(buf.subarray(0, n))).split('\n');
+      carry = parts.pop();
+      parts.forEach(feed);
+    }
+    feed(carry + dec.end());
+  } catch { out.keys.clear(); out.why = 'the session log could not be read'; return out; }
+  finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ } }
+  out.found = true;
+  return out;
+}
+// What the resume line says about the breaks the record holds but that were not resumed.
+const refusedWhy = (sess) => sess.why || "no earlier line of this session's log shows them caught";
+export const resumeNote = (refused, why) => (refused > 0 ? '; ' + refused + ' more saved for this tree but refused: ' + why : '');
+
+// The new tests the old-code run failed (2026-11-20): a failing name IS the test, never merely holds its title. The
+// name equals the test's last title or its full title path (joined by a separator a runner uses), or ends with one
+// of them right after such a separator (a file or suite prefix), compared whole and without case. A name that fits
+// two new tests credits neither of them. Gives { file, line, title } for each credited test.
+const NAME_SEPARATORS = [' > ', ' › ', '::', '.'];
+// A parameterized .NET test fails as `Class.Method(quantity: 2)` (2026-11-20): its argument list is cut before matching.
+// A vitest or jest name that starts with a test file ("a.test.js > suite > test") names that file: the new test must be
+// in the same file (an old test file's failure never credits a test of another file). No file in the name: any file.
+const TEST_FILE_PART = /\.[cm]?[jt]sx?$/i;
+const sameFile = (a, b) => {
+  const x = String(a).split(String.fromCharCode(92)).join('/').toLowerCase(), y = String(b).split(String.fromCharCode(92)).join('/').toLowerCase();
+  return x === y || x.endsWith('/' + y) || y.endsWith('/' + x);
+};
+export function redOldMatches(newTests, names) {
+  const tests = (newTests || []).filter(t => Number.isInteger(t.line) && Array.isArray(t.titles) && t.titles.length);
+  const forms = tests.map(t => {
+    const titles = t.titles.map(x => String(x).trim().toLowerCase());
+    return [...new Set([titles[titles.length - 1], ...NAME_SEPARATORS.map(sep => titles.join(sep))])];
+  });
+  const credited = new Set();
+  // The tests a name fits: the longest form wins (a name with its suite in it belongs to the test with that suite).
+  const fitting = (n, file) => {
+    const fit = tests.map((t, i) => ({ t, len: Math.max(0, ...forms[i].filter(f => n === f || NAME_SEPARATORS.some(sep => n.endsWith(sep + f))).map(f => f.length)) }))
+      .filter(x => x.len > 0 && (!file || sameFile(file, x.t.file)));
+    const best = Math.max(0, ...fit.map(x => x.len));
+    return fit.filter(x => x.len === best);
+  };
+  for (const raw of names || []) {
+    let n = String(raw).trim().toLowerCase();
+    let file = null;
+    const parts = n.split(' > ');
+    if (parts.length > 1 && TEST_FILE_PART.test(parts[0].trim())) file = parts[0].trim();
+    // 2026-11-20: the exact name first; a trailing `(...)` is cut as an argument list only when the exact name fits no test.
+    let top = fitting(n, file);
+    if (!top.length && !n.includes(' > ')) { const bare = dotnetBare(n).trim(); if (bare !== n) { n = bare; top = fitting(n, file); } }
+    // 2026-11-20: two tests with one method name in different classes: the class the name carries tells them apart.
+    // The name can tell them apart only when it carries a class (Namespace.Class.Method) that fits just one of them.
+    if (top.length > 1) {
+      const segs = n.split(/[.+]/);
+      const byClass = top.filter(x => x.t.klass && segs.slice(0, -1).includes(String(x.t.klass).toLowerCase()));
+      if (byClass.length === 1) top = byClass;
+    }
+    if (top.length === 1) credited.add(top[0].t);
+  }
+  return tests.filter(t => credited.has(t));
+}
+export function redOldTests(newTests, names) {
+  return redOldMatches(newTests, names).map(t => ({ file: t.file, line: t.line, title: String(t.titles[t.titles.length - 1]) }));
+}
+
 // The breaks a --changed-since run keeps (2026-11-16): a break whose file is among `changed` (repository paths, as
 // git prints them), or whose mustFail names a test in a changed test file (caughtTestFiles: a declared title holds
 // the part, or, when no title does, the file's text). On Windows a path matches in any case.
@@ -521,9 +764,19 @@ export function displayNames(text) {
 // `Name(`, `Name {`, or `Name:` in a script file), not in the old file, and a whole word in the test files'
 // code (`testText` as testCode reads it).
 export function addedNames(diff, oldText, testText, file = '') {
+  return namesOnAddedLines(addedLines(diff), oldText, testText, file);
+}
+
+function addedLines(diff) {
   const lines = String(diff).split(/\r?\n/);
-  if (lines.some(l => l.startsWith('-') && !l.startsWith('---'))) return []; // it changes or removes lines: it may hold the fix
-  const added = lines.filter(l => l.startsWith('+') && !l.startsWith('+++')).map(l => l.slice(1));
+  const hunk = lines.findIndex(l => l.startsWith('@@ '));
+  if (hunk >= 0 && lines.slice(0, hunk).some(l => l.startsWith('old mode '))) return [];
+  const body = hunk < 0 ? lines : lines.slice(hunk + 1);
+  if (body.some(l => l.startsWith('-'))) return []; // A changed or deleted line may hold the fix.
+  return body.filter(l => l.startsWith('+')).map(l => l.slice(1));
+}
+
+function namesOnAddedLines(added, oldText, testText, file) {
   const colon = /\.(?:[cm]?[jt]sx?)$/i.test(file) ? '|:' : '';
   const word = (n) => new RegExp(`(?<![\\w$])${n}(?![\\w$])`);
   const names = new Set();
@@ -555,6 +808,57 @@ function interpolated(line, cs) {
   if (!cs) return [...line.matchAll(/\$\{([^{}]*)\}/g)].map(m => m[1]);
   const at = line.search(/\$@?"|@\$"/);
   return at < 0 ? [] : [...line.slice(at).matchAll(/(?<!\{)\{(?!\{)([^{}]+)\}/g)].map(m => m[1]);
+}
+
+function codeNames(text) {
+  return new Set(text.match(/[$_\p{ID_Start}][$\p{ID_Continue}]*/gu) || []);
+}
+
+function compilerErrors(output) {
+  return output.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/)
+    .filter(l => /(?:^|:\s*|\s+-\s+)\s*(?:fatal\s+)?error\s+[A-Z]+\d+\s*:/i.test(l) ||
+      /(?:^|:\s*|\s+-\s+)\s*(?:fatal\s+)?error\s*:/.test(l));
+}
+
+// 2026-11-20: a missing name hid a second compiler error. Account for each error at its own location.
+function missingTestNames(errors, names, testNames, textAt) {
+  if (!names.size) return [];
+  const missing = new Set();
+  const sites = new Map(), inference = [];
+  for (const line of errors) {
+    const at = /^\s*(.+?)(?:\((\d+),(\d+)(?:,\d+,\d+)?\)|:(\d+):(\d+))\s*(?::| -)?\s*error\s+(CS\d+|TS\d+)\s*:\s*(.*)$/i.exec(line);
+    if (!at) return [];
+    const [, file, csLine, csCol, tsLine, tsCol, rawCode, message] = at;
+    const code = rawCode.toUpperCase();
+    const refs = [...testNames].filter(([f]) => sameFile(file, f));
+    if (refs.length !== 1) return [];
+    const [testFile, namesInTest] = refs[0];
+    const row = Number(csLine || tsLine), column = Number(csCol || tsCol);
+    const project = /\[[^\]]+\.(?:cs|fs|vb)proj\]\s*$/.exec(message)?.[0] || '';
+    const site = `${file.replace(/\\/g, '/')}:${row} ${project}`;
+    // C# cannot infer a deconstruction or an out variable when the call itself cannot resolve.
+    if (/^CS(?:8130|8183|8197)$/.test(code)) { inference.push({ site, code, testFile, row, column }); continue; }
+    let name;
+    if (/^CS(?:0103|0234|0246|0117|1061|1739)$/.test(code)) {
+      name = /(?:The (?:type or namespace )?name|definition for|parameter named) '([^']+)'/.exec(message)?.[1];
+    } else if (/^TS(?:2304|2305|2339|2459|2551|2614|2694|2724)$/.test(code)) {
+      name = /(?:Cannot find name|(?:has no|no) exported member|Property|declares) '([^']+)'/.exec(message)?.[1];
+    }
+    if (!name || !names.has(name) || !namesInTest.has(name)) return [];
+    missing.add(name);
+    if (!sites.has(site)) sites.set(site, []);
+    sites.get(site).push({ code, column });
+  }
+  for (const { site, code, testFile, row, column } of inference) {
+    const causes = code === 'CS8130' ? ['CS0103', 'CS0117', 'CS1061', 'CS1739'] : ['CS0117', 'CS1061', 'CS1739'];
+    let source;
+    try { source = textAt(testFile).split(/\r?\n/)[row - 1]; } catch { return []; }
+    if (!source || !sites.get(site)?.some(primary => {
+      const start = Math.min(column, primary.column), end = Math.max(column, primary.column);
+      return causes.includes(primary.code) && start > 0 && end <= source.length && !source.slice(start - 1, end - 1).includes(';');
+    })) return [];
+  }
+  return [...missing];
 }
 
 // The KEY=VALUE lines of an env file. `bad` holds the numbers of the lines that are not, never their
@@ -652,6 +956,8 @@ const state = { said: [], logs: [], logPath: null, head: '', remoteLog: null };
 
 // A red run is stuck at STUCK_FACTOR times the slowest finished red run, once STUCK_PEERS of them finished.
 const STUCK_FACTOR = 2, STUCK_PEERS = 2;
+// The unproven check lines a refusal shows before it only counts the rest.
+const UNPROVEN_SHOWN = 40;
 
 if (isMain(import.meta.url)) {
   main().catch((e) => { const line = 'RED-PROOF: failed — ' + e.message; state.said.push(line); process.stdout.write(line + '\n'); process.exit(2); });
@@ -665,6 +971,9 @@ async function main() {
   const opt = (name) => { const i = opts.indexOf(name); return i >= 0 ? opts[i + 1] : undefined; };
   const said = state.said;
   let hide = (text) => text; // set by --test-env: every line shown or logged passes through it
+  const runFailed = (r) => !r || r.timedOut || r.error || r.status !== 0;
+  // --check-plan (2026-11-19): only the checks that come before any run. No log, no run record, no test machine, no copy.
+  const checkPlan = opts.includes('--check-plan');
   const say = (line) => { line = hide(line); said.push(line); process.stdout.write(line + '\n'); };
   const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
   // A file swapped in the working folder right now (its backup folder), and the test processes running:
@@ -697,6 +1006,7 @@ async function main() {
   }
 
   const repo = opt('--repo') && path.resolve(opt('--repo'));
+  const cwdHere = opt('--cwd') ? path.resolve(opt('--cwd')) : repo;
   let plan = null;
   if (opt('--plan')) {
     try { plan = JSON.parse(fs.readFileSync(path.resolve(opt('--plan')), 'utf8')); }
@@ -707,7 +1017,7 @@ async function main() {
   // this run proves (on the test machine, the synced commit's); review-brief.mjs can compare it with the
   // tree under review.
   const stamp = (tree) => `RED-PROOF-LOG: tree ${tree} at ${new Date().toISOString()}`;
-  if (opt('--log')) {
+  if (opt('--log') && !checkPlan) {
     state.logPath = path.resolve(opt('--log'));
     state.head = stamp(repo ? treeId(repo, plan?.commit || '') : 'unknown (no --repo)');
     fs.writeFileSync(state.logPath, state.head + '\n');
@@ -721,7 +1031,7 @@ async function main() {
   // The run record the stop hook reads (run-record.mjs, 2026-11-15): a green run's result, kept when its output
   // went to a file. Written on exit, after the handler above put any swapped file back. The test machine's plan
   // run leaves it to the machine that asked. A --changed-since run's record says partial (2026-11-16).
-  if (repo && !plan && opts.includes('--then-green')) {
+  if (repo && !plan && !checkPlan && opts.includes('--then-green')) {
     keepRunRecord({ argv: process.argv.slice(2), said: state.said, tree: () => treeId(repo), startTree: (/^RED-PROOF-LOG: tree ([0-9a-f]{40,64}) /.exec(state.head) || [])[1],
       partial: opts.includes('--changed-since') });
   }
@@ -732,6 +1042,9 @@ async function main() {
     if (!dir) return true;
     try { restore(dir); return true; } catch (e) { say('RED-PROOF: RESTORE FAILED — ' + e.message); return false; }
   }
+  // A usage refusal (2026-11-19): nothing ran, and the last line says so in one fixed text the stop hook reads.
+  // The refusals that judge the break plan (a find that matches twice, AMBIGUOUS, UNPROVEN) keep their own text.
+  const refuse = (line) => { say(line); say('RED-PROOF: REFUSED — nothing ran'); process.exit(2); };
   const oldRef = opt('--old');
   const oldFiles = (opt('--files') || '').split(',').map((f) => f.trim().replace(/\\/g, '/')).filter(Boolean);
   const usage = () => {
@@ -739,6 +1052,7 @@ async function main() {
     say('   or: red-proof.mjs --repo <path> --break <file> --find <text> --put <text> [--cwd <dir>] [--log <file>] -- <executable> [args...]');
     say('   options: [--parallel <n>] [--timeout-min <n>] [--test-env <path>] [--local] [--show-remote]; or --repo <path> --drop-copies');
     say('   or: red-proof.mjs --repo <path> --warm [--parallel <n>] [--cwd <dir>] -- <executable> [args...]');
+    say('RED-PROOF: REFUSED — nothing ran');
     process.exit(2);
   };
 
@@ -787,21 +1101,43 @@ async function main() {
     if (opt('--breaks')) breaks = JSON.parse(fs.readFileSync(path.resolve(opt('--breaks')), 'utf8'));
     else if (opt('--break')) breaks = [{ name: 'break', file: opt('--break'), find: opt('--find'), put: opt('--put'), single: true }];
   } catch (e) { say('RED-PROOF: cannot read --breaks — ' + e.message); process.exit(2); }
-  if (!Array.isArray(breaks) || breaks.some(b => !b || typeof b.file !== 'string' || typeof b.find !== 'string' || !b.find || typeof b.put !== 'string' ||
-    (!b.single && (!Array.isArray(b.mustFail) || !b.mustFail.length)))) {
-    say('RED-PROOF: each break needs file, find, put and a non-empty mustFail list.'); process.exit(2);
+  if (plan) breaks = plan.breaks || [];
+  // 2026-11-20: one break file held both page and server rules. Check only this proof's files.
+  const inProofCwd = file => {
+    if (!opt('--cwd')) return true;
+    const rel = path.relative(cwdHere, path.resolve(repo, file.replace(/\\/g, '/')));
+    return rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+  };
+  const deferredBreaks = [];
+  if (repo && opt('--cwd') && Array.isArray(breaks)) {
+    breaks = breaks.filter(b => {
+      if (typeof b?.file !== 'string' || !b.file || inProofCwd(b.file)) return true;
+      const file = b.file.replace(/\\/g, '/');
+      const line = `  BREAK DEFERRED ${b.name || 'break'} (${file}): outside --cwd; left for another proof.`.replace(/[\r\n]/g, ' ');
+      deferredBreaks.push(line);
+      say(line);
+      return false;
+    });
   }
-  if (plan) {
-    breaks = plan.breaks || [];
-    if (!Array.isArray(breaks) || breaks.some(b => !b || typeof b.file !== 'string' || typeof b.find !== 'string' || !b.find || typeof b.put !== 'string' || !Array.isArray(b.mustFail) || !b.mustFail.length)) {
-      say('RED-PROOF: each break needs file, find, put and a non-empty mustFail list.'); process.exit(2);
-    }
+  const scopeFiltered = Boolean(plan?.scopeFiltered || deferredBreaks.length);
+  // An entry that is not filled in (2026-11-19: `breaks.mjs seed` writes one entry per new test with file, find and put
+  // left empty): each is named, so a half-written list is found at once. An empty put is named only by --check-plan:
+  // a real run still takes it (a break that deletes text).
+  if (Array.isArray(breaks)) {
+    const emptyOf = (b) => ['file', 'find', ...(checkPlan ? ['put'] : [])].filter(k => b && !b.single && (b[k] === '' || b[k] == null));
+    const unfilled = breaks.map((b, i) => ({ b, i, empty: emptyOf(b) })).filter(x => x.empty.length);
+    for (const x of unfilled) say(`  BREAK EMPTY ✗ ${x.b.name || `entry ${x.i + 1}`}: its ${x.empty.join(', ')} ${x.empty.length === 1 ? 'is' : 'are'} empty; write the file, the exact text to find and the text to put`);
+    if (unfilled.length) { say(`RED-PROOF: NOT PROVED ✗ — ${unfilled.length} of ${breaks.length} break(s) are not filled in. Nothing ran; files untouched.`); process.exit(2); }
+  }
+  if (!Array.isArray(breaks) || breaks.some(b => !b || typeof b.file !== 'string' || typeof b.find !== 'string' || !b.find || typeof b.put !== 'string' ||
+    ((plan || !b.single) && (!Array.isArray(b.mustFail) || !b.mustFail.length)))) {
+    say('RED-PROOF: each break needs file, find, put and a non-empty mustFail list.'); process.exit(2);
   }
   // --changed-since <ref> (2026-11-16, see the header) picks which of the --breaks run again, so it needs them; its
   // ref is checked below, once git is at hand. The test machine gets the kept breaks in its plan, not the option.
   const since = !plan && opts.includes('--changed-since') ? String(opt('--changed-since') ?? '') : null;
-  if (since !== null && !opt('--breaks')) { say('RED-PROOF: --changed-since needs --breaks: it picks which of those breaks run again. Nothing ran.'); process.exit(2); }
-  if (since !== null && (!since || since.startsWith('-'))) { say('RED-PROOF: --changed-since needs a git ref (a commit, a branch or a tree id). Nothing ran.'); process.exit(2); }
+  if (since !== null && !opt('--breaks')) refuse('RED-PROOF: --changed-since needs --breaks: it picks which of those breaks run again. Nothing ran.');
+  if (since !== null && (!since || since.startsWith('-'))) refuse('RED-PROOF: --changed-since needs a git ref (a commit, a branch or a tree id). Nothing ran.');
   // A break that puts back its own text changes nothing, so it proves nothing (2026-11-12, S6).
   const same = breaks.filter(b => b.put === b.find);
   if (same.length) {
@@ -818,7 +1154,7 @@ async function main() {
   const oldNames = oldPlan ? oldPlan.map(o => o.file) : oldFiles;
   const hasOld = Boolean(oldPlan || oldRef);
   // A --changed-since plan with no kept break and no old code still runs green on the test machine (2026-11-16).
-  if (!repo || !command.length || (oldRef ? !oldFiles.length : false) || (!hasOld && !breaks.length && !warm && !(plan?.partial && green))) usage();
+  if (!repo || !command.length || (oldRef ? !oldFiles.length : false) || (!hasOld && !breaks.length && !warm && !scopeFiltered && !(plan?.partial && green))) usage();
   if (warm && (hasOld || breaks.length)) { say('RED-PROOF: --warm only prepares the kept copies; run it alone, before the proof.'); process.exit(2); }
   // The time each run (and the compile check) may take (2026-11-09: a run hung 25 minutes, unseen).
   const timeoutMin = opt('--timeout-min') === undefined ? 15 : Number(opt('--timeout-min'));
@@ -826,22 +1162,35 @@ async function main() {
   const limitMs = Math.round(timeoutMin * 60000);
   // cmd.exe without /c opens a prompt that runs nothing (2026-11-09: Git Bash turned /c into C:/).
   if (/^cmd(?:\.exe)?$/i.test(String(command[0]).split(/[\\/]/).pop()) && !command.slice(1).some(a => /^\/c$/i.test(a))) {
-    say('RED-PROOF: cmd.exe without /c runs nothing and waits for typed input. Git Bash turns /c into C:/; write //c there. Better: pass test settings with --test-env, not a .cmd wrapper. Nothing ran.');
-    process.exit(2);
+    refuse('RED-PROOF: cmd.exe without /c runs nothing and waits for typed input. Git Bash turns /c into C:/; write //c there. Better: pass test settings with --test-env, not a .cmd wrapper. Nothing ran.');
   }
   // The old-code run swaps product files only; a test file there would run the old tests (2026-11-12, S7:
   // "No test files found" then read as red).
   const testsNamed = oldNames.filter(f => TEST_FILE.test(f));
   if (testsNamed.length) {
-    say(`RED-PROOF: --files names test file(s): ${testsNamed.join(', ')}. The old-code run puts back the fix's product files, and the new tests must stay; list only the product files of the fix. Nothing ran.`);
-    process.exit(2);
+    refuse(`RED-PROOF: --files names test file(s): ${testsNamed.join(', ')}. The old-code run puts back the fix's product files, and the new tests must stay; list only the product files of the fix. Nothing ran.`);
   }
   const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'buffer', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   // The --changed-since ref: a commit or a tree git knows (2026-11-16).
   if (since !== null) {
     let known = false;
     try { known = Boolean(git('rev-parse', '--verify', '-q', since + '^{tree}').toString('utf8').trim()); } catch { /* not known */ }
-    if (!known) { say(`RED-PROOF: unknown --changed-since ref ${since}; nothing ran.`); process.exit(2); }
+    if (!known) refuse(`RED-PROOF: unknown --changed-since ref ${since}; nothing ran.`);
+  }
+  // --at <commit> (2026-11-19): a proof for a pinned commit is true only when the work tree is that commit at the
+  // start. The sync to the test machine sends the working tree, so a dirty tree or another HEAD is refused here.
+  const at = !plan && opts.includes('--at') ? String(opt('--at') ?? '') : null;
+  if (at !== null) {
+    const one = (...a) => { try { return git(...a).toString('utf8').trim(); } catch { return null; } };
+    const pin = !at || at.startsWith('-') ? null : one('rev-parse', '--verify', '-q', at + '^{commit}');
+    if (!pin) refuse(`RED-PROOF: --at needs a commit git knows${at && !at.startsWith('-') ? ` (unknown: ${at})` : ''}. Nothing ran.`);
+    const head = one('rev-parse', '--verify', '-q', 'HEAD^{commit}');
+    if (head !== pin) refuse(`RED-PROOF: --at ${pin.slice(0, 12)}: the work tree is at ${head ? head.slice(0, 12) : 'no commit'}, not at that commit. Check out the pinned commit, or pin the commit you are on. Nothing ran.`);
+    const dirty = one('status', '--porcelain', '--untracked-files=all');
+    if (dirty === null || dirty) {
+      const names = (dirty || '').split(/\r?\n/).filter(Boolean).map(l => l.slice(3));
+      refuse(`RED-PROOF: --at ${pin.slice(0, 12)}: the work tree is not that commit${names.length ? `: ${names.length} file(s) differ (${names.slice(0, 4).join(', ')}${names.length > 4 ? ', …' : ''})` : ' (git status failed)'}. Commit them and pin the new commit. Nothing ran.`);
+    }
   }
   // On the test machine, the commit its sync made (2026-11-12, S3): it must be there.
   if (plan?.commit) {
@@ -857,12 +1206,23 @@ async function main() {
     try { hits = breakHits(textAt(b.file), b.find); } catch { /* no such file */ }
     if (hits !== 1) { say(`RED-PROOF: ${b.single ? '--find' : `break "${b.name}"`} matches ${hits} time(s) in ${b.file}; it must match exactly once. Nothing changed.`); process.exit(2); }
   }
+  let oldSha = '';
   if (oldRef) {
-    try { git('rev-parse', '--verify', oldRef + '^{commit}'); }
+    try { oldSha = String(git('rev-parse', '--verify', oldRef + '^{commit}')).trim(); }
     catch { say(`RED-PROOF: unknown --old ref ${oldRef}`); process.exit(2); }
   }
   // The test files proved, and the files the breaks change: hashed before anything changes.
   const base = opt('--base') || defaultBase(repo);
+  // The FOREIGN? guard (change-set.mjs, 2026-11-19), before any run: a folder that is most likely another session's
+  // is named with the one shared text. Read only on the machine that asks. Any git error skips it.
+  if (!plan) {
+    let foreign = [];
+    try { foreign = changeSet(repo, base).foreign || []; } catch { foreign = []; }
+    if (foreign.length) {
+      for (const l of String(foreignLine(foreign)).split(/\r?\n/).filter(Boolean)) say(l);
+      refuse('RED-PROOF: the work tree holds files that are most likely not this task\'s (FOREIGN? above); a proof of that tree would not be this change\'s. Nothing ran.');
+    }
+  }
   const testFiles = changedTestFiles(repo, base);
   const fileHashes = testFiles ? testFileHashes(repo, testFiles) : null;
   let targetHashes = {};
@@ -871,13 +1231,15 @@ async function main() {
   // check or any copy (2026-11-14, see ambiguousParts). New means new since the merge base with --base. Read
   // only on the machine that asks: the test machine's base is the synced commit, where no test is new. Any
   // git or read error skips the check (the proof then reads as before), so it never refuses by mistake.
-  if (!plan && testFiles?.length && breaks.some(b => !b.single)) {
+  let newTests = null; // the tests this change added, for the evidence rows at the end (2026-11-19)
+  if (!plan && testFiles?.length && (hasOld || breaks.some(b => !b.single))) {
     let tests = [];
     try {
       const from = git('merge-base', base, 'HEAD').toString('utf8').trim();
       const had = new Set(git('--literal-pathspecs', 'ls-tree', '-r', '--full-tree', '--name-only', '-z', from, '--', ...testFiles).toString('utf8').split('\0').filter(Boolean));
       tests = testFiles.flatMap(f => markNewTests(textAt(f), had.has(f) ? git('show', `${from}:${f}`).toString('utf8') : null, f));
     } catch { tests = []; }
+    newTests = tests.filter(t => t.isNew);
     const unclear = ambiguousParts(breaks, tests);
     if (unclear.length) {
       const list = (titles) => titles.slice(0, 4).map(t => `"${t}"`).join(', ') + (titles.length > 4 ? ` (+${titles.length - 4} more)` : '');
@@ -906,7 +1268,7 @@ async function main() {
     try {
       const parts = breaks.filter(b => !b.single).flatMap(b => b.mustFail.map(String));
       const entries = readRecord(repo);
-      const cwdRel = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
+      const cwdRel = path.relative(repo, cwdHere).replace(/\\/g, '/');
       if (entries && parts.length) delete entries.entries[recordKey(command, cwdRel)];
       const scope = new Set(proofScope(command, testFiles, cwdRel));
       const spans = new Map();
@@ -928,30 +1290,83 @@ async function main() {
       for (const l of unproven) byFile.set(l.file, [...(byFile.get(l.file) || []), l]);
       for (const [file, lines] of byFile) {
         say(`  UNPROVEN ✗ ${file}: ${lines.length} new "nothing happens" check(s) whose own test no break here names`);
-        for (const l of lines.slice(0, 3)) say(`    ${file}:${l.line} — ${l.text.trim().slice(0, 160)} → ${proofHint(l.own)}`);
       }
+      // Every line, up to 40, then a count (2026-11-19: three lines per file were shown, and 8 unproven checks took two tries).
+      for (const l of unproven.slice(0, UNPROVEN_SHOWN)) say(`    ${l.file}:${l.line} — ${l.text.trim().slice(0, 160)} → ${proofHint(l.own)}`);
+      if (unproven.length > UNPROVEN_SHOWN) say(`    … and ${unproven.length - UNPROVEN_SHOWN} more line(s) not shown`);
       say('RED-PROOF: NOT PROVED ✗ — pre-review counts a new "nothing happens" check only when a --breaks run caught a break whose mustFail names the test that holds that check; another caught test in the same file does not count. Add a break of each such test\'s rule whose mustFail names that test (a run on the old code does not count for these lines). Nothing ran; files untouched.');
       process.exit(2);
     }
   }
+  // --check-plan ends here (2026-11-19): every check above ran, and nothing else does. One more check is its own:
+  // every mustFail part must name a test. A part in no title of the changed test files may still name an older
+  // test, so it is refused only when no file of the repository holds its words (the breaks file itself left out).
+  if (checkPlan) {
+    const lost = [];
+    try {
+      const titles = (testFiles || []).flatMap(f => { try { return declaredTests(textAt(f), f); } catch { return []; } }).flatMap(d => d.titles.map(x => String(x).toLowerCase()));
+      const own = opt('--breaks') ? path.relative(repo, path.resolve(opt('--breaks'))).replace(/\\/g, '/') : '';
+      const spec = ['--', '.', ...(own && !own.startsWith('..') && !path.isAbsolute(own) ? [`:(exclude)${own}`] : [])];
+      for (const b of breaks.filter(x => !x.single)) for (const part of b.mustFail.map(String)) {
+        if (part && titles.some(x => x.includes(part.toLowerCase()))) continue;
+        let held = Boolean(part);
+        if (held) { try { git('grep', '-q', '-i', '-F', '--untracked', '-e', part, ...spec); } catch (e) { held = e.status !== 1; } }
+        if (!held) lost.push({ name: b.name, part });
+      }
+    } catch { lost.length = 0; }
+    if (lost.length) {
+      for (const l of lost) say(`  BREAK UNNAMED ✗ ${l.name}: mustFail part "${l.part}" names no test: no test title and no file here holds these words`);
+      say('RED-PROOF: NOT PROVED ✗ — every mustFail part must be words of the own title of a test this command runs. Nothing ran; files untouched.');
+      process.exit(2);
+    }
+    const count = breaks.filter(x => !x.single).length;
+    say(`RED-PROOF: plan checked — ${count} break(s): each is filled in and its find matches once, no mustFail part is ambiguous or names no test, and no new "nothing happens" check is left unproven. No run started, no test machine contacted, no copy taken.`);
+    say('PLAN OK');
+    process.exit(0);
+  }
   // Fix files that only add names the tests use stay at the fixed version for the old-code run (addedNames).
+  const buildTests = plan ? (plan.buildTests || []) : (newTests || []).filter(t => inProofCwd(t.file));
   const keptAtFix = [];
-  if (oldRef && !plan && testFiles?.length) {
-    const testText = testFiles.map(f => { try { return testCode(fs.readFileSync(path.join(repo, f), 'utf8'), f); } catch { return ''; } }).join('\n');
+  const oldMissingNames = new Set(Array.isArray(plan?.oldMissingNames) ? plan.oldMissingNames : []);
+  const oldTestCode = new Map();
+  const oldTestFiles = plan ? plan.testFiles : testFiles;
+  if (hasOld && Array.isArray(oldTestFiles)) for (const f of oldTestFiles) {
+    try { oldTestCode.set(f, testCode(textAt(f), f)); } catch { /* no test code to check */ }
+  }
+  if (oldRef && !plan && oldTestCode.size) {
+    const testText = [...oldTestCode.values()].join('\n');
+    const namesUsedByTests = codeNames(testText);
+    const files = [];
     for (const f of oldFiles) {
-      let oldText = '', diff = '';
+      let oldText = null, fixedText = '', diff;
       try { oldText = git('show', `${oldRef}:${f}`).toString('utf8'); } catch { /* a new file: every line is added */ }
+      try { fixedText = textAt(f); } catch { /* a removed file has no code now */ }
       try {
-        diff = oldText ? git('diff', '--no-color', '-U0', oldRef, '--', f).toString('utf8')
-          : fs.readFileSync(path.join(repo, f), 'utf8').split(/\r?\n/).map(l => '+' + l).join('\n');
+        diff = oldText !== null ? git('diff', '--no-color', '-U0', oldRef, '--', f).toString('utf8')
+          : fixedText.split(/\r?\n/).map(l => '+' + l).join('\n');
       } catch { continue; }
-      const names = addedNames(diff, oldText, testText, f);
+      if (!diff) continue;
+      const before = testCode(oldText || '', f);
+      const beforeNames = codeNames(before), fixedNames = codeNames(testCode(fixedText, f));
+      const added = addedLines(diff);
+      files.push({ file: f, beforeNames, fixedNames, addOnly: added.length > 0 });
+      const names = namesOnAddedLines(added, before, testText, f).filter(n => fixedNames.has(n));
       if (names.length) keptAtFix.push({ file: f, names });
     }
-    if (keptAtFix.length >= oldFiles.length) keptAtFix.length = 0; // no file would go back: nothing to prove
+    // 2026-11-20: a related caller with edited lines hid the real old behavior.
+    const shared = [...new Set(keptAtFix.flatMap(k => k.names))];
+    for (const f of files) {
+      if (!f.addOnly || keptAtFix.some(k => k.file === f.file)) continue;
+      const names = shared.filter(n => f.fixedNames.has(n) || f.beforeNames.has(n));
+      if (names.length) keptAtFix.push({ file: f.file, names, related: true });
+    }
+    if (keptAtFix.length === files.length) keptAtFix.length = 0; // no changed file would go back
+    for (const f of files) if (!keptAtFix.some(k => k.file === f.file)) {
+      for (const name of namesUsedByTests) if (f.fixedNames.has(name) && !f.beforeNames.has(name)) oldMissingNames.add(name);
+    }
   }
   const oldRun = oldFiles.filter(f => !keptAtFix.some(k => k.file === f));
-  for (const k of keptAtFix) say(`RED-PROOF: ${k.file} stays at the fix for the old-code run: it only adds lines, and the tests use its new names (${k.names.slice(0, 4).join(', ')}).`);
+  for (const k of keptAtFix) say(`RED-PROOF: ${k.file} stays at the fix for the old-code run: ${k.related ? 'it declares or uses the same new names' : 'it only adds lines, and the tests use its new names'} (${k.names.slice(0, 4).join(', ')}).`);
   // Product files that differ from the old code but are not in --files stay at the fix for the old-code
   // run (2026-11-12, S7: a fix file left out made a mix of old and new read as "fails on the old code").
   if (oldRef && !plan) {
@@ -996,8 +1411,12 @@ async function main() {
   // run writes no success and no mark at its start: it takes the entry back only when it ends in a failure after
   // its runs started. `code` is the id of the code under test a full proof will record (codeFingerprint), taken
   // before any file is swapped here, or before the sync when the runs go to the test machine.
-  const recordCwd = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
+  if (scopeFiltered && !hasOld && !breaks.length && !green && !warm) process.exit(0);
+  const recordCwd = path.relative(repo, cwdHere).replace(/\\/g, '/');
   const keepsRecord = !plan && (partial ? partial.of > 0 : breaks.some(b => !b.single));
+  // The run facts (green on this tree, red on the old code) are kept for a proof with breaks and also for one with only an
+  // old-code run (2026-11-19): else an honest --old proof left nothing for the checks before review to read.
+  const keepsFacts = !plan && !partial && (keepsRecord || hasOld);
   const proof = { key: recordKey(command, recordCwd), proved: false, code: '', why: '' };
   function takeBack(reason) {
     try { writeEntry(repo, proof.key, { ok: false, reason: String(reason).slice(0, 300), base, command, cwd: recordCwd, ...(partial ? { partial: true } : {}) }); }
@@ -1052,38 +1471,62 @@ async function main() {
     const planName = `plan-${runId}.json`, logName = `proof-${runId}.log`;
     const q = (a) => (/[\s"&|<>^()]/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a);
     const exe = /^node(?:\.exe)?$/i.test(path.basename(command[0])) ? remoteNode : command[0];
-    const rel = path.relative(repo, opt('--cwd') ? path.resolve(opt('--cwd')) : repo).replace(/\\/g, '/');
+    const rel = recordCwd;
     // The env file is read on the test machine: only its path crosses over, never a value. The repository's default
     // (sanad.remoteTestEnv, a database connection) goes only to `dotnet` runs; --test-env always applies.
-    const dotnetRun = /^dotnet(?:\.exe)?$/i.test(path.basename(command[0]));
+    const dotnetRun = isDotnetCommand(command);
     const envFile = (opt('--test-env') || (dotnetRun ? gitText(['config', '--get', 'sanad.remoteTestEnv']) : '')).replace(/\\/g, '/');
     const remoteCmd = [q(remoteNode), q(dir + '/red-proof.mjs'), '--repo', q(remoteRepo), '--local', '--plan', q(dir + '/' + planName),
       ...(opt('--parallel') ? ['--parallel', String(parallel)] : []), '--timeout-min', String(timeoutMin), ...(envFile ? ['--test-env', q(envFile)] : []),
       '--base', 'HEAD', '--cwd', q(rel ? remoteRepo + '/' + rel : remoteRepo), '--log', q(dir + '/' + logName),
       '--', q(exe), ...command.slice(1).map(q)].join(' ');
     if (opts.includes('--show-remote')) { say(`RED-PROOF: on ${remoteHost} this runs: ${remoteCmd}`); process.exit(0); }
-    // The database first (2026-11-15, role-sync task: the database there had stopped, and the proof found out
-    // only from its first run, a full rerun lost). A server proof starts it, or waits for it, before anything is
-    // sent; the preflight also renews the hold that keeps it up between runs. A warm-up builds only.
     const dbContainer = gitText(['config', '--get', 'sanad.remoteDbContainer']);
-    if (dotnetRun && !warm && dbContainer) {
-      const pre = spawnSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-preflight.sh'), '--db'], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 8 * 60 * 1000 });
-      const preOut = (pre.stdout || '') + (pre.stderr || '');
-      if (pre.status === 4 || /REMOTE-DOWN/.test(preOut)) { say('RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).'); process.exit(4); }
-      if (pre.status !== 0 || !/^READY\b/m.test(preOut)) {
-        const why = preOut.split(/\r?\n/).find(l => /^(?:DB-DOWN|DOCKER-DOWN|FAILED|NO-REMOTE)\b/.test(l.trim())) || (pre.error ? pre.error.message : `exit ${pre.status}`);
-        say(`RED-PROOF: ENVIRONMENT ✗ — the database on the test machine is not ready (${why.trim()}); nothing ran. Fix it (remote-preflight.sh --db), then run the same proof again.`);
-        process.exit(6);
+    const watchDb = dotnetRun && !warm && Boolean(dbContainer);
+    let dbReady = false, dbPreflight;
+    if (watchDb) {
+      // 2026-11-20: keep startup beside the compile check and the first green run.
+      const pre = spawn(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-preflight.sh'), '--db'],
+        { cwd: repo, env: bashEnv(), windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+      let preResult = '', preError = '';
+      const readPreflight = (line) => {
+        if (/^(?:READY|DB-DOWN|DOCKER-DOWN|FAILED|NO-REMOTE|REMOTE-DOWN)\b/.test(line)) preResult = line.slice(0, 400);
+      };
+      for (const stream of [pre.stdout, pre.stderr]) {
+        let rest = '';
+        stream.setEncoding('utf8');
+        stream.on('data', chunk => {
+          const lines = (rest + chunk).split(/\r?\n/);
+          rest = lines.pop().slice(0, 400);
+          lines.forEach(readPreflight);
+        });
+        stream.on('end', () => readPreflight(rest));
       }
-      say(`RED-PROOF: database ${dbContainer} ready on ${remoteHost}`);
+      const stop = () => stopTree(pre.pid);
+      process.once('exit', stop);
+      dbPreflight = new Promise(resolve => {
+        const timer = setTimeout(() => { stop(); resolve({ reason: 'database check timed out' }); }, 8 * 60 * 1000);
+        pre.on('error', error => { preError = error.message; });
+        pre.on('close', status => {
+          clearTimeout(timer);
+          process.removeListener('exit', stop);
+          dbReady = status === 0 && /^READY\b/.test(preResult);
+          resolve({ ready: dbReady, down: status === 4 || /^REMOTE-DOWN\b/.test(preResult),
+            reason: preResult || preError || `database check ended with exit ${status}` });
+        });
+      });
     }
     // The code id this machine will record (2026-11-17): the code as it is when the proof is sent. It is taken
     // before the sync, and after the sync the working tree must still be the tree the sync sent (below), so the id
     // is of the code the test machine runs; an edit in between leaves an id no later check will match.
-    if (keepsRecord && !partial) proof.code = codeFingerprint(repo);
+    // 2026-11-20 (V1): the tree as git builds it (the way the sync does) is taken on both sides of the code id. When the
+    // folder moved between them, or the sync sent another tree, the code id is of other code than the one sent.
+    let treeBefore = '';
+    if (keepsFacts || keepsRecord) { treeBefore = treeId(repo); proof.code = codeFingerprint(repo); if (treeId(repo) !== treeBefore) treeBefore = ''; }
     const sync = spawnSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000 });
     const syncOut = (sync.stdout || '') + (sync.stderr || '');
-    if (/REMOTE-DOWN/.test(syncOut)) { say('RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).'); process.exit(4); }
+    const remoteDown = 'RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).';
+    if (sync.status === 4 || /^REMOTE-DOWN\b/m.test(syncOut)) { say(remoteDown); process.exit(4); }
     const synced = /SYNCED \S+ (\w+) tree (\w+)/.exec(syncOut);
     if (!synced) { say('RED-PROOF: the test machine was not synced — ' + (syncOut.split(/\r?\n/).find(l => /NO-REMOTE|REMOTE-DIRTY|FAILED|fatal|error/i.test(l)) || 'no SYNCED line')); process.exit(2); }
     // The address remote-sync reached when the machine's name did not answer (its VIA line).
@@ -1094,16 +1537,53 @@ async function main() {
     if (state.logPath) state.head = stamp(synced[2]);
     // The record is about this machine's code: its tree now (built the way the sync builds the tree it sends) must
     // be the tree the sync sent (2026-11-17). When it is not, the proof still runs, and no success is recorded.
-    if (keepsRecord && !partial) {
+    if ((keepsFacts || keepsRecord) && (!treeBefore || treeBefore !== synced[2])) {
+      proof.why = treeBefore ? `the working tree here (${treeBefore.slice(0, 12)}) is not the tree the sync sent (${synced[2].slice(0, 12)}): a file changed while the proof was sent` : 'the folder changed while the code id of this proof was taken, before the sync';
+      say('RED-PROOF: the folder changed before the sync: no resume, no saved results for this run (the proof still runs and judges as before).');
+    }
+    if (keepsFacts && !proof.why) {
       const here = treeId(repo);
       if (here !== synced[2]) proof.why = `the working tree here (${here.slice(0, 12)}) is not the tree the sync sent (${synced[2].slice(0, 12)}): a file changed while the proof was sent`;
     }
+    // 2026-11-19: a break already caught on this exact tree (the rule the local resume uses) is not sent again. Any
+    // doubt, or nothing left to send, sends them all. sendIdx maps a break's place in the plan back to its place here.
+    let sendBreaks = breaks, sendIdx = breaks.map((_, i) => i);
+    const droppedCaught = [];
+    const remoteRun = `${Date.now().toString(36)}-${process.pid}`;
+    if (keepsRecord && !partial && !proof.why && !opts.includes('--fresh') && !breaks.some(b => b.single)) {
+      try {
+        const rec = readRecord(repo);
+        const states = breakStates(repo, proof.key, breaks, proof.code, rec);
+        // 2026-11-20 (V1): as the local resume, only a break this session's log shows caught on this tree is not sent.
+        const held = states.map((s, i) => i).filter(i => states[i].state === 'proved' && states[i].counts);
+        const sess = held.length ? await sessionCaught(repo) : { why: '', keys: new Set() };
+        const skip = new Set(held.filter(i => sess.keys.has(states[i].id + ' ' + proof.code)));
+        const refusedHere = held.length - skip.size;
+        const kept = states.map((s, i) => i).filter(i => !skip.has(i));
+        if (!skip.size && refusedHere) say(`Resume refused for ${refusedHere} of ${breaks.length} breaks: saved for this tree, but ${refusedWhy(sess)}; sending all ${breaks.length}`);
+        if (kept.length && kept.length < breaks.length) {
+          states.forEach((s, i) => {
+            if (!skip.has(i)) return;
+            for (const [file, list] of Object.entries(rec.perBreak[proof.key][s.id].caught || {})) for (const t of list) droppedCaught.push({ file, ...t, by: String(breaks[i].name) });
+          });
+          sendBreaks = kept.map(i => breaks[i]); sendIdx = kept;
+          say(`RESUMED ${breaks.length - kept.length} of ${breaks.length} breaks from saved results of this tree; sending the other ${kept.length}${resumeNote(refusedHere, refusedWhy(sess))}`);
+        }
+      } catch { sendBreaks = breaks; sendIdx = breaks.map((_, i) => i); droppedCaught.length = 0; }
+    }
+    // A new run for this tree starts: the saved pass of the tree is withdrawn first (written again only on success).
+    if (green && (keepsRecord || keepsFacts) && proof.code) { try { withdrawRunFacts(repo, proof.key, proof.code); } catch (e) { if (e && e.code === 'RECORD_BUSY') refuse('RED-PROOF: the saved pass of this tree cannot be withdrawn: the proof record is busy. Run the command again.'); } }
     const local = fs.mkdtempSync(path.join(os.tmpdir(), 'sanad-proof-'));
     // The commit this sync made goes with the plan: the test machine tests it, not whatever HEAD it has by
     // then (2026-11-12, S3). The changed test files go too: there, nothing differs from that commit.
     fs.writeFileSync(path.join(local, planName), JSON.stringify({
-      oldLabel: oldRef, green, breaks, commit: synced[1], testFiles: testFiles || [],
-      warm, kept: keptAtFix.map(k => k.file), ...(partial ? { partial } : {}),
+      oldLabel: oldRef, green, breaks: sendBreaks, commit: synced[1], testFiles: testFiles || [],
+      warm, kept: keptAtFix.map(k => k.file), ...(partial ? { partial } : {}), ...(scopeFiltered ? { scopeFiltered } : {}),
+      ...(oldMissingNames.size ? {
+        oldMissingNames: [...oldMissingNames], buildTests,
+        resumedBreaks: breaks.filter((_, i) => !sendIdx.includes(i)).map(({ name, mustFail }) => ({ name, mustFail })),
+      } : {}),
+      ...(watchDb ? { watchDb: true } : {}),
       old: hasOld ? oldRun.map(f => { try { return { file: f, content64: git('show', `${oldRef}:${f}`).toString('base64') }; } catch { return { file: f, content64: null }; } }) : [],
     }));
     const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1117,17 +1597,61 @@ async function main() {
     if (scp.status !== 0) { say('RED-PROOF: could not copy the proof to the test machine — ' + ((scp.stderr || '').trim().split(/\r?\n/).pop() || 'scp failed')); process.exit(2); }
     // Each line as it comes, so a long proof is never silent. The runs there stop at their own limit;
     // this wait is the backstop for a lost connection.
-    const runs = (hasOld ? 1 : 0) + breaks.length + (green ? 1 : 0) + (warm ? 1 : 0);
+    const runs = (hasOld ? 1 : 0) + sendBreaks.length + (green ? (watchDb ? 2 : 1) : 0) + (warm ? 1 : 0);
     const waitMin = Math.ceil(timeoutMin * (runs + 2) + 10);
     // The proof is sent: its runs start there now (2026-11-17, see proofStarts).
     proofStarts();
     // The failing tests of each caught break, as the test machine's runner named them (its RED-PROOF-CAUGHT lines).
     const sentCaught = [];
+    let sentOldRed = null, reportedCaught = 0;
+    let dbUnavailable;
     const r = await new Promise((resolve) => {
-      const child = spawn('ssh', ['-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6', ...sshOpts, remoteHost, remoteCmd], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn('ssh', ['-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=6', ...sshOpts, remoteHost, remoteCmd], { windowsHide: true, stdio: [watchDb ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+      if (watchDb) child.stdin.on('error', () => { /* ssh's exit reports a lost connection */ });
       const show = (l) => {
+        if (watchDb && l === 'RED-PROOF-DB-START: ready?') {
+          child.stdin.write(dbReady ? 'ready\n' : 'pending\n');
+          return;
+        }
+        if (watchDb && l === 'RED-PROOF-DB-WAIT: ready?') {
+          dbPreflight.then(result => {
+            if (child.stdin.destroyed || child.stdin.writableEnded) return;
+            if (!result.ready) dbUnavailable = result;
+            child.stdin.end(result.ready ? 'ready\n' : 'unavailable\n');
+          });
+          return;
+        }
+        const oldNames = readOldRedLine(l);
+        if (oldNames) { sentOldRed = oldNames; return; }
+        // The passing run's line: its fact is saved now, under the code id taken before the sync (2026-11-20, V1).
+        if (isGreenLine(l)) {
+          if (green && (keepsRecord || keepsFacts) && proof.code && !proof.why) { try { writeRunFacts(repo, proof.key, { tree: proof.code, run: remoteRun, green: true }); } catch { /* not saved */ } }
+          return;
+        }
         const sent = readCaughtLine(l);
-        if (sent) { sentCaught.push(sent); return; } // read for the record, not shown: the BREAK ✓ line says it
+        if (sent) {
+          sent.i = sendIdx[sent.i];
+          sentCaught.push(sent);
+          // Saved now, as its line arrives (2026-11-19), not only when the whole proof ends.
+          if (keepsRecord && !partial && proof.code && !proof.why && breaks[sent.i] && !breaks[sent.i].single) {
+            try {
+              const b = breaks[sent.i];
+              const sp = (testFiles || []).flatMap(f => { try { return testSpans(textAt(f), f); } catch { return []; } });
+              writeBreakResult(repo, proof.key, b, { state: 'caught', tree: proof.code, run: remoteRun, ms: null, caught: caughtTests(b.mustFail, sent.failed, namePairs(), sp) });
+            } catch { /* not saved: the end of the proof still records it */ }
+          }
+          // The caught result's own line, with the tail (2026-11-20, U2): a proof stopped before its report still shows it.
+          if (keepsRecord && !partial && proof.code && !proof.why && breaks[sent.i] && !breaks[sent.i].single) say(`  BREAK ✓ ${breaks[sent.i].name}: caught on the test machine${caughtTail(breakId(breaks[sent.i]), proof.code)}`);
+          return;
+        } // read for the record: the BREAK ✓ line of the report says it again
+        // A caught line of the report gets the tail of this machine's own break id and code id (the test machine does not
+        // know them). The report lists the caught breaks in the plan's order, as the RED-PROOF-CAUGHT lines named them.
+        const caughtRow = /^(\s*BREAK ✓ )(.+?): all \d+ named test\(s\) fail\s*$/.exec(l);
+        if (caughtRow && keepsRecord && proof.code && !proof.why) {
+          const order = [...new Set(sentCaught.map(c => c.i))].sort((a, b) => a - b);
+          const at = order[reportedCaught++];
+          if (at !== undefined && breaks[at] && !breaks[at].single && String(breaks[at].name) === caughtRow[2]) l += caughtTail(breakId(breaks[at]), proof.code);
+        }
         if (l.trim() && !/post-quantum|store now|openssh\.com\/pq/.test(l)) say(l);
       };
       const rest = { stdout: '', stderr: '' };
@@ -1140,6 +1664,14 @@ async function main() {
       child.on('error', (error) => { clearTimeout(timer); resolve({ status: null, error }); });
       child.on('close', (status) => { clearTimeout(timer); show(rest.stdout); show(rest.stderr); resolve({ status, timedOut }); });
     });
+    const dbFailed = !r.timedOut && r.status === 6 && dbUnavailable;
+    const status = r.timedOut ? 5 : r.status === 255 || dbFailed?.down ? 4 : r.status ?? 2;
+    const dbVerdict = status === 6 && dbFailed
+      ? `RED-PROOF: ENVIRONMENT ✗ — the database on the test machine was not ready (${dbFailed.reason}); nothing proved.` : '';
+    if (dbVerdict) say(dbVerdict);
+    if (status === 4) say(remoteDown);
+    // A machine or database stop (exit 6) says nothing about the code: what this run saved is taken back, as the local path does.
+    if (status === 6 && (keepsRecord || keepsFacts)) { try { takeBackRun(repo, remoteRun); } catch { /* an entry's tree still voids it after any edit */ } }
     if (r.error) say('RED-PROOF: could not start ssh — ' + r.error.message);
     if (r.timedOut) say(`RED-PROOF: TIMEOUT ✗ — ${remoteHost} sent no result within ${waitMin} min; each run there stops at its own ${timeoutMin} min limit.`);
     // The test machine's log, with its runs' output, becomes this log under this run's first line; when it
@@ -1147,6 +1679,7 @@ async function main() {
     if (state.logPath) {
       spawnSync('scp', ['-q', ...sshOpts, `${remoteHost}:${dir}/${logName}`, logName], { cwd: local, windowsHide: true, timeout: 120000 });
       try { state.remoteLog = fs.readFileSync(path.join(local, logName), 'utf8'); } catch { /* not fetched */ }
+      if (state.remoteLog) state.remoteLog = [...deferredBreaks, ...(dbFailed ? [dbVerdict || remoteDown] : []), state.remoteLog].join('\n');
     }
     const there = windows ? dir.split('/').join('\\') + '\\' : dir + '/';
     const mine = [planName, logName].map(n => `"${there}${n}"`).join(' ');
@@ -1157,7 +1690,25 @@ async function main() {
     // success of an earlier run does not stand in for it.
     const same = (hashes) => { try { return JSON.stringify(testFileHashes(repo, Object.keys(hashes))) === JSON.stringify(hashes); } catch { return false; } };
     const targets = (() => { try { return testFileHashes(repo, [...new Set(breaks.map(b => b.file))]); } catch { return null; } })();
-    if (r.status === 0 && keepsRecord && !partial) {
+    // The run facts (2026-11-19): green on this tree, and the new tests red on the old code (the machine says the failing
+    // names of its old-code run). Saved under the code id taken before the sync, never the tree as it is now.
+    if (status === 0 && (keepsFacts || keepsRecord) && proof.code && !proof.why) {
+      if (green) {
+        try { writeRunFacts(repo, proof.key, { tree: proof.code, run: remoteRun, green: true, ...(hasOld && sentOldRed ? { redOld: redOldTests(newTests, sentOldRed), old: oldSha } : {}) }); } catch { /* not saved */ }
+      } else if (keepsFacts && hasOld && sentOldRed) {
+        // No passing run in this call (2026-11-20): the red-on-old facts are saved beside the pass an earlier run left
+        // for this same tree (its run id is kept), as the local path does.
+        const red = redOldTests(newTests, sentOldRed);
+        if (red.length) {
+          try {
+            const prev = readRecord(repo)?.runs?.[proof.key]?.[proof.code];
+            const factsRun = prev && typeof prev.run === 'string' && prev.run ? prev.run : remoteRun;
+            writeRunFacts(repo, proof.key, { tree: proof.code, run: factsRun, redOld: red, old: oldSha });
+          } catch { /* not saved */ }
+        }
+      }
+    }
+    if (status === 0 && keepsRecord && !partial) {
       if (!proof.why && !fileHashes) proof.why = `there is no merge base with ${base}, so the changed test files are not known`;
       if (!proof.why && !same(fileHashes)) proof.why = 'a test file here changed after the proof was sent';
       if (!proof.why && !(targets && breaks.length)) proof.why = 'a file a break changes is not here any more';
@@ -1166,11 +1717,11 @@ async function main() {
         // The names the test machine's runner printed, matched to the tests this machine's test files declare.
         const pairsHere = namePairs();
         const spansHere = (testFiles || []).flatMap(f => { try { return testSpans(textAt(f), f); } catch { return []; } });
-        record(targets, sentCaught.flatMap(c => (breaks[c.i] && !breaks[c.i].single
-          ? caughtTests(breaks[c.i].mustFail, c.failed, pairsHere, spansHere).map(t => ({ ...t, by: String(breaks[c.i].name) })) : [])), { remote: remoteHost });
+        record(targets, [...sentCaught.flatMap(c => (breaks[c.i] && !breaks[c.i].single
+          ? caughtTests(breaks[c.i].mustFail, c.failed, pairsHere, spansHere).map(t => ({ ...t, by: String(breaks[c.i].name) })) : [])), ...droppedCaught], { remote: remoteHost });
       }
     }
-    process.exit(r.timedOut ? 5 : r.status ?? 2);
+    process.exit(status);
   }
 
   // The proof record entry of a passing --breaks run (2026-11-12, S4/C5/S12/S8): under this command and
@@ -1205,7 +1756,20 @@ async function main() {
   // task left the product file broken; only a --restore hint was printed). Ctrl-C, SIGTERM and Ctrl-Break
   // stop the test run, put the files back and end the proof (exit 2); a thrown error or any other exit puts
   // them back through the exit handler. A hard kill (taskkill /F) runs no handler: the --restore hint stays.
-  async function swapRun(changes) {
+  // The command for one break (2026-11-19): only the tests its mustFail names, built on the machine that runs it.
+  // The passing run and the old-code run keep the full command. A narrowed run that ran no test runs once more in
+  // full. Any doubt gives the full command (selectCommand). The record key stays the full command.
+  async function runForJob(job, cwd, env, control = null) {
+    let cmd = command;
+    if (job && job.kind === 'break' && !job.b.single) {
+      try { const sel = selectCommand(command, job.b.mustFail, selectable, { cwd: path.relative(repo, cwdHere) }); if (sel.narrowed && Array.isArray(sel.command)) cmd = sel.command; } catch { cmd = command; }
+    }
+    let r = await runProcess(cmd, cwd, env, control);
+    // 2026-11-19: a narrowed run that missed a failure the break names is judged only after the full command ran once.
+    if (cmd !== command && (ranNoTest(r) || (!r.timedOut && !r.error && breakState(job.b, r).state === 'not-caught'))) r = await runProcess(command, cwd, env, control);
+    return r;
+  }
+  async function swapRun(changes, job = null) {
     if (!swapRun.guarded) {
       swapRun.guarded = true;
       for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK']) {
@@ -1237,7 +1801,7 @@ async function main() {
         if (next === null) { if (fs.existsSync(target)) fs.rmSync(target); }
         else { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, next); }
       }
-      result = await runProcess(command, cwdHere);
+      result = await runForJob(job, cwdHere, runEnv);
     } catch (e) {
       swapError = e;
     } finally {
@@ -1247,7 +1811,6 @@ async function main() {
     if (swapError) { say('RED-PROOF: could not swap the files — ' + swapError.message + '; files restored.'); process.exit(2); }
     return result;
   }
-  const cwdHere = opt('--cwd') ? path.resolve(opt('--cwd')) : repo;
   // One process: no typed input (2026-11-09: an open input pipe let cmd.exe wait for ever), the env
   // file's variables (a kept copy's run: copyRunEnv), and the time limit, past which it and every process it
   // started are stopped.
@@ -1287,9 +1850,9 @@ async function main() {
   // The log opens with its tree line and this run's own lines (review-brief.mjs --proof-log reads them),
   // then each run's output; the exit handler writes it, on this exit and on every other.
   function finish(code) { process.exit(code); }
-  function setupStop(r, oldCode = false) {
+  function setupStop(r, { oldCode = false, buildError = false } = {}) {
     const setup = r.why.filter((w) => w.kind === 'setup');
-    if (setup.length || (!r.why.length && r.code !== 0 && SETUP_OUTPUT.test(r.output))) {
+    if (setup.length || buildError || (!r.why.length && r.code !== 0 && SETUP_OUTPUT.test(r.output))) {
       showWhy(r);
       // The old code without names the new tests use: say which, and the way out.
       const missing = oldCode ? [...new Set([...r.output.matchAll(/error CS\d+:.*?(?:definition for|The name|namespace name) '(\w+)'/g)].map(m => m[1]))] : [];
@@ -1333,7 +1896,8 @@ async function main() {
       const r = await runProcess(check, path.join(copy, cwdRel), copyRunEnv(command, runEnv));
       logs.push(`===== warm copy ${k} =====\n${hide((r.stdout || '') + (r.stderr || ''))}`);
       if (r.timedOut || r.error) { try { dropCopy(copy); } catch { /* the next sync clones it again */ } }
-      else markBuilt(copy);
+      // Only a build that ended with exit 0 marks the copy built (2026-11-19: a failed build marked it too).
+      else if (r.status === 0) markBuilt(copy);
       return `  copy ${k}: ${r.timedOut ? 'stopped at the time limit' : r.error ? 'could not build' : r.status === 0 ? 'built' : `build failed (exit ${r.status}); the proof will show why`} (${secs()})`;
     }));
     lines.forEach(l => say(l));
@@ -1341,10 +1905,77 @@ async function main() {
     finish(0);
   }
 
+  // What a break's result is judged against, read once before any run (2026-11-19: it was read after all runs, and
+  // a break is now judged when its own run ends). A mustFail part may name a test's method or its DisplayName, and
+  // is matched against the tests the changed test files declare (survivors).
+  const pairs = namePairs();
+  const titleFiles = (Array.isArray(plan?.testFiles) ? plan.testFiles : testFiles) || [];
+  const declared = titleFiles.flatMap(f => { try { return declaredTests(textAt(f), f); } catch { return []; } });
+  // The tests each caught break made fail (2026-11-17, see caughtTests): here they go into the proof record. On the
+  // test machine each caught break says the failing tests as its runner named them (caughtLine; an env value in a
+  // name is hidden first), and the machine that asked matches them to its own test files.
+  const spans = plan ? [] : titleFiles.flatMap(f => { try { return testSpans(textAt(f), f); } catch { return []; } });
+  // The test spans of every covered file, also on the test machine, for the narrowed run (selectCommand, 2026-11-19).
+  const selectable = (() => { const all = titleFiles.flatMap(f => { try { return testSpans(textAt(f), f); } catch { return []; } }); return all.length ? all : declared; })();
+  // The classes of every C# test file read, also one with no test of its own (a derived class), for the base map.
+  const fileClasses = titleFiles.filter(f => /\.cs$/i.test(f)).flatMap(f => { try { return csClassList(textAt(f), f); } catch { return []; } });
+
   // The proof's runs start here (2026-11-17, see proofStarts): from now on an older success of this proof stands
   // only when this run ends PROVED. The code id is taken now, before a run swaps a file in the working folder.
-  if (keepsRecord && !partial) proof.code = codeFingerprint(repo);
+  if (keepsFacts) proof.code = codeFingerprint(repo);
   proofStarts();
+  // One result per break, saved when its own run ends (2026-11-19: every result was read after all runs, so a stop,
+  // a lost link or one run past the limit lost the finished breaks too). `saveTree` is the code the runs test, taken
+  // before any file is swapped; a --changed-since run saves its results too, and still writes no success entry.
+  // The state is the one the report gives the break at the end: caught, not-caught, invalid or timeout. A machine
+  // or database failure saves nothing, and takes back what this run saved (see the ENVIRONMENT stop).
+  const runId = `${Date.now().toString(36)}-${process.pid}`;
+  let saveTree = '';
+  if (keepsRecord || keepsFacts) { try { saveTree = proof.code || codeFingerprint(repo); } catch { saveTree = ''; } }
+  const savedState = new Map(), sentNow = new Set();
+  function breakState(b, res) {
+    if (res.noop) return { state: 'invalid', why: [] };
+    if (res.timedOut) return { state: 'timeout', why: [] };
+    const output = (res.stdout || '') + (res.stderr || '');
+    const r = { output, code: res.status, why: res.status !== 0 ? failureReasons(output) : [] };
+    if (r.code !== 0 && environmentFailure(r)) return { state: 'machine', why: r.why };
+    if (r.code !== 0 && breakInvalid(r)) return { state: 'invalid', why: r.why };
+    return { state: r.code !== 0 && !survivors(b.mustFail, r.why, pairs, declared, fileClasses).length ? 'caught' : 'not-caught', why: r.why };
+  }
+  function saveBreak(i, state, why = [], ms = null) {
+    if (plan || !keepsRecord || !saveTree) return;
+    const b = breaks[i];
+    try {
+      writeBreakResult(repo, proof.key, b, { state, tree: saveTree, run: runId, ms,
+        caught: state === 'caught' ? caughtTests(b.mustFail, why, pairs, spans, fileClasses) : [] });
+      savedState.set(i, state);
+    } catch { /* not saved: the report at the end still reads this run */ }
+  }
+  // Called when one break's run ends. On the test machine nothing is stored: a caught break's line goes out at once.
+  // Gives the tail for the run's own line when the break was judged caught and saved (2026-11-20, U2): a proof that is
+  // stopped later has still left this break's tail in its output, so a later run can resume it.
+  function judgeNow(job, res, ms = null) {
+    const i = breaks.indexOf(job.b);
+    if (job.kind !== 'break' || i < 0 || job.b.single || !res || res.error) return '';
+    let judged;
+    try { judged = breakState(job.b, res); } catch { return ''; }
+    if (judged.state === 'machine') return '';
+    if (plan) {
+      if (judged.state === 'caught' && !partial) { process.stdout.write(caughtLine(i, judged.why.filter(w => w.kind !== 'env').map(w => ({ name: w.name, runner: w.runner }))) + '\n'); sentNow.add(i); }
+      return '';
+    }
+    saveBreak(i, judged.state, judged.why, ms);
+    return judged.state === 'caught' && !partial && savedState.get(i) === 'caught' ? tailOf(job.b) : '';
+  }
+  // The tail of a caught line: this break's id and the tree it ran on (only where the result is saved: not on the test machine).
+  const tailOf = (b) => (!plan && keepsRecord && saveTree && !b.single ? caughtTail(breakId(b), saveTree) : '');
+  // The passing run passed on this tree: a break's own result counts as proof only beside this fact (proof-record.mjs).
+  function greenNow(res) {
+    // On the test machine the passing run says so at once (greenLine); the machine that asked saves the fact.
+    if (plan) { if (!runFailed(res) && !ranNoTest(res)) process.stdout.write(greenLine() + '\n'); return; }
+    if (!(keepsRecord || keepsFacts) || !saveTree || runFailed(res) || ranNoTest(res)) return;
+    try { writeRunFacts(repo, proof.key, { tree: saveTree, run: runId, green: true }); } catch { /* not saved */ }
+  }
   // The runs: the old code, each break, then green on the fixed tree (the order the report reads them in).
   // Green RUNS first (2026-11-11, TUW-242: an older test still expected the old behavior, and the proof
   // said so only after its four red runs, 7 minutes in). It takes about a minute in the copy the compile
@@ -1362,25 +1993,92 @@ async function main() {
     e.noop = true;
     throw e;
   };
-  for (const b of breaks) jobs.push({ kind: 'break', b, label: b.single ? 'break' : 'break ' + b.name, changes: [{ file: b.file, content: breakContent(b) }] });
+  // Resume (2026-11-19): a break this tree already caught (saved when its run ended, see saveBreak) is not run again.
+  // Only a local run that keeps the record, and not --fresh, and never a --changed-since run. The passing run and
+  // the old-code run always run. Any doubt (no tree id, a changed test file, a changed break) runs the break.
+  const resumedBy = new Map();
+  if (!plan && keepsRecord && !partial && saveTree && !opts.includes('--fresh') && !breaks.some(b => b.single)) {
+    // 2026-11-20 (V1): the record alone is not enough. A break is skipped only when an earlier tool result of this
+    // session's log shows it caught on this same tree (sessionCaught); no log, or no line, runs the break again.
+    let refused = 0, sess = { why: '' };
+    try {
+      const rec = readRecord(repo);
+      const states = breakStates(repo, proof.key, breaks, saveTree, rec);
+      const held = states.map((s, i) => i).filter(i => states[i].state === 'proved' && states[i].counts);
+      if (held.length) {
+        sess = await sessionCaught(repo);
+        for (const i of held) { if (sess.keys.has(states[i].id + ' ' + saveTree)) resumedBy.set(i, rec.perBreak[proof.key][states[i].id]); else refused++; }
+      }
+    } catch { resumedBy.clear(); }
+    if (resumedBy.size) say(`RESUMED ${resumedBy.size} of ${breaks.length} breaks from saved results of this tree; running the other ${breaks.length - resumedBy.size}${resumeNote(refused, refusedWhy(sess))}`);
+    else if (refused) say(`Resume refused for ${refused} of ${breaks.length} breaks: saved for this tree, but ${refusedWhy(sess)}; running all ${breaks.length}`);
+  }
+  // A new run for this tree starts: the saved pass of the tree is withdrawn first (after the resume reading above).
+  // It is written again only when this run's passing run succeeds (greenNow), so a failed run leaves no pass.
+  if (!plan && green && (keepsRecord || keepsFacts) && saveTree) { try { withdrawRunFacts(repo, proof.key, saveTree); } catch (e) { if (e && e.code === 'RECORD_BUSY') refuse('RED-PROOF: the saved pass of this tree cannot be withdrawn: the proof record is busy. Run the command again.'); } }
+  breaks.forEach((b, i) => jobs.push({ kind: 'break', b, label: b.single ? 'break' : 'break ' + b.name, changes: [{ file: b.file, content: breakContent(b) }], ...(resumedBy.has(i) ? { resumed: resumedBy.get(i) } : {}) }));
   if (green) jobs.push({ kind: 'green', label: 'green', changes: [] });
   const greenAt = green ? jobs.length - 1 : -1;
-  const runFailed = (r) => !r || r.timedOut || r.error || r.status !== 0;
+  // 2026-11-20: ask the caller about its preflight. Only the proof worker uses this input pipe.
+  function askDb(when) {
+    return new Promise(resolve => {
+      const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+      input.once('line', line => { resolve(line); input.close(); });
+      input.once('close', () => resolve(''));
+      process.stdout.write(`RED-PROOF-DB-${when}: ready?\n`);
+    });
+  }
+  async function waitForDb() {
+    say('RED-PROOF: waiting for the database before judging the proof.');
+    return (await askDb('WAIT')) === 'ready';
+  }
+  function ensureSyncedCommit() {
+    if (plan?.commit && gitText(['rev-parse', 'HEAD']) !== plan.commit) {
+      say(`RED-PROOF: this folder is no longer at the synced commit ${plan.commit.slice(0, 12)} (another sync moved it); run the proof again.`);
+      finish(2);
+    }
+  }
+  async function runGreen(cwd, env, control) {
+    const readiness = plan?.watchDb ? await askDb('START') : 'ready';
+    if (readiness !== 'ready' && readiness !== 'pending') throw new Error('no database status from the machine that started the proof');
+    const result = await runProcess(command, cwd, env, control);
+    if (readiness === 'ready' || (!runFailed(result) && !ranNoTest(result) && skippedNone(result))) return result;
+    logs.push(`===== green before database was ready =====\n${hide((result.stdout || '') + (result.stderr || ''))}`);
+    if (!(await waitForDb())) return { ...result, dbBlocked: true };
+    if (cwd === cwdHere) ensureSyncedCommit();
+    say('RED-PROOF: the database is ready; running green again.');
+    return runProcess(command, cwd, env, control);
+  }
   let results;
   if (parallel > 1 && !breaks.some(b => b.single)) results = await runParallel(jobs);
   else {
     // The working folder must be the commit the sync made (2026-11-12, S3): another sync may have moved it.
-    if (plan?.commit && gitText(['rev-parse', 'HEAD']) !== plan.commit) {
-      say(`RED-PROOF: this folder is no longer at the synced commit ${plan.commit.slice(0, 12)} (another sync moved it); run the proof again. Nothing ran.`);
-      finish(2);
-    }
+    ensureSyncedCommit();
     await compileCheck(cwdHere);
+    if (!green && plan?.watchDb) {
+      if (!(await waitForDb())) finish(6);
+      ensureSyncedCommit();
+    }
     results = new Array(jobs.length);
-    if (green) results[greenAt] = await runProcess(command, cwdHere);
-    if (!green || !runFailed(results[greenAt])) {
-      for (let i = 0; i < jobs.length; i++) if (i !== greenAt) results[i] = await swapRun(jobs[i].changes);
+    if (green) {
+      const result = await runGreen(cwdHere);
+      if (result.dbBlocked) finish(6);
+      results[greenAt] = result;
+      greenNow(result);
+    }
+    if (!green || !(runFailed(results[greenAt]) || ranNoTest(results[greenAt]))) {
+      for (let i = 0; i < jobs.length; i++) {
+        if (i === greenAt) continue;
+        if (jobs[i].resumed) { results[i] = { status: 0, stdout: '', stderr: '', resumed: true }; continue; }
+        const t0 = Date.now();
+        const result = await swapRun(jobs[i].changes, jobs[i]);
+        results[i] = result;
+        const tail = judgeNow(jobs[i], result, Date.now() - t0);
+        if (tail) say(`  ran ${jobs[i].label}: caught${tail}`);
+      }
     }
   }
+  if (results[greenAt]?.dbBlocked) finish(6);
 
   // A `dotnet test` command builds the fixed tree once before any run (2026-11-09: a missing `using`
   // failed all 6 copies after full builds). A build error stops here: SETUP, with the compiler lines.
@@ -1438,9 +2136,31 @@ async function main() {
     // which the compile check just built, and copies an earlier proof or --warm built), one run after another
     // in each; there a change recompiles only its project and those that depend on it. A copy that never
     // built is handed back unused.
-    const sitOut = dotnet ? slots.slice(1).filter(c => !builtIn(c)) : [];
+    // 2026-11-19: the proof builds the cold copies itself first (the --warm build, side by side; at most `parallel`
+    // of them), so every built copy takes runs. A copy whose build fails sits out, with the reason.
+    const sitOut = [], sitWhy = [];
+    if (dotnet) {
+      const cold = slots.slice(1).filter(c => !builtIn(c));
+      const check = compileCheckCommand(command);
+      if (cold.length && check) {
+        say(`RED-PROOF: building ${cold.length} cold cop${cold.length === 1 ? 'y' : 'ies'} side by side before the runs`);
+        const why = await Promise.all(cold.map(async (c, k) => {
+          try {
+            syncCopy(c, head, dirty, commonDir);
+            const r = await runProcess(check, path.join(c, cwdRel), env);
+            logs.push(`===== cold copy ${k} build =====\n${hide((r.stdout || '') + (r.stderr || ''))}`);
+            if (r.timedOut || r.error) { try { dropCopy(c); } catch { /* the next sync clones it again */ } return r.timedOut ? 'the build ran past the time limit' : 'the build could not start'; }
+            if (r.status !== 0) return `the build failed (exit ${r.status})`;
+            markBuilt(c);
+            return '';
+          } catch (e) { return `could not prepare it (${e.message})`; }
+        }));
+        cold.forEach((c, k) => { if (why[k]) { sitOut.push(c); sitWhy.push(why[k]); } });
+      } else sitOut.push(...cold);
+    }
     for (const c of sitOut) releaseSlot(c);
     slots = slots.filter(c => !sitOut.includes(c));
+    if (!green && plan?.watchDb && !(await waitForDb())) finish(6);
     const out = new Array(list.length);
     let next = 0;
     // Green first, in the first copy (the one the compile check warmed); the other runs start when it
@@ -1449,7 +2169,16 @@ async function main() {
     let releaseGreen = () => {}, stopped = false;
     const greenGate = list.some(j => j.kind === 'green') ? new Promise(r => { releaseGreen = r; }) : null;
     say(`RED-PROOF: ${list.length} run(s), ${slots.length} at a time, each in its own copy${greenGate ? '; green first' : ''}` +
-      (sitOut.length ? `; ${sitOut.length} cop${sitOut.length === 1 ? 'y' : 'ies'} never built here sit out (a first build in a new folder compiles the whole solution; --warm builds them before the next proof)` : ''));
+      (sitOut.length ? `; ${sitOut.length} cop${sitOut.length === 1 ? 'y' : 'ies'} sit out (${sitWhy.length ? [...new Set(sitWhy)].join('; ') : 'never built here, and no build command to build it'})` : ''));
+    // Progress (2026-11-19): at the start and after every few runs, from the measured time per run.
+    const todo = list.filter(j => !j.resumed).length;
+    let doneRuns = 0, doneMs = 0;
+    const progress = () => {
+      const left = todo - doneRuns;
+      const min = doneRuns && slots.length ? Math.max(1, Math.round((doneMs / doneRuns) * left / slots.length / 60000)) : null;
+      say(`  done ${doneRuns} of ${todo}${min === null ? '' : `, about ${left ? min : 0} min left`}`);
+    };
+    progress();
     // The stuck watch (2026-11-15, role-sync task: one break kept a lock held, so its run waited the full 15
     // minutes while its peers had each finished in about 4). Once two red runs have finished, a red run still
     // going at twice the slowest of them, and never under a fifth of the time limit, is stuck: it is stopped
@@ -1464,6 +2193,7 @@ async function main() {
     async function worker(copy) {
       while (next < list.length) {
         const i = order[next++];
+        if (list[i].resumed) { out[i] = { status: 0, stdout: '', stderr: '', resumed: true }; continue; }
         if (greenGate && list[i].kind !== 'green') { await greenGate; if (stopped) return; }
         const started = Date.now();
         const control = {};
@@ -1480,9 +2210,10 @@ async function main() {
             if (text === null) { if (fs.existsSync(target)) fs.rmSync(target); }
             else { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, text); }
           }
-          out[i] = await runProcess(command, path.join(copy, cwdRel), env, control);
+          const cwd = path.join(copy, cwdRel);
+          out[i] = list[i].kind === 'green' ? await runGreen(cwd, env, control) : await runForJob(list[i], cwd, env, control);
           if (control.stuckMs && out[i].timedOut) out[i].stuckMs = control.stuckMs;
-          if (dotnet && !out[i].timedOut && !out[i].error) markBuilt(copy);
+          if (dotnet && buildFinished(out[i])) markBuilt(copy);
         } catch (e) {
           out[i] = e.noop ? { status: null, stdout: '', stderr: '', noop: true, why: e.message } : { status: null, stdout: '', stderr: '', error: e };
         } finally {
@@ -1495,8 +2226,17 @@ async function main() {
         }
         const ms = Date.now() - started;
         if (list[i].kind !== 'green' && !out[i].timedOut && !out[i].error && !out[i].noop) peerMs.push(ms);
-        say(`  ran ${list[i].label}: ${out[i].stuckMs ? `stopped as stuck (twice the slowest finished run: ${Math.round(out[i].stuckMs / 1000)} s)` : out[i].timedOut ? 'stopped at the time limit' : out[i].error ? 'could not run' : out[i].noop ? 'not run, the break changes nothing there' : 'exit ' + out[i].status} (${Math.round(ms / 1000)} s)`);
-        if (list[i].kind === 'green') { stopped = runFailed(out[i]); releaseGreen(); }
+        const ranLine = `  ran ${list[i].label}: ${out[i].stuckMs ? `stopped as stuck (twice the slowest finished run: ${Math.round(out[i].stuckMs / 1000)} s)` : out[i].timedOut ? 'stopped at the time limit' : out[i].error ? 'could not run' : out[i].noop ? 'not run, the break changes nothing there' : 'exit ' + out[i].status} (${Math.round(ms / 1000)} s)`;
+        // Judged and saved now, when this run ends (2026-11-19), not after every run has ended.
+        const caughtTailNow = judgeNow(list[i], out[i], ms);
+        say(ranLine + caughtTailNow);
+        doneRuns++; doneMs += ms;
+        if (doneRuns % 3 === 0 || doneRuns === todo) progress();
+        if (list[i].kind === 'green') {
+          stopped = out[i].dbBlocked || runFailed(out[i]) || ranNoTest(out[i]);
+          if (!out[i].dbBlocked) greenNow(out[i]);
+          releaseGreen();
+        }
       }
     }
     try { await Promise.all(slots.map(worker)); } finally { clearInterval(watch); }
@@ -1578,7 +2318,7 @@ async function main() {
   }
 
   // Every run's output, read once, in the order the report reads them (a run not started reads null).
-  const reads = jobs.map((j, i) => (results[i] && !results[i].noop ? read(results[i], j.label) : null));
+  const reads = jobs.map((j, i) => (results[i] && !results[i].noop && !results[i].resumed ? read(results[i], j.label) : null));
   // The environment first (2026-11-12, S2): a run that failed on the database or the test host proves
   // nothing, red or caught; the whole proof stops so it is run again on a working machine.
   for (let i = 0; i < jobs.length; i++) {
@@ -1587,6 +2327,8 @@ async function main() {
     if (!env) continue;
     if (env.named) showWhy(r); else say(`  ✗ env     ${jobs[i].label}: ${env.line}`);
     say('RED-PROOF: ENVIRONMENT ✗ — the test machine failed (database or host), not the tests; fix it and run the same proof again.');
+    // What this run saved says nothing about the code: it is taken back (2026-11-19).
+    if (!plan && keepsRecord) { try { takeBackRun(repo, runId); } catch { /* an entry's tree still voids it after any edit */ } }
     finish(6);
   }
   // Green ran first and failed: the fixed tree fails its own tests, so no red run started.
@@ -1597,6 +2339,13 @@ async function main() {
     setupStop(r); showWhy(r);
     say('  GREEN ✗ the tests fail on the fixed tree');
     say('RED-PROOF: NOT PROVED ✗ — the fixed tree fails its own tests, so the red runs were skipped. An older test may still expect the old behavior: fix the tests or the code, then run again; files restored.');
+    finish(1);
+  }
+  // Green ran first, passed and ran no test (2026-11-19): it shows nothing, so it is never green and no red run started.
+  if (green && ranNoTest(results[greenAt])) {
+    const none = NO_TESTS.exec(reads[greenAt].output);
+    say(`  GREEN ✗ no test ran on the fixed tree (exit 0: "${none[0]}")`);
+    say('RED-PROOF: NOT PROVED ✗ — the green run ran no test, so it shows nothing and the red runs were skipped. Check the test command and its filter, then run again; files restored.');
     finish(1);
   }
   // Green passed (when it ran): every test of the command passed on the fixed tree. A test that then fails on
@@ -1610,7 +2359,7 @@ async function main() {
     return n;
   };
   const missingNote = (n) => (n ? `${n} by another error (an element green found on the fixed tree is missing)` : '');
-  let ok = true;
+  let ok = true, oldRedByBuild = false;
   // 0. A run past the time limit proves nothing: named first, the others still read.
   const late = jobs.filter((j, i) => results[i]?.timedOut);
   const stuck = jobs.filter((j, i) => results[i]?.stuckMs);
@@ -1623,11 +2372,25 @@ async function main() {
   // with no test, or a runner whose failures are not read used to print RED ✓).
   if (hasOld) {
     const r = reads[0];
+    const errors = !results[0].timedOut && r.code !== 0 ? compilerErrors(r.output) : [];
+    const missingNames = errors.length
+      ? missingTestNames(errors, oldMissingNames, new Map([...oldTestCode].map(([f, code]) => [f, codeNames(code)])), textAt) : [];
+    // 2026-11-20: another project's missing name can appear inside a named test's assertion output.
+    if (missingNames.length && r.why.some(w => w.kind === 'setup')) {
+      const buildLines = new Set(errors);
+      r.why = failureReasons(r.output.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).filter(l => !buildLines.has(l)).join('\n'));
+    }
+    const buildRed = greenPassed && missingNames.length && !r.why.length
+      && !/^\s*(?:Failed!|Test Run Failed|Tests\s+\d+ failed)/m.test(r.output);
     if (results[0].timedOut) ok = false;
+    else if (buildRed) {
+      oldRedByBuild = true;
+      say(`RED-PROOF: RED ✓ — red by build: the old code has no ${missingNames.join(', ')}; files restored.`);
+    }
     else if (r.code !== 0) {
       const missing = foundByGreen(r);
-      setupStop(r, true); showWhy(r);
       const asserts = r.why.filter((w) => w.kind === 'assert').length;
+      setupStop(r, { oldCode: true, buildError: errors.length > 0 && !missingNames.length }); showWhy(r);
       // A NAMED test that fails by a product error (an exception the old code throws) is the bug too. It
       // counts, and the line says so, so a reader checks the reason printed above is the bug and not a
       // broken test. Setup and environment failures never reach this line.
@@ -1645,36 +2408,42 @@ async function main() {
       if (kept.length) say(`RED-PROOF: ${kept.join(', ')} stayed at the fix (see above). If the fix itself is in there, prove it with --breaks alone.`);
     }
   }
-  // 2. Each break of the rule under test. A mustFail part may name a test's method or its DisplayName, and
-  // is matched against the tests the changed test files declare (survivors).
-  const pairs = namePairs();
-  const titleFiles = (Array.isArray(plan?.testFiles) ? plan.testFiles : testFiles) || [];
-  const declared = titleFiles.flatMap(f => { try { return declaredTests(textAt(f), f); } catch { return []; } });
-  // The tests each caught break made fail (2026-11-17, see caughtTests): here they go into the proof record. On the
-  // test machine each caught break says the failing tests as its runner named them (caughtLine; an env value in a
-  // name is hidden first), and the machine that asked matches them to its own test files.
-  const spans = plan ? [] : titleFiles.flatMap(f => { try { return testSpans(textAt(f), f); } catch { return []; } });
-  // The classes of every C# test file read, also one with no test of its own (a derived class), for the base map.
-  const fileClasses = titleFiles.filter(f => /\.cs$/i.test(f)).flatMap(f => { try { return csClassList(textAt(f), f); } catch { return []; } });
-  const caught = [];
+  // The old code was red: the failing names go to the machine that asked, which knows the new tests (oldRedLine).
+  if (plan && hasOld && !partial && reads[0] && reads[0].code !== 0 && !results[0].timedOut) {
+    process.stdout.write(oldRedLine(reads[0].why.filter(w => w.kind !== 'env').map(w => String(w.name))) + '\n');
+  }
+  // 2. Each break of the rule under test, judged against the titles read before the runs (pairs, declared, spans).
+  // A result saved when its run ended must be the one this report gives: a saved 'caught' that the report does
+  // not confirm is written again as not caught (settle), so a saved result never says more than the report.
+  const settle = (i, state) => { if (savedState.has(i) && savedState.get(i) !== state) saveBreak(i, state); };
+  const caught = [], caughtIdx = new Set();
   for (let i = 0; i < breaks.length; i++) {
     const b = breaks[i];
     const res = results[(hasOld ? 1 : 0) + i];
     const r = reads[(hasOld ? 1 : 0) + i];
     const notRed = (why) => { if (b.single) say(`RED-PROOF: NOT RED ✗ — ${why}, so it proves nothing; files restored.`); ok = false; };
+    if (res.resumed) {
+      // Caught earlier on this exact tree: its saved tests go into the record entry as if it ran now.
+      say(`  BREAK ✓ ${b.name}: caught earlier on this exact tree (saved result, not run again)${tailOf(b)}`);
+      caughtIdx.add(i);
+      for (const [file, list] of Object.entries(jobs[(hasOld ? 1 : 0) + i].resumed.caught || {})) for (const t of list) caught.push({ file, ...t, by: String(b.name) });
+      continue;
+    }
     if (res.noop) {
       logs.push(`===== ${jobs[(hasOld ? 1 : 0) + i].label} =====\n(not run: ${res.why})`);
       say(`  BREAK INVALID ✗ ${b.name}: the break changes nothing (${res.why}); write a break that changes one rule`);
       notRed('the break changes nothing');
+      settle(i, 'invalid');
       continue;
     }
-    if (res.timedOut) { ok = false; continue; }
+    if (res.timedOut) { ok = false; settle(i, 'timeout'); continue; }
     // A break that does not compile or run fails every test: it isolates no rule (2026-11-12, S6).
     const invalid = r.code !== 0 ? breakInvalid(r) : null;
     if (invalid) {
       say(`  BREAK INVALID ✗ ${b.name}: the break does not compile/run; write a break that changes one rule`);
       say(`    ${invalid}`);
       notRed('the break does not compile or run');
+      settle(i, 'invalid');
       continue;
     }
     if (b.single) {
@@ -1690,14 +2459,48 @@ async function main() {
     }
     const left = survivors(b.mustFail, r.why, pairs, declared, fileClasses);
     if (r.code !== 0 && !left.length) {
-      say(`  BREAK ✓ ${b.name}: all ${b.mustFail.length} named test(s) fail`);
+      say(`  BREAK ✓ ${b.name}: all ${b.mustFail.length} named test(s) fail${tailOf(b)}`);
+      caughtIdx.add(i);
       if (!plan) caught.push(...caughtTests(b.mustFail, r.why, pairs, spans, fileClasses).map(t => ({ ...t, by: String(b.name) })));
       // The names go unhidden (2026-11-17, audit: a test named with an env value came back as *** and matched no
       // test) and straight to stdout, not through say(): the line is base64, read by the machine that asked and
       // never shown or logged here.
-      else if (!partial) process.stdout.write(caughtLine(i, r.why.filter(w => w.kind !== 'env').map(w => ({ name: w.name, runner: w.runner }))) + '\n');
+      else if (!partial && !sentNow.has(i)) process.stdout.write(caughtLine(i, r.why.filter(w => w.kind !== 'env').map(w => ({ name: w.name, runner: w.runner }))) + '\n');
+      settle(i, 'caught');
     }
-    else { say(`  BREAK ✗ ${b.name}: still pass (or not seen failing): ${(left.length ? left : b.mustFail).join(' | ')}`); ok = false; }
+    else {
+      say(`  BREAK ✗ ${b.name}: still pass (or not seen failing): ${(left.length ? left : b.mustFail).join(' | ')}`);
+      ok = false;
+      settle(i, 'not-caught');
+    }
+  }
+  // 2b. One row per new test (2026-11-19: a new test no break named and the old code did not fail slipped through):
+  // 2026-11-20: a build failure ran no named test. Each new test in this proof needs its own caught break.
+  const caughtBreaks = [...(plan?.resumedBreaks || []), ...[...caughtIdx].map(i => breaks[i]).filter(b => !b.single)];
+  const reportedTests = oldRedByBuild ? buildTests : newTests;
+  if (oldRedByBuild && !partial && !caughtBreaks.length) ok = false;
+  if (reportedTests?.length && !partial && !late.length) {
+    const oldRed = (hasOld && reads[0] && reads[0].code !== 0 && !results[0].timedOut) ? redOldMatches(reportedTests, reads[0].why.map(w => String(w.name))) : [];
+    for (const t of reportedTests) {
+      const title = String(t.titles[t.titles.length - 1]);
+      const by = caughtBreaks.find(b => namedBy(b.mustFail, t));
+      if (hasOld && oldRed.includes(t)) say(`  TEST ✓ ${title}: old code RED`);
+      else if (by) say(`  TEST ✓ ${title}: break ${by.name}`);
+      else { say(`  TEST NOT PROVEN ✗ ${title}: it has no failing test result on the old code and no caught break names it; add a break whose mustFail names it`); if (oldRedByBuild || opts.includes('--strict-tests')) ok = false; }
+    }
+  }
+  // The new tests red on the old code are saved beside the green fact (2026-11-19), so the checks before review read
+  // "old code" for them. Only when the old run was red; the green fact is the one greenNow saved for this run.
+  if (hasOld && keepsFacts && saveTree && newTests?.length && !late.length && reads[0] && reads[0].code !== 0 && !results[0].timedOut) {
+    const red = redOldTests(newTests, reads[0].why.map(w => String(w.name)));
+    // Without a green run here, the facts of the run that already passed on this tree are kept (its run id), not replaced.
+    if (red.length) {
+      try {
+        let factsRun = runId;
+        if (!green) { const prev = readRecord(repo)?.runs?.[proof.key]?.[saveTree]; if (prev && typeof prev.run === 'string' && prev.run) factsRun = prev.run; }
+        writeRunFacts(repo, proof.key, { tree: saveTree, run: factsRun, redOld: red, old: oldSha });
+      } catch { /* not saved */ }
+    }
   }
   // 3. Green on the fixed tree.
   if (green) {
@@ -1717,6 +2520,7 @@ async function main() {
     const ran = breaks.length ? `${breaks.length} of ${partial.of} break(s) caught` : `0 of ${partial.of} break(s) run (none changed since ${partial.ref})`;
     say(ok ? `RED-PROOF: PARTIAL ✓ — ${ran}${hasOld ? ', red on the old code' : ''}${green ? ', green on the fix' : ''}; files restored; run the full proof (without --changed-since) once before the final review.` : 'RED-PROOF: NOT PROVED ✗ — see the lines above; files restored.');
   } else if (breaks.length && !breaks[0].single) say(ok ? `RED-PROOF: PROVED ✓ — ${hasOld ? 'red on the old code, ' : ''}${breaks.length} break(s) caught${green ? ', green on the fix' : ''}; files restored.` : 'RED-PROOF: NOT PROVED ✗ — see the lines above; files restored.');
+  else if (oldRedByBuild) say('RED-PROOF: NOT PROVED ✗ — red by build needs a caught break that names the test; files restored.');
   // The record pre-review reads: only a run that proved at least one break of the rule under test, written
   // here (the test machine's plan run leaves it to the machine that asked, see runRemote). 2026-11-17: with the
   // tests the breaks made fail; a run that does not get here PROVED leaves its entry not ok (proofStarts).

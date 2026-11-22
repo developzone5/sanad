@@ -48,12 +48,32 @@
 // (`api.create`, `CreateDto.DueDate`). A (gone) place with no outcome stays open while no live place of its name is
 // left (`OPEN: P<n> … — no longer found: …`); `--close` writes it by number (`--set P1=none: <reason>`). A label with
 // no scope pairs with a row only while the file declares the name once (a list written before 2026-11-17 excepted).
+// 2026-11-19 (release 19b, measured: 439 rows for TryParse, Failed and UpdateAsync, 377 closed as none; and a new
+// call inside a closed function kept its old "none: no test needed"):
+//   - `Uses:` in the header holds a short hash of each place's use lines (their text only: no line numbers, spaces
+//     left out). On a refresh a place whose use lines changed and that had an outcome is open again: `(changed)`,
+//     with `→ was: <old outcome>`. Code that only moved, or was only re-spaced, keeps its outcome.
+//   - A name written `Type.Member`, when the repository declares that type, is searched by the member word. A hit
+//     stays a place only when its file names the type, a type derived from it or its interface. Every other hit is
+//     folded: one line `F<n> · Type.Member · other type · 377 use(s) in 212 file(s) · e.g. a.cs, b.cs, c.cs`, and
+//     all of them in `<list>.folded.md` beside the list. The tool closes an F line itself and counts it apart:
+//     `PLACES: 17 place(s), 0 open, 377 folded`. A bare name keeps the whole word search (text keys, error codes).
+//     `--refresh <list> --unfold F1` lists the folded uses again as open places, and so does a type that is no
+//     longer declared (renamed): nothing folded is ever dropped unseen.
+//   - `--add-changed --base <ref>` (with --out or --refresh): every changed function that has callers, as
+//     size-check.mjs counts them, joins the names (a C# method as Type.Member) and gives open places. The tool
+//     never writes an outcome.
+//   - `--set "fn:<function>=<outcome>"` fills every open place of one function.
 // Exit 0: written, or no open place. 1: an open place. 2: usage error, a missing file or a name with no hit at all.
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { enclosingFunction, codeOnly } from './size-check.mjs';
+// Read by name at call time: derivedTypeNames and the allCallers rows come with the same release (size-check as
+// data), and this file must still load beside an older size-check.mjs.
+import * as sizeCheck from './size-check.mjs';
 import { isMain } from './is-main.mjs';
 
 // More product files than this and nobody can judge each one (2026-11-12): name the rule, not the word.
@@ -86,11 +106,14 @@ export function searchName(repo, name, { skip = '' } = {}) {
   // git grep exits 1 when nothing matches; 2 or more is a real error.
   if (r.status !== 0 && r.status !== 1) throw usage(`git grep failed in ${repo}: ${String(r.stderr).trim() || 'exit ' + r.status}`);
   const product = new Map(), tests = new Set();
+  // `skip`: one file or several (the list and its folded file).
+  const skips = [].concat(skip).filter(Boolean), skipped = new Map();
+  const isSkipped = (file) => { if (!skipped.has(file)) skipped.set(file, skips.some(s => same(path.join(repo, file), s))); return skipped.get(file); };
   for (const row of String(r.stdout).split('\n')) {
     const a = row.indexOf('\0'), b = a < 0 ? -1 : row.indexOf('\0', a + 1);
     if (b < 0) continue;
     const file = row.slice(0, a), line = Number(row.slice(a + 1, b));
-    if (skip && same(path.join(repo, file), skip)) continue;
+    if (skips.length && isSkipped(file)) continue;
     if (TEST_FILE.test(file)) { tests.add(file); continue; }
     if (!product.has(file)) product.set(file, []);
     product.get(file).push(line);
@@ -410,22 +433,114 @@ function continued(mine, rows, scope, legacy = false) {
   return to;
 }
 
+// 2026-11-19: the hash of a place's use lines, stored in the list's `Uses:` line. Only the text of the lines that
+// hold the name counts, in file order: no line number (code that moved keeps its outcome) and no space (an
+// indent, a tab, a line ending or a re-spaced call changes nothing). A file that cannot be read hashes its count.
+export function useHash(fileLines, hitLines) {
+  const text = fileLines ? hitLines.map(n => String(fileLines[n - 1] ?? '').replace(/\s+/g, '')).join('\n') : '?' + hitLines.length;
+  return crypto.createHash('sha1').update(text).digest('hex').slice(0, 10);
+}
+// An outcome the tool set aside when the place's use lines changed: `was: none: …`. It is no outcome.
+const WAS = /^was:\s*/i;
+
+// 2026-11-19: a name written Type.Member.
+const TYPE_MEMBER = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function grepWord(repo, words, globs = []) {
+  const args = ['-c', 'core.quotepath=off', 'grep', '-n', '-w', '-I', '-F', '--untracked', '--no-color', '-z'];
+  for (const w of words) args.push('-e', w);
+  if (globs.length) args.push('--', ...globs);
+  const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024 });
+  if (r.error || (r.status !== 0 && r.status !== 1)) throw usage(`git grep failed in ${repo}: ${r.error ? r.error.message : String(r.stderr).trim() || 'exit ' + r.status}`);
+  const rows = [];
+  for (const row of String(r.stdout).split('\n')) {
+    const a = row.indexOf('\0'), b = a < 0 ? -1 : row.indexOf('\0', a + 1);
+    if (b >= 0) rows.push({ file: row.slice(0, a), line: Number(row.slice(a + 1, b)), text: row.slice(b + 1) });
+  }
+  return rows;
+}
+// The names a base list gives: C# `: Base, IFoo<T>` (interfaces by their I name, as size-check.mjs reads them) and
+// TS `implements A, B`.
+function listedInterfaces(rest) {
+  const flat = rest.replace(/<[^<>]*>/g, '');
+  const cs = (/:\s*([^{]+)/.exec(flat) || ['', ''])[1].split(/[\s,]+/).filter(b => /^I[A-Z]\w*$/.test(b));
+  const ts = (/\bimplements\s+([^{]+)/.exec(flat) || ['', ''])[1].split(/[\s,]+/).filter(b => /^[A-Za-z_$][\w$]*$/.test(b));
+  return [...cs, ...ts];
+}
+// The types that derive from the given ones, with the interfaces each lists, through three levels: the rule of
+// size-check.mjs derivedTypeNames (C# only), read here for TS `extends` and `implements` too. typeFamily asks both
+// when size-check.mjs exports its own.
+function derivedHere(repo, names) {
+  const out = new Set(), known = new Set(names);
+  let level = [...names];
+  for (let pass = 0; pass < 3 && level.length; pass++) {
+    const next = new Set();
+    for (const row of grepWord(repo, level)) {
+      const decl = TYPE_LINE.exec(row.text);
+      if (!decl) continue;
+      const rest = codeOnly(row.text).slice(decl[0].length).replace(/<[^<>]*>/g, '');
+      const bases = (/(?::|\bextends\b|\bimplements\b)\s*([^{]+)/.exec(rest) || ['', ''])[1].split(/[\s,]+/).filter(b => /^[A-Za-z_$][\w$]*$/.test(b));
+      if (!bases.some(b => level.includes(b))) continue;
+      for (const t of [decl[1], ...listedInterfaces(rest)]) if (!known.has(t)) { known.add(t); out.add(t); }
+      next.add(decl[1]);
+    }
+    level = [...next];
+  }
+  return [...out];
+}
+// The names through which a member of `type` is reached: the type, I<Type>, the interfaces its declarations list
+// (every partial file) and the types that derive from it. null when the repository declares no such type: the name
+// is then a text key or an object member, and keeps the plain search. `extension`: the member is a C# extension
+// method (`this` first parameter): it is called on any value, so no use of it is folded.
+export function typeFamily(repo, type, member = '') {
+  const names = new Set();
+  const files = new Set();
+  for (const row of grepWord(repo, [type])) {
+    const decl = TYPE_LINE.exec(row.text);
+    if (!decl || decl[1] !== type) continue;
+    files.add(row.file);
+    names.add(type);
+    for (const i of listedInterfaces(codeOnly(row.text).slice(decl[0].length))) names.add(i);
+  }
+  if (!names.size) return null;
+  names.add('I' + type);
+  const theirs = typeof sizeCheck.derivedTypeNames === 'function' ? sizeCheck.derivedTypeNames(repo, [...names]) : [];
+  for (const d of [...theirs, ...derivedHere(repo, [...names])]) names.add(d);
+  let extension = false;
+  if (member) {
+    const ext = new RegExp(`(?<![\\w$])${escapeRe(member)}\\s*(?:<[^()]*>)?\\s*\\(\\s*this\\s`);
+    for (const f of files) { try { if (ext.test(fs.readFileSync(path.join(repo, f), 'utf8'))) extension = true; } catch { /* not readable: not an extension */ } }
+  }
+  return { names: [...names], extension, re: new RegExp(`(?<![\\w$])(?:${[...names].map(escapeRe).join('|')})(?![\\w$])`) };
+}
+
+// The folded uses of a list sit beside it: places.md → places.folded.md.
+export const foldedPath = (out) => path.resolve(out).replace(/\.md$/i, '') + '.folded.md';
+// "F1 · RoleService.UpdateAsync · other type · 377 use(s) in 212 file(s) · e.g. a.cs, b.cs, c.cs"
+const FOLD = /^F(\d+) · (.+?) · other type · (\d+) use\(s\) in (\d+) file\(s\)/;
+export const foldLine = (f) => `F${f.n} · ${f.name} · other type · ${f.uses} use(s) in ${f.files} file(s)${f.samples && f.samples.length ? ' · e.g. ' + f.samples.join(', ') : ''}`;
+
 // "P3 (new) · name · file · function · lines 12, 40 → outcome"; the older shape has no function part and
 // reads as the file's own place. The outcome is all text after the first arrow that follows the lines field,
 // so an outcome may hold an arrow of its own.
-const PLACE = /^P(\d+)(?: \((new|gone)\))? · (.+?) · (.+?) · (?:(.+?) · )?lines ([^→]*?) ?→ ?(.*)$/;
+const PLACE = /^P(\d+)(?: \((new|gone|changed)\))? · (.+?) · (.+?) · (?:(.+?) · )?lines ([^→]*?) ?→ ?(.*)$/;
 
 export function parsePlaces(text) {
   const rows = String(text).split(/\r?\n/);
   const field = (key) => { const m = new RegExp(`^${key}: (.*)$`).exec(rows.find(l => l.startsWith(key + ': ')) || ''); return m ? m[1].trim() : ''; };
   const repo = field('Repo'), names = field('Names').split(',').map(s => s.trim()).filter(Boolean);
   if (!repo || !names.length) return null;
-  const places = [];
+  const places = [], folded = [];
   for (const row of rows) {
     const m = PLACE.exec(row);
     if (m) places.push({ n: Number(m[1]), mark: m[2] || '', name: m[3], file: m[4], fn: m[5] || FILE_PART, lines: m[6].trim(), outcome: m[7].trim() });
+    const f = m ? null : FOLD.exec(row);
+    if (f) folded.push({ n: Number(f[1]), name: f[2], uses: Number(f[3]), files: Number(f[4]), samples: (/ · e\.g\. (.*)$/.exec(row) || ['', ''])[1].split(', ').filter(Boolean) });
   }
-  return { repo, names, searched: field('Searched'), places };
+  // `Uses:` place number → hash of its use lines; a list of an older release has none, and keeps every outcome.
+  let uses = {};
+  try { const u = JSON.parse(field('Uses') || '{}'); if (u && typeof u === 'object' && !Array.isArray(u)) uses = u; } catch { /* not readable: as a list with no hashes */ }
+  return { repo, names, searched: field('Searched'), places, uses, folded, unfolded: field('Unfolded').split(',').map(s => s.trim()).filter(Boolean) };
 }
 
 const linesText = (lines) => lines.length
@@ -435,27 +550,45 @@ const linesText = (lines) => lines.length
 const where = (p) => `${p.name} · ${p.file} · ${p.fn || FILE_PART}`;
 export const placeLine = (p) => `P${p.n}${p.mark ? ` (${p.mark})` : ''} · ${where(p)} · lines ${p.lines} → ${p.outcome}`;
 
-export function renderPlaces({ repo, names, searched, places, tests }) {
+export function renderPlaces({ repo, names, searched, places, tests, uses = {}, folded = [], unfolded = [] }) {
   const out = [
     '# Places that use what this change touches', '',
     `Repo: ${repo.replace(/\\/g, '/')}`,
     `Names: ${names.join(', ')}`,
-    `Searched: ${searched} (git grep -w -I -F --untracked, one search per name)`, '',
+    `Searched: ${searched} (git grep -w -I -F --untracked, one search per name)`,
+    // 2026-11-19: the tool's own lines. Uses: the hash of each place's use lines. Unfolded: the Type.Member names
+    // whose other-type uses are listed as places.
+    ...(Object.keys(uses).length ? [`Uses: ${JSON.stringify(uses)}`] : []),
+    ...(unfolded.length ? [`Unfolded: ${unfolded.join(', ')}`] : []), '',
     'Write the outcome after each →: `C<n>` (check line n covers this place) or `none: <why this place needs no change and no test>`.',
     'places.mjs rewrites this file on each run and keeps every outcome; write nothing else here.', '',
   ];
   for (const name of names) {
     const mine = places.filter(p => p.name === name).sort((a, b) => a.n - b.n);
     out.push(`## ${name}`, '', ...(mine.length ? mine.map(placeLine) : ['No product file uses it.']),
+      ...folded.filter(f => f.name === name).map(foldLine),
       `Tests that mention it: ${(tests.get(name) || []).join(', ') || 'none'}`, '');
   }
   return out.join('\n');
 }
 
+// The folded uses, every one: a file per line with its line numbers. The reviewer reads this file.
+function renderFolded(list, out) {
+  const rows = ['# Folded uses — the same member word in files that do not name the type', '',
+    `List: ${path.resolve(out).replace(/\\/g, '/')}`,
+    'places.mjs writes this file on each run. `places.mjs --refresh <list> --unfold F<n>` lists a group again as open places.', ''];
+  for (const f of list.folded) {
+    rows.push(`## ${foldLine({ ...f, samples: [] })}`, '', ...f.rows.map(r => `- ${r.file} · lines ${r.lines.join(', ')}`),
+      ...(f.tests.length ? [`Tests of another type that mention it: ${f.tests.join(', ')}`] : []), '');
+  }
+  return rows.join('\n');
+}
+
 // Search every name and merge with the list already in `out` (if any). Throws a usage error for a name
 // that is too wide, and for a newly given name with no hit; a stored name with no hit now only marks its
 // places gone (the change may have renamed or removed it).
-export function writePlaces({ repo, names = [], out, now = new Date() }) {
+// `dry`: search and merge as always, write nothing (stampUses reads the hashes of the code as it is now).
+export function writePlaces({ repo, names = [], out, now = new Date(), unfold = [], dry = false }) {
   const top = toplevel(repo);
   if (!top) throw usage('not inside a git repository: ' + repo);
   const old = fs.existsSync(out) ? parsePlaces(fs.readFileSync(out, 'utf8')) : null;
@@ -466,12 +599,37 @@ export function writePlaces({ repo, names = [], out, now = new Date() }) {
   const found = new Map(), tests = new Map(), wide = new Map();
   // 2026-11-18 (audit): a list written before 2026-11-17 gave a place a bare function name whatever the file held.
   const legacy = Boolean(old && old.searched && old.searched < '2026-11-17');
+  // 2026-11-19: folding. `unfolded`: the Type.Member names whose other-type uses are places (--unfold, or a type
+  // that is no longer declared). `folds`: name → the uses in files that do not name the type.
+  const skip = [path.resolve(out), foldedPath(out)];
+  const unfolded = new Set(old ? old.unfolded : []);
+  for (const f of unfold) {
+    const row = (old ? old.folded : []).find(x => 'F' + x.n === String(f).trim().toUpperCase());
+    if (!row) throw usage(`--unfold ${f}: the list has no such folded line`);
+    unfolded.add(row.name);
+  }
+  const folds = new Map(), reopened = [], extensions = [];
   for (const name of all) {
-    const hit = searchName(top, name, { skip: path.resolve(out) });
+    const tm = TYPE_MEMBER.exec(name);
+    const family = tm ? typeFamily(top, tm[1], tm[2]) : null;
+    const wasFolded = Boolean(old && old.folded.some(f => f.name === name));
+    // A name that was folded and whose type is gone (renamed) has nothing to fold by: its uses are places again.
+    if (tm && !family && wasFolded && !unfolded.has(name)) { unfolded.add(name); reopened.push(name); }
+    const byMember = Boolean(tm && (family || unfolded.has(name)));
+    const hit = searchName(top, byMember ? tm[2] : name, { skip });
+    if (byMember && family && family.extension) extensions.push(name);
+    if (byMember && family && !family.extension && !unfolded.has(name)) {
+      // A file stays when it names the type, a derived type or its interface; a file that cannot be read stays.
+      const namesType = (file) => { try { return family.re.test(fs.readFileSync(path.join(top, file), 'utf8')); } catch { return true; } };
+      const rows = [], otherTests = [];
+      for (const [file, lines] of [...hit.product]) if (!namesType(file)) { rows.push({ file, lines }); hit.product.delete(file); }
+      hit.tests = hit.tests.filter(file => namesType(file) || (otherTests.push(file), false));
+      if (rows.length || otherTests.length) folds.set(name, { rows: rows.sort((a, b) => (a.file < b.file ? -1 : 1)), tests: otherTests });
+    }
     // 2026-11-18 (audit): a name in more files than the limit is never refused (a changed function with 41 caller
     // files has no narrower name, and was then left off the list); it gets one place per file.
     if (hit.product.size > MAX_FILES) wide.set(name, hit.product.size);
-    if (!stored.includes(name) && !hit.product.size && !hit.tests.length) throw usage(`no place uses ${name}: check the spelling`);
+    if (!stored.includes(name) && !hit.product.size && !hit.tests.length && !folds.has(name)) throw usage(`no place uses ${name}: check the spelling`);
     found.set(name, hit.product);
     tests.set(name, hit.tests);
   }
@@ -502,24 +660,79 @@ export function writePlaces({ repo, names = [], out, now = new Date() }) {
     const [name, file] = k.split('\0');
     for (const [p, r] of continued(mine, (hits.get(name) || []).filter(row => row.file === file), scope, legacy)) rowOf.set(p, r);
   }
+  // 2026-11-19: an outcome stays on a place only while that place's own use lines are unchanged. Before, the same
+  // declaration found again kept its outcome whatever changed inside it: a new call in a closed function inherited
+  // "none: no test needed". The hash of every live place is stored on each run; a place that had an outcome and
+  // whose hash differs is open again, `(changed)`, with its old outcome kept after `was:`. A list with no hash yet
+  // (an older release) keeps every outcome and gets its hashes now.
+  const hashOf = (r) => useHash(linesOf(r.file), r.lines);
+  const uses = {};
   const places = [];
   for (const p of old ? old.places : []) {
     const r = rowOf.get(p);
-    if (r) places.push({ ...p, fn: r.fn, lines: linesText(r.lines), mark: p.mark === 'gone' ? '' : p.mark });
-    else places.push({ ...p, fn: p.fn || FILE_PART, lines: 'none', mark: 'gone' });
+    if (!r) {
+      places.push({ ...p, fn: p.fn || FILE_PART, lines: 'none', mark: 'gone' });
+      if (old.uses[p.n]) uses[p.n] = old.uses[p.n];
+      continue;
+    }
+    const hash = hashOf(r), judged = Boolean(p.outcome) && !WAS.test(p.outcome);
+    const changed = judged && Boolean(old.uses[p.n]) && old.uses[p.n] !== hash;
+    uses[p.n] = hash;
+    const mark = changed ? 'changed' : p.mark === 'gone' || (p.mark === 'changed' && judged) ? '' : p.mark;
+    places.push({ ...p, fn: r.fn, lines: linesText(r.lines), mark, outcome: changed ? `was: ${p.outcome}` : p.outcome });
   }
   const kept = new Set(rowOf.values());
   let next = places.reduce((n, p) => Math.max(n, p.n), 0) + 1;
   for (const name of all) {
     for (const r of hits.get(name)) {
       if (kept.has(r)) continue;
+      uses[next] = hashOf(r);
       places.push({ n: next++, mark: old ? 'new' : '', name, file: r.file, fn: r.fn, lines: linesText(r.lines), outcome: '' });
     }
   }
-  const list = { repo: top, names: all, searched: now.toISOString(), places, tests, wide };
+  // One F line per folded name; a name keeps its number.
+  let nextF = (old ? old.folded : []).reduce((n, f) => Math.max(n, f.n), 0) + 1;
+  const folded = [];
+  for (const name of all) {
+    const f = folds.get(name);
+    if (!f) continue;
+    const had = old && old.folded.find(x => x.name === name);
+    folded.push({ n: had ? had.n : nextF++, name, uses: f.rows.reduce((n, r) => n + r.lines.length, 0), files: f.rows.length, samples: f.rows.slice(0, 3).map(r => r.file), rows: f.rows, tests: f.tests });
+  }
+  const list = { repo: top, names: all, searched: now.toISOString(), places, tests, wide, uses, folded, unfolded: [...unfolded], reopened, extensions };
+  if (dry) return list;
   fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
   fs.writeFileSync(out, renderPlaces(list));
+  // The folded file is the tool's own: written when a name is folded, and taken away when none is any more.
+  const beside = foldedPath(out);
+  if (folded.length) fs.writeFileSync(beside, renderFolded(list, out));
+  else if (fs.existsSync(beside) && fs.readFileSync(beside, 'utf8').startsWith('# Folded uses')) fs.rmSync(beside, { force: true });
   return list;
+}
+
+// 2026-11-19 (--add-changed): the changed functions that have callers, as size-check.mjs counts them against `base`,
+// each as the name to search: a C# method as Type.Member (its other types fold), anything else as it is named.
+// `more`: how many changed functions an older size-check.mjs did not hand over (it gave only its printed rows).
+export function changedNames(repo, base) {
+  const r = sizeCheck.sizeTask({ repo, base });
+  const rows = r.allCallers || r.callers || [];
+  const top = toplevel(repo) || repo;
+  const names = new Set();
+  for (const c of rows) {
+    if (!(c.count > 0 || (c.unresolved && c.unresolved.length))) continue;
+    const types = new Set();
+    if (CS_FILE.test(c.file || '') && /^[A-Za-z_]\w*$/.test(c.name)) {
+      let lines = [];
+      try { lines = fs.readFileSync(path.join(top, c.file), 'utf8').split(/\r?\n/); } catch { /* removed: the bare name */ }
+      const defs = definedNames(lines);
+      lines.forEach((_, i) => {
+        const m = defs[i] === c.name ? null : memberAt(c.file, lines, i);
+        if (defs[i] === c.name || (m && m.bare === c.name)) { const t = containingType(lines, i); if (t) types.add(t); }
+      });
+    }
+    if (types.size) for (const t of types) names.add(`${t}.${c.name}`); else names.add(c.name);
+  }
+  return { names: [...names], more: r.allCallers ? 0 : r.moreSymbols || 0 };
 }
 
 export function readPlaces(file) {
@@ -530,11 +743,11 @@ export function readPlaces(file) {
 }
 
 // The stored search again, in the stored repo or in `repo` (a worktree of the same repository).
-export function refreshPlaces(file, { repo } = {}) {
+export function refreshPlaces(file, { repo, names = [], unfold = [] } = {}) {
   const list = readPlaces(file);
   const where = repo || list.repo;
   if (!fs.existsSync(where)) throw usage(`the stored repo is gone: ${where}; give --repo`);
-  return writePlaces({ repo: where, out: file });
+  return writePlaces({ repo: where, out: file, names, unfold });
 }
 
 // Why a place is still open ('' = closed). `checkCount`: how many check lines there are, when known.
@@ -542,6 +755,8 @@ export function openReason(p, checkCount) {
   if (p.mark === 'gone') return '';
   const o = p.outcome.trim();
   if (!o) return 'no outcome';
+  // 2026-11-19: an outcome the tool set aside is shown, never counted.
+  if (WAS.test(o)) return `its use lines changed after its outcome was written (${o.length > SHOWN_OUTCOME + 5 ? o.slice(0, SHOWN_OUTCOME + 4) + '…' : o}): read it again and write C<n> or none: <reason>`;
   const none = /^none:\s*(.*)$/i.exec(o);
   if (none) return none[1].trim().length >= MIN_REASON ? '' : `the reason after none: needs at least ${MIN_REASON} characters`;
   const cs = /^(C\d+(?:\s*,\s*C\d+)*)(?![\w])/i.exec(o);
@@ -570,7 +785,13 @@ export function selector(which) {
   if (file) { const re = globRe(file[1].trim()); return { pick: p => re.test(p.file), explicit: false }; }
   const name = /^name:(.+)$/i.exec(w);
   if (name) return { pick: p => p.name === name[1].trim(), explicit: false };
-  throw usage(`--set: "${w}" is not P<n>[,P<m>], file:<path> or name:<name>`);
+  // 2026-11-19: every place of one function, by its label on the list or by its bare or Type.name form.
+  const fn = /^fn:(.+)$/i.exec(w);
+  if (fn) {
+    const want = fn[1].trim();
+    return { pick: p => { const l = readLabel(p.fn); return p.fn === want || Boolean(l && (l.bare === want || (l.scope && `${l.scope}.${l.bare}` === want))); }, explicit: false };
+  }
+  throw usage(`--set: "${w}" is not P<n>[,P<m>], file:<path>, name:<name> or fn:<function>`);
 }
 
 // Writes the outcome of each --set into the list's own lines; every other line of the file stays as it is.
@@ -584,23 +805,46 @@ export function closePlaces(file, sets, { checkCount } = {}) {
     const reason = openReason({ mark: '', outcome }, checkCount);
     if (reason) throw usage(`--set ${which}: ${reason}`);
     let n = 0;
-    const closed = [];
+    const closed = [], nums = [];
     for (let i = 0; i < rows.length; i++) {
       const m = PLACE.exec(rows[i]);
       if (!m) continue;
       const p = { n: Number(m[1]), mark: m[2] || '', name: m[3], file: m[4], fn: m[5] || FILE_PART, lines: m[6].trim(), outcome: m[7].trim() };
       // A (gone) place is written only when it is named by number (2026-11-18: one that no file uses any more has
       // no outcome and stays open until `none: <reason>` is written on it).
-      if ((p.mark === 'gone' && !sel.explicit) || !sel.pick(p) || (!sel.explicit && p.outcome)) continue;
+      // An outcome set aside by the tool (`was: …`, 2026-11-19) is no outcome: file:, name: and fn: fill it too.
+      if ((p.mark === 'gone' && !sel.explicit) || !sel.pick(p) || (!sel.explicit && p.outcome && !WAS.test(p.outcome))) continue;
+      if (p.mark === 'changed') p.mark = '';
       rows[i] = placeLine({ ...p, outcome });
       closed.push(`P${p.n} · ${where(p)}`);
+      nums.push(p.n);
       n++;
     }
     if (!n) throw usage(`--set ${which}: no ${sel.explicit ? '' : 'open '}place matches`);
-    counts.push({ which, outcome, n, closed });
+    counts.push({ which, outcome, n, closed, nums });
   }
   fs.writeFileSync(file, rows.join(text.includes('\r\n') ? '\r\n' : '\n'));
   return counts;
+}
+
+// 2026-11-19: an outcome written with --close was judged on the code as it is now, so the hash of that code is
+// stored for each place it closed: a later change of its use lines reopens it, and the edits made between the last
+// refresh and the close do not. Only the `Uses:` line of the file changes. false when the stored repo is gone: the
+// hashes of the last refresh then stand. (An outcome typed by hand has no such moment: it is compared with the code
+// of the last refresh.)
+export function stampUses(file, numbers) {
+  const text = fs.readFileSync(file, 'utf8');
+  const list = parsePlaces(text);
+  if (!list || !numbers.length || !fs.existsSync(list.repo)) return false;
+  const now = writePlaces({ repo: list.repo, out: file, dry: true });
+  const uses = { ...list.uses };
+  for (const n of numbers) if (now.uses[n]) uses[n] = now.uses[n];
+  const rows = text.split(/\r?\n/);
+  const at = rows.findIndex(l => l.startsWith('Uses: ')), after = rows.findIndex(l => l.startsWith('Searched: '));
+  if (at < 0 && after < 0) return false;
+  if (at >= 0) rows[at] = `Uses: ${JSON.stringify(uses)}`; else rows.splice(after + 1, 0, `Uses: ${JSON.stringify(uses)}`);
+  fs.writeFileSync(file, rows.join(text.includes('\r\n') ? '\r\n' : '\n'));
+  return true;
 }
 
 // 2026-11-17 (audit, "distinct methods collapse into a single place"): why an open place has no outcome of its
@@ -632,7 +876,9 @@ function liveCode(repo, p) {
   try { lines = fs.readFileSync(path.join(repo, p.file), 'utf8').split(/\r?\n/); } catch { return true; }
   const nums = [...String(p.lines).matchAll(/\d+/g)].map(m => Number(m[0]));
   if (!nums.length || String(p.lines).includes('more')) return true;
-  const re = new RegExp(`(?<![\\w$])${p.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`);
+  // A Type.Member name is searched by its member word (2026-11-19), so that word as code counts too.
+  const tm = TYPE_MEMBER.exec(p.name);
+  const re = new RegExp(`(?<![\\w$])(?:${escapeRe(p.name)}${tm ? '|' + escapeRe(tm[2]) : ''})(?![\\w$])`);
   return nums.some(n => n < 1 || n > lines.length || re.test(codeOnly(lines[n - 1])));
 }
 
@@ -660,15 +906,20 @@ export function checkPlaces(list, { checkCount } = {}) {
     }
   }
   const lines = open.map(({ p, why }) => `OPEN: P${p.n} · ${where(p)}${why === 'no outcome' ? '' : ' — ' + why}`);
-  lines.push(`PLACES: ${live.length} place(s), ${open.length} open`);
-  return { ok: !open.length, open, count: live.length, text: lines.join('\n') };
+  // 2026-11-19: an F line is closed by the tool and counted apart; a place is never shrunk to a count.
+  const folded = (list.folded || []).reduce((n, f) => n + f.uses, 0);
+  lines.push(`PLACES: ${tally(live.length, open.length, folded)}`);
+  return { ok: !open.length, open, count: live.length, folded, text: lines.join('\n') };
 }
+// "17 place(s), 0 open, 377 folded"; a list with nothing folded reads as before.
+const tally = (count, open, folded) => `${count} place(s), ${open} open${folded ? `, ${folded} folded` : ''}`;
 
 function parse(argv) {
   const o = { set: [] };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
-    if (!['--repo', '--names', '--out', '--refresh', '--check', '--check-lines', '--close', '--set'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
+    if (k === '--add-changed') { o['add-changed'] = true; continue; }
+    if (!['--repo', '--names', '--out', '--refresh', '--check', '--check-lines', '--close', '--set', '--unfold', '--base'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
     if (k === '--set') {
       const v = argv[++i], eq = v.indexOf('=');
       if (eq < 1) throw usage('--set needs "<which>=<outcome>", e.g. --set "file:src/Other.tsx=none: another screen\'s own state"');
@@ -678,22 +929,26 @@ function parse(argv) {
     o[k.slice(2)] = argv[++i];
   }
   if (o.close) {
-    if (o.out || o.refresh || o.check) throw usage('--close goes alone, with its --set options');
+    if (o.out || o.refresh || o.check || o.unfold || o['add-changed'] || o.base) throw usage('--close goes alone, with its --set options');
     if (!o.set.length) throw usage('--close needs at least one --set "<which>=<outcome>"');
     return o;
   }
   if (o.set.length) throw usage('--set goes with --close');
   if (!o.out && !o.refresh && !o.check) throw usage('give --out (make or update a list), --refresh <list>, --check <list> or --close <list>');
   if (o.out && (o.refresh || o.check)) throw usage('--out makes a list; use --refresh or --check on it in another run');
-  if (o.out && (!o.repo || !o.names)) throw usage('--out needs --repo and --names');
+  if (!o['add-changed'] !== !o.base) throw usage('--add-changed and --base <ref> go together');
+  if (o['add-changed'] && !o.out && !o.refresh) throw usage('--add-changed goes with --out or --refresh: it adds names and searches them');
+  if (o.out && (!o.repo || (!o.names && !o['add-changed']))) throw usage('--out needs --repo and --names');
+  if (o.unfold && !o.refresh) throw usage('--unfold F<n> goes with --refresh <list>');
+  if (o.unfold && !/^F\d+(?:\s*,\s*F\d+)*$/i.test(o.unfold.trim())) throw usage(`--unfold: "${o.unfold}" is not F<n>[,F<m>]`);
   if (o['check-lines'] && !o.check) throw usage('--check-lines goes with --check');
   return o;
 }
 
-const USAGE = 'Usage: node places.mjs --repo <path> --names <n1,n2,...> --out <places.md>\n' +
-  '       node places.mjs --refresh <places.md> [--repo <path>] [--check <places.md> [--check-lines <check.md>]]\n' +
+const USAGE = 'Usage: node places.mjs --repo <path> --names <n1,n2,...> --out <places.md> [--add-changed --base <ref>]\n' +
+  '       node places.mjs --refresh <places.md> [--repo <path>] [--unfold <F1,F2>] [--add-changed --base <ref>] [--check <places.md> [--check-lines <check.md>]]\n' +
   '       node places.mjs --check <places.md> [--check-lines <check.md>]\n' +
-  '       node places.mjs --close <places.md> --set "<P1,P2 | file:<path> | name:<name>>=<C<n> | none: <reason>>" [--set ...]\n';
+  '       node places.mjs --close <places.md> --set "<P1,P2 | file:<path> | name:<name> | fn:<function>>=<C<n> | none: <reason>>" [--set ...]\n';
 
 // Not a top-level await (2026-11-12): review-brief.mjs imports this file, so this file's own import of
 // review-brief.mjs must wait until this module has finished loading, or the two wait on each other (exit 13).
@@ -704,29 +959,52 @@ async function main() {
       const file = path.resolve(o.close);
       // Each place a --set closed is named (2026-11-14: one file: outcome closed 8 places, and one of them, a
       // function the author had not opened, did not fit the reason; listed, it is seen before review).
+      const closedNow = [];
       for (const c of closePlaces(file, o.set)) {
         process.stdout.write(`CLOSED: ${c.n} place(s) — ${c.which} → ${c.outcome}\n`);
         for (const p of c.closed) process.stdout.write(`  ${p}\n`);
+        closedNow.push(...c.nums);
       }
-      const { count, open } = checkPlaces(readPlaces(file));
-      process.stdout.write(`PLACES: ${count} place(s), ${open.length} open — ${file}\n`);
+      // The outcomes are written; a search that fails here only leaves the hashes of the last refresh in place.
+      try { stampUses(file, closedNow); } catch { /* the stricter hashes stand */ }
+      const { count, open, folded } = checkPlaces(readPlaces(file));
+      process.stdout.write(`PLACES: ${tally(count, open.length, folded)} — ${file}\n`);
       return;
     }
+    // 2026-11-19 (--add-changed): the changed functions with callers join the names. Names only add, every outcome
+    // stays, and the tool writes none.
+    let added = [], addNote = '';
+    if (o['add-changed']) {
+      const repo = path.resolve(o.repo || readPlaces(path.resolve(o.refresh)).repo);
+      const has = new Set([...(o.names ? o.names.split(',') : []), ...(o.refresh ? readPlaces(path.resolve(o.refresh)).names : [])].map(s => s.trim()));
+      // A bare name already on the list searches every type: its Type.Member form would only repeat places.
+      const changed = changedNames(repo, o.base);
+      added = changed.names.filter(n => !has.has(n) && !has.has(n.slice(n.lastIndexOf('.') + 1)));
+      addNote = `ADDED: ${added.length ? added.join(', ') : 'no name'} — ${changed.names.length} changed function(s) with callers against ${o.base}${added.length ? '; each of their places is open' : ', all on the list already'}\n`
+        + (changed.more ? `NOTE: ${changed.more} more changed function(s) were not handed over by size-check.mjs (it gave only its printed rows); add them with --names\n` : '');
+    }
+    // What a run folded, reopened or could not fold, one line each.
+    const folds = (list) => !list ? '' : [
+      ...(list.folded || []).map(f => `FOLDED: ${foldLine(f)} — all in ${foldedPath(o.out || o.refresh).replace(/\\/g, '/')}; places.mjs --refresh <list> --unfold F${f.n} lists them as open places\n`),
+      ...(list.reopened || []).map(n => `UNFOLDED: ${n} — its type is no longer declared, so its folded uses are open places again; add the new Type.Member with --names\n`),
+      ...(list.extensions || []).map(n => `NOT FOLDED: ${n} is an extension method (called on any value): every use of the member word is a place\n`),
+    ].join('');
     // 2026-11-17: a run that only writes the list still says which open places an older place was split into.
     // 2026-11-18: and which places of a name no file uses any more (the name may have been renamed).
     const splits = (open) => open.filter(x => x.split || x.vanished).map(({ p, why }) => `OPEN: P${p.n} · ${where(p)} — ${why}\n`).join('');
     // 2026-11-18: a name past the file limit says so: it has one place per file.
-    const widths = (wide) => [...(wide || [])].map(([name, n]) => `WIDE: ${name} is used in ${n} files (more than ${MAX_FILES}): one place per declaration, as for any name; close many at once with --close <list> --set "name:${name}=<outcome>"\n`).join('');
+    // 2026-11-19: a bare wide name is told how to fold the other types.
+    const widths = (wide) => [...(wide || [])].map(([name, n]) => `WIDE: ${name} is used in ${n} files (more than ${MAX_FILES}): one place per declaration, as for any name; close many at once with --close <list> --set "name:${name}=<outcome>"${TYPE_MEMBER.test(name) ? '' : '; write it as Type.Member to fold other types'}\n`).join('');
     if (o.out) {
-      const list = writePlaces({ repo: path.resolve(o.repo), names: o.names.split(','), out: path.resolve(o.out) });
-      const { count, open } = checkPlaces(list);
-      process.stdout.write(`${widths(list.wide)}${splits(open)}PLACES: ${count} place(s), ${open.length} open — written to ${path.resolve(o.out)}; write C<n> or none: <reason> after each →\n`);
+      const list = writePlaces({ repo: path.resolve(o.repo), names: [...(o.names ? o.names.split(',') : []), ...added], out: path.resolve(o.out) });
+      const { count, open, folded } = checkPlaces(list);
+      process.stdout.write(`${addNote}${widths(list.wide)}${folds(list)}${splits(open)}PLACES: ${tally(count, open.length, folded)} — written to ${path.resolve(o.out)}; write C<n> or none: <reason> after each →\n`);
     } else {
       let refreshed;
-      if (o.refresh) refreshed = refreshPlaces(path.resolve(o.refresh), { repo: o.repo && path.resolve(o.repo) });
+      if (o.refresh) refreshed = refreshPlaces(path.resolve(o.refresh), { repo: o.repo && path.resolve(o.repo), names: added, unfold: o.unfold ? o.unfold.split(',') : [] });
       if (!o.check) {
-        const { count, open } = checkPlaces(readPlaces(path.resolve(o.refresh)));
-        process.stdout.write(`${widths(refreshed && refreshed.wide)}${splits(open)}PLACES: ${count} place(s), ${open.length} open — refreshed ${path.resolve(o.refresh)}\n`);
+        const { count, open, folded } = checkPlaces(readPlaces(path.resolve(o.refresh)));
+        process.stdout.write(`${addNote}${widths(refreshed && refreshed.wide)}${folds(refreshed)}${splits(open)}PLACES: ${tally(count, open.length, folded)} — refreshed ${path.resolve(o.refresh)}\n`);
       } else {
         let checkCount;
         if (o['check-lines']) {
@@ -736,7 +1014,7 @@ async function main() {
           checkCount = checkLines(fs.readFileSync(o['check-lines'], 'utf8')).length;
         }
         const r = checkPlaces(readPlaces(path.resolve(o.check)), { checkCount });
-        process.stdout.write(widths(refreshed && refreshed.wide) + r.text + '\n');
+        process.stdout.write(addNote + widths(refreshed && refreshed.wide) + folds(refreshed) + r.text + '\n');
         process.exitCode = r.ok ? 0 : 1;
       }
     }

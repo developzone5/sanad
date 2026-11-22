@@ -136,6 +136,8 @@ test('a name used in more than 40 product files is listed with one place per fil
   const wide = run(['--repo', repo, '--names', 'wideName', '--out', path.join(root, 'list-3b.md')]);
   assert.equal(wide.status, 0, wide.stderr);
   assert.match(wide.stdout, /WIDE: wideName is used in 41 files/);
+  // 2026-11-19: a bare wide name is told how to fold the uses of other types.
+  assert.match(wide.stdout, /^WIDE: wideName .*; write it as Type\.Member to fold other types$/m);
   const none = run(['--repo', repo, '--names', 'dueAfterPublish,dueMayEqualPublish', '--out', path.join(root, 'list-3c.md')]);
   assert.equal(none.status, 2);
   assert.match(none.stderr, /no place uses dueMayEqualPublish: check the spelling/);
@@ -862,4 +864,124 @@ test('audit 5, must not change: public methods, statements inside a method and o
   const out = path.join(root, 'list-a5c.md');
   assert.equal(run(['--repo', repo, '--names', 'DateRule,dueDate', '--out', out]).status, 0);
   assert.deepEqual(placeRows(out).map(l => l.split(' · ')[3]), ['Schedule', 'Publish', 'api.create', 'top']);
+});
+
+// 2026-11-19 (release 19b): an outcome stays on a place only while that place's own use lines are unchanged. Before,
+// the same declaration found again kept its outcome whatever changed inside it, so a new call in a closed function
+// inherited "none: no test needed".
+const SVC = (body) => `import { dueAfterPublish } from './rules';\nexport function save(a, b) {\n${body}  return 0;\n}\n`;
+const numberOf = (out, where) => {
+  const row = fs.readFileSync(out, 'utf8').split(/\r?\n/).find(l => /^P\d+/.test(l) && l.includes(` · ${where} · `));
+  assert.ok(row, where + ' is on the list');
+  return /^P\d+/.exec(row)[0];
+};
+const rowOfPlace = (out, n) => fs.readFileSync(out, 'utf8').split(/\r?\n/).find(l => l.startsWith(n + ' '));
+
+test('2026-11-19: a new use inside a closed function reopens its place and names the old outcome; fn: closes it again', () => {
+  const { repo, write } = fixture();
+  const out = path.join(root, 'list-uses-1.md');
+  write('src/svc.ts', SVC('  if (dueAfterPublish(a, b)) return 1;\n'));
+  assert.equal(run(['--repo', repo, '--names', 'dueAfterPublish', '--out', out]).status, 0);
+  assert.match(fs.readFileSync(out, 'utf8'), /^Uses: \{"1":"[0-9a-f]{10}"/m);
+  const n = numberOf(out, 'dueAfterPublish · src/svc.ts · save');
+  fill(out, { [n]: 'none: it only reads the flag, no test needed' });
+  // Nothing changed: the outcome stays.
+  assert.equal(run(['--refresh', out]).status, 0);
+  assert.equal(rowOfPlace(out, n), `${n} · dueAfterPublish · src/svc.ts · save · lines 3 → none: it only reads the flag, no test needed`);
+  // A second call inside the same function.
+  write('src/svc.ts', SVC('  if (dueAfterPublish(a, b)) return 1;\n  if (dueAfterPublish(b, a)) return 2;\n'));
+  const r = run(['--refresh', out, '--check', out]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.ok(r.stdout.split(/\r?\n/).includes(`OPEN: ${n} · dueAfterPublish · src/svc.ts · save — its use lines changed after its outcome was written (was: none: it only reads the flag, no test needed): read it again and write C<n> or none: <reason>`), r.stdout);
+  assert.equal(rowOfPlace(out, n), `${n} (changed) · dueAfterPublish · src/svc.ts · save · lines 3, 4 → was: none: it only reads the flag, no test needed`);
+  // A refresh with no further change keeps it open: the old outcome never comes back by itself.
+  run(['--refresh', out]);
+  assert.equal(rowOfPlace(out, n), `${n} (changed) · dueAfterPublish · src/svc.ts · save · lines 3, 4 → was: none: it only reads the flag, no test needed`);
+  // fn: closes every place of one function with one --set, names each one, and fills a set-aside outcome.
+  const c = run(['--close', out, '--set', 'fn:save=none: read again, both calls only read the flag']);
+  assert.equal(c.status, 0, c.stdout + c.stderr);
+  const said = c.stdout.split(/\r?\n/);
+  assert.ok(said.includes('CLOSED: 1 place(s) — fn:save → none: read again, both calls only read the flag'), c.stdout);
+  assert.ok(said.includes(`  ${n} · dueAfterPublish · src/svc.ts · save`), c.stdout);
+  assert.equal(rowOfPlace(out, n), `${n} · dueAfterPublish · src/svc.ts · save · lines 3, 4 → none: read again, both calls only read the flag`);
+  run(['--refresh', out]);
+  assert.equal(rowOfPlace(out, n), `${n} · dueAfterPublish · src/svc.ts · save · lines 3, 4 → none: read again, both calls only read the flag`);
+  // fn: with no such function is a usage error, as for any selector.
+  assert.equal(run(['--close', out, '--set', 'fn:nothingHere=none: a reason long enough']).status, 2);
+});
+
+test('2026-11-19: code that only moved or was only re-spaced keeps its outcome; a changed string in a use line reopens it', () => {
+  const { repo, write } = fixture();
+  const out = path.join(root, 'list-uses-2.md');
+  const down = (text) => text.replace('export function', '// note\n'.repeat(10) + 'export function');
+  write('src/svc.ts', SVC("  if (dueAfterPublish(a, 'draft')) return 1;\n"));
+  run(['--repo', repo, '--names', 'dueAfterPublish', '--out', out]);
+  const n = numberOf(out, 'dueAfterPublish · src/svc.ts · save');
+  fill(out, { [n]: 'C1' });
+  // Ten lines down.
+  write('src/svc.ts', down(SVC("  if (dueAfterPublish(a, 'draft')) return 1;\n")));
+  run(['--refresh', out]);
+  assert.equal(rowOfPlace(out, n), `${n} · dueAfterPublish · src/svc.ts · save · lines 13 → C1`);
+  // Spaces, tabs and line endings only.
+  write('src/svc.ts', down(SVC("\t\tif ( dueAfterPublish( a,  'draft' ) )   return 1;  \n")).replace(/\n/g, '\r\n'));
+  run(['--refresh', out]);
+  assert.equal(rowOfPlace(out, n), `${n} · dueAfterPublish · src/svc.ts · save · lines 13 → C1`);
+  // Run twice more: the hash does not move by itself.
+  run(['--refresh', out]); run(['--refresh', out]);
+  assert.equal(rowOfPlace(out, n), `${n} · dueAfterPublish · src/svc.ts · save · lines 13 → C1`);
+  // Another string in the use line.
+  write('src/svc.ts', SVC("  if (dueAfterPublish(a, 'published')) return 1;\n"));
+  const r = run(['--refresh', out, '--check', out]);
+  assert.equal(rowOfPlace(out, n), `${n} (changed) · dueAfterPublish · src/svc.ts · save · lines 3 → was: C1`);
+  assert.ok(r.stdout.split(/\r?\n/).some(l => l.startsWith(`OPEN: ${n} · `) && l.includes('(was: C1)')), r.stdout);
+});
+
+test('2026-11-19: a list written before this release (no Uses: line) reads and refreshes with every number and outcome kept', () => {
+  const { repo, write } = fixture();
+  const out = path.join(root, 'list-uses-3.md');
+  write('src/svc.ts', SVC('  if (dueAfterPublish(a, b)) return 1;\n'));
+  run(['--repo', repo, '--names', 'dueAfterPublish', '--out', out]);
+  const rows = () => fs.readFileSync(out, 'utf8').split(/\r?\n/).filter(l => /^P\d/.test(l));
+  // The older shape: no Uses: line, outcomes written by hand.
+  fs.writeFileSync(out, fs.readFileSync(out, 'utf8').split('\n').filter(l => !l.startsWith('Uses: ')).join('\n'));
+  assert.doesNotMatch(fs.readFileSync(out, 'utf8'), /^Uses: /m);
+  fill(out, Object.fromEntries(rows().map((l, i) => [/^P\d+/.exec(l)[0], i % 2 ? 'C1' : 'none: an older outcome, written by hand'])));
+  const filled = rows();
+  assert.ok(filled.length >= 4 && filled.every(l => /→ (?:C1|none: an older outcome, written by hand)$/.test(l)), filled.join('\n'));
+  // A use line changes before the first refresh of this release: with no stored hash nothing can be compared, so
+  // nothing is reopened.
+  const r = run(['--refresh', out, '--check', out]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(rows(), filled);
+  assert.ok(r.stdout.split(/\r?\n/).includes(`PLACES: ${filled.length} place(s), 0 open`), r.stdout);
+  assert.match(fs.readFileSync(out, 'utf8'), /^Uses: \{/m);
+});
+
+test('2026-11-19: an outcome written with --close is tied to the code of that moment; one typed by hand to the code of the last refresh', () => {
+  const { repo, write } = fixture();
+  const out = path.join(root, 'list-uses-4.md');
+  const one = SVC('  if (dueAfterPublish(a, b)) return 1;\n');
+  const two = SVC('  if (dueAfterPublish(a, b)) return 1;\n  if (dueAfterPublish(b, a)) return 2;\n');
+  const three = SVC('  if (dueAfterPublish(a, b)) return 1;\n  if (dueAfterPublish(b, a)) return 2;\n  if (dueAfterPublish(a, a)) return 3;\n');
+  write('src/svc.ts', one);
+  run(['--repo', repo, '--names', 'dueAfterPublish', '--out', out]);
+  const n = numberOf(out, 'dueAfterPublish · src/svc.ts · save');
+  // The list was made before the code: the change adds a call, and then the place is closed with --close.
+  write('src/svc.ts', two);
+  const rowsBefore = fs.readFileSync(out, 'utf8').split('\n').filter(l => !l.startsWith('Uses: ') && !l.startsWith(n + ' '));
+  assert.equal(run(['--close', out, '--set', `${n}=none: both calls only read the flag`]).status, 0);
+  // --close changes the place's own line and the tool's Uses: line, and nothing else.
+  assert.deepEqual(fs.readFileSync(out, 'utf8').split('\n').filter(l => !l.startsWith('Uses: ') && !l.startsWith(n + ' ')), rowsBefore);
+  run(['--refresh', out]);
+  assert.equal(rowOfPlace(out, n), `${n} · dueAfterPublish · src/svc.ts · save · lines 3, 4 → none: both calls only read the flag`);
+  // A use added after the close reopens it.
+  write('src/svc.ts', three);
+  run(['--refresh', out]);
+  assert.equal(rowOfPlace(out, n), `${n} (changed) · dueAfterPublish · src/svc.ts · save · lines 3, 4, 5 → was: none: both calls only read the flag`);
+  // Typed by hand after another edit, with no refresh in between: the tool cannot know which came first, so the
+  // place is open and shows what was typed.
+  write('src/svc.ts', one);
+  fs.writeFileSync(out, fs.readFileSync(out, 'utf8').split('\n').map(l => (l.startsWith(n + ' ') ? l.replace(/→.*$/, '→ none: typed by hand after the edit') : l)).join('\n'));
+  run(['--refresh', out]);
+  assert.equal(rowOfPlace(out, n), `${n} (changed) · dueAfterPublish · src/svc.ts · save · lines 3 → was: none: typed by hand after the edit`);
 });

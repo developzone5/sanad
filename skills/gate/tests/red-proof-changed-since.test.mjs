@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readRecord } from '../scripts/proof-record.mjs';
+import { readRecord, writeRunFacts, codeFingerprint, recordKey } from '../scripts/proof-record.mjs';
 
 // 2026-11-16: in a fix round of a big task every re-proof ran all 48 breaks (about 15 minutes), though each fix
 // touched one or two files; four rounds lost about an hour. --changed-since <ref> runs only the breaks the change
@@ -112,7 +112,11 @@ test('a partial run writes no proof record (its run record says partial); the fu
   fs.writeFileSync(path.join(f.repo, 'r1.cjs'), 'module.exports = { on: true }; // fixed\n');
   const p = run(proof(f, '--changed-since', 'HEAD', '--then-green'));
   assert.equal(p.status, 0, p.stdout + p.stderr);
-  assert.equal(readRecord(f.repo), null, 'no proof record after a partial run');
+  // 2026-11-19, rewritten on purpose: a partial run now saves the result of each break it ran, for its tree, and
+  // still writes no entry of the whole proof (never ok, never a code id).
+  const afterPartial = readRecord(f.repo);
+  assert.deepEqual(Object.keys(afterPartial?.entries || {}), [], 'no entry of the whole proof after a partial run');
+  assert.deepEqual(Object.values(afterPartial?.perBreak || {}).flatMap(byBreak => Object.values(byBreak)).map(r => [r.file, r.state]), [['r1.cjs', 'caught']], 'the one break it ran is saved');
   assert.match(p.stdout, /RED-PROOF: PARTIAL ✓/);
   const [partialRun] = runRecords(f.repo);
   assert.equal(partialRun?.partial, true, 'the run record says partial');
@@ -223,4 +227,17 @@ test('the test machine runs a plan marked partial: PARTIAL ✓, never PROVED; a 
   assert.equal(none.status, 0, none.stdout + none.stderr);
   assert.match(none.stdout, /GREEN ✓/);
   assert.match(none.stdout, /^RED-PROOF: PARTIAL ✓ — 0 of 3 break\(s\) run \(none changed since abc123\), green on the fix/m);
+});
+
+test('a partial run with a passing run on the test machine withdraws the earlier passing fact of the tree first (2026-11-20)', () => {
+  const f = fixture();
+  const remote = remoteSetup(f);
+  fs.writeFileSync(path.join(f.repo, 'r2.cjs'), 'module.exports = { on: true }; // fixed\n');
+  const tree = codeFingerprint(f.repo);
+  const key = recordKey(['node', 'check.cjs'], '');
+  assert.equal(writeRunFacts(f.repo, key, { tree, run: 'older', green: true }), true);
+  assert.equal(readRecord(f.repo).runs[key][tree].green, true, 'the fact is there before the run');
+  const r = run(['--repo', f.repo, '--base', 'HEAD', '--breaks', f.breaks, '--changed-since', 'HEAD', '--then-green', '--', 'node', 'check.cjs'], remote.extra);
+  assert.equal(r.status, 2, 'the stand-in scp fails: ' + r.stdout + r.stderr);
+  assert.equal(readRecord(f.repo).runs?.[key]?.[tree], undefined, 'the passing fact is withdrawn: ' + r.stdout);
 });

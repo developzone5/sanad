@@ -33,8 +33,23 @@ export function addedLines(diff) {
   return found;
 }
 
+// The text a file had at the merge base with <base>: a reader (file) => text, or null for a file the base did not
+// have (2026-11-19: the test check asks which tests of a changed test file are new). A file git reads as renamed
+// since the base is read at its old path, so a test is not new only because its file moved. A moved file that is
+// still untracked is not seen as a rename: git lists it as a new file. null when there is no merge base.
+export function baseTexts(top, base) {
+  const from = (git(top, ['merge-base', base, 'HEAD']) || '').trim();
+  if (!from) return null;
+  const moved = new Map();
+  const parts = (git(top, ['diff', '--name-status', '-M', '--diff-filter=R', '-z', '--no-ext-diff', from]) || '').split('\0');
+  for (let i = 0; i + 2 < parts.length; i += 3) moved.set(parts[i + 2], parts[i + 1]);
+  return (file) => git(top, ['show', `${from}:${moved.get(file) || file}`]);
+}
+
 // The lines a change adds since the merge base with <base>, as { file, line, text }: the added lines of the
 // diff, and every line of an untracked test file. null when there is no merge base.
+// This listing stays its own (2026-11-19): a folder full of foreign files (FOREIGN?) is stopped earlier, by
+// pre-review and by the proof, before this reads every untracked test file.
 export function newLines(top, base) {
   const from = (git(top, ['merge-base', base, 'HEAD']) || '').trim();
   if (!from) return null;

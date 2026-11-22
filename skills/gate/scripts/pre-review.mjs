@@ -40,7 +40,7 @@
 // A part left out because its option is missing (--lines, --check, --was) is printed as skipped.
 // A .NET change is built and tested by the test step, not here.
 //
-// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--before-proof] [--no-cache]
+// Usage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--notes <dir>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--part lists|code] [--before-proof] [--no-cache]
 //   --before-proof (2026-11-13): run right before red-proof.mjs. Everything runs except the proof part of
 //   the test asserts check. A label, quote or commit fixed now does not void a proof; run it again after the
 //   proof (Step 3.5), where every part runs.
@@ -49,6 +49,22 @@
 //   A check that passed on the exact same code, base and notes files is not run again (pre-review-cache.mjs,
 //   2026-11-16: pre-review runs twice per fix round, and repeating lint and types on the test machine took half
 //   of a small task's working time); it shows as `(same code: passed at <time>)`. --no-cache runs every check.
+// 2026-11-19 (speed batch):
+//   - Each check's line is printed when that check ends (two instant failures used to show only after the slowest
+//     check, 96 s later); the summary line comes last. The places line waits for the size check, because the
+//     changed functions with callers can still change it.
+//   - A pass is kept by the tree, not by the commit (pre-review-cache.mjs): committing a checked tree runs only
+//     the commits check again.
+//   - --part lists|code runs one half only. lists: ticket lines, check lines, places, siblings (and the size
+//     check, whose answer the places check needs). code: lint, types, format. A second run that finds the same
+//     check running on the same code waits for it and reads its answer, so `--part code` can run in the
+//     background right after the commit and the full run never starts a second lint or type check.
+//   - The changed files come from change-set.mjs. A FOREIGN? answer (another session's folder sits untracked in
+//     the repository) is one failed check, printed before any other check starts.
+//   - --notes <dir> fills --lines, --check, --places and --siblings from the notes folder's own file names
+//     (notes-dir.mjs). One of those options given with another file than the notes folder's is a usage error.
+//   - A changed function with callers that is not on the places list is added to the list (writePlaces), so its
+//     places show as open; the caller rows come from size-check --json (allCallers: every row, not the capped ones).
 // Exit 0: every check passed. 1: a check failed. 2: usage error.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -58,9 +74,10 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { isMain } from './is-main.mjs';
-import { fileKind } from './size-check.mjs';
+import { fileKind, format as formatSize, sizeTask } from './size-check.mjs';
 import { bashEnv, gitBash } from './git-bash.mjs';
-import { checkKey, lookup, remember, runIdentity } from './pre-review-cache.mjs';
+import { checkKey, claim, lookup, release, remember, runIdentity, runningNow } from './pre-review-cache.mjs';
+import { changeSet, foreignLine } from './change-set.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = /\.(?:[cm]?[jt]sx?)$/i;
@@ -70,23 +87,31 @@ function git(cwd, args) {
   catch { return ''; }
 }
 
-export function changedFiles(repo, base) {
-  const from = git(repo, ['merge-base', base, 'HEAD']);
-  if (!from) throw new Error(`no merge base with ${base}`);
-  const tracked = git(repo, ['diff', '--name-only', '--diff-filter=d', from]).split(/\r?\n/);
-  const untracked = git(repo, ['ls-files', '--others', '--exclude-standard']).split(/\r?\n/);
-  return [...new Set([...tracked, ...untracked].filter(Boolean))].filter(f => fs.existsSync(path.join(repo, f)));
+// 2026-11-19: both lists come from the one change set (change-set.mjs), so every tool counts the same files.
+// `set`: a change set already read for this run.
+export function changedFiles(repo, base, set = changeSet(repo, base)) {
+  const gone = new Set(set.deleted);
+  return set.files.filter(f => !gone.has(f) && fs.existsSync(path.join(repo, f)));
 }
 
 // 2026-11-18 (audit): every changed path, deleted ones included, for the text-only rule: a deleted test or code
 // file is a change that is not text.
-export function allChangedPaths(repo, base) {
-  const from = git(repo, ['merge-base', base, 'HEAD']);
-  if (!from) throw new Error(`no merge base with ${base}`);
-  const tracked = git(repo, ['diff', '--name-only', from]).split(/\r?\n/);
-  const untracked = git(repo, ['ls-files', '--others', '--exclude-standard']).split(/\r?\n/);
-  return [...new Set([...tracked, ...untracked].filter(Boolean))];
+export function allChangedPaths(repo, base, set = changeSet(repo, base)) {
+  return [...set.files];
 }
+
+// The build-info file of one type check: one per package folder and config, outside the repo. The gate's own type
+// check names the same file, so it also reads only what changed.
+const tscInfoName = (where, config) => 'sanad-tsc-' + crypto.createHash('sha1').update(String(where).toLowerCase() + config).digest('hex').slice(0, 12) + '.tsbuildinfo';
+export function tscInfoFile(pkg, config) {
+  return path.join(os.tmpdir(), tscInfoName(pkg, config));
+}
+
+// --part: one half of the checks. lists also holds the size check: the places check needs its answer.
+const LISTS = /^(?:ticket lines|check lines|places|siblings)$/;
+const CODE = /^(?:lint|types|format) /;
+export const PARTS = ['lists', 'code'];
+const inPart = (part, name) => (part === 'lists' ? LISTS.test(name) || name === 'size' : CODE.test(name));
 
 // 2026-11-18 (audit): a locale script (.ts/.js) is text only while its changed lines (strings and comments
 // taken out) hold no code: no function, arrow, import, call or control word.
@@ -189,8 +214,11 @@ function remoteLine(remote, rel, words) {
 const sshArgs = (remote, line) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=30', remote.host, line];
 
 // `remote`: the test machine (remoteOf); undefined reads it from git config, null means none.
-export function planChecks({ repo, base, was, lines, check, places, siblings, node, remote, beforeProof }) {
-  const files = changedFiles(repo, base);
+// `part`: 'lists' or 'code' (--part). `set`: the change set of this run, when it is already read. `breaks`: the
+// break list of the notes folder, `proof`: the proof's own test command and `proofCwd`: its folder (from --notes).
+export function planChecks({ repo, base, was, lines, check, places, siblings, node, remote, beforeProof, part, set, breaks, proof, proofCwd }) {
+  if (!set) set = changeSet(repo, base);
+  const files = changedFiles(repo, base, set);
   const checks = [];
   if (remote === undefined) remote = remoteOf(repo);
   const byPackage = new Map();
@@ -221,9 +249,11 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
     if (list.some(f => /\.tsx?$/i.test(f))) {
       for (const { config, label } of tsProjects(pkg)) {
         // Incremental, with its build info outside the repo: a repeat run reads only what changed.
-        const infoName = 'sanad-tsc-' + crypto.createHash('sha1').update((remote && !fs.existsSync(tsc) ? remote.repo + '/' + name : pkg).toLowerCase() + config).digest('hex').slice(0, 12) + '.tsbuildinfo';
-        if (fs.existsSync(tsc)) checks.push({ name: `types ${name}${label ? ` (${label})` : ''}`, cmd: node, args: [tsc, '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', path.join(os.tmpdir(), infoName)], cwd: pkg });
-        else if (lists(pkg, 'typescript')) owed('types', label, ['node_modules/typescript/bin/tsc', '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', (remote && /^[A-Za-z]:\//.test(remote.repo) ? '%TEMP%\\' : '/tmp/') + infoName]);
+        const infoName = tscInfoName(remote && !fs.existsSync(tsc) ? remote.repo + '/' + name : pkg, config);
+        // `serial`: two type checks of one project write one build-info file, so they never run at the same
+        // time, also when their code differs (a background `--part code`, then an edit and the full run).
+        if (fs.existsSync(tsc)) checks.push({ name: `types ${name}${label ? ` (${label})` : ''}`, cmd: node, args: [tsc, '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', tscInfoFile(pkg, config)], cwd: pkg, serial: 'one-' + infoName });
+        else if (lists(pkg, 'typescript')) { owed('types', label, ['node_modules/typescript/bin/tsc', '-p', config, '--noEmit', '--incremental', '--tsBuildInfoFile', (remote && /^[A-Za-z]:\//.test(remote.repo) ? '%TEMP%\\' : '/tmp/') + infoName]); if (remote) checks.at(-1).serial = 'one-' + infoName; }
       }
     }
   }
@@ -247,31 +277,48 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
   }
   // 2026-11-18 (audit finding 6): a genuine text-only change (every file is a doc or locale text: no test, no style, no
   // code) is asked for no new test (loop.md, Text only): the ticket-lines and tag checks are left out, named as skipped.
-  const everyPath = allChangedPaths(repo, base);
+  const everyPath = allChangedPaths(repo, base, set);
   const textOnly = everyPath.length > 0 && everyPath.every(f => ['doc', 'locale'].includes(fileKind(f)) && !(fileKind(f) === 'locale' && localeHoldsCode(repo, base, f)));
   if (lines && !textOnly) checks.push({ name: 'ticket lines', cmd: process.execPath, args: [path.join(here, 'check-ticket-lines.mjs'), '--lines', lines, '--repo', repo, '--base', base], cwd: repo });
   // 2026-11-16: the Check lines' sources were read only by review-brief, after the proof; a line in the wrong shape
   // passed both pre-review runs. Checked here, in the first run.
   if (lines && check) checks.push({ name: 'check lines', cmd: process.execPath, args: [path.join(here, 'review-brief.mjs'), '--coverage', '--lines', lines, '--check', check], cwd: repo, show: true });
-  checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check && !textOnly ? ['--check', check] : []), ...(beforeProof ? ['--before-proof'] : [])], cwd: repo });
+  // 2026-11-19 (owner yes): the tests-only light path. With `git config sanad.testsOnlyLane true`, a change size-check
+  // calls tests only skips the new-test evidence part (one line says why). Switch off: the check runs as before.
+  const lightLane = testsOnlyLane(repo, base);
+  checks.push({ name: 'test asserts', cmd: process.execPath, args: [path.join(here, 'check-test-asserts.mjs'), '--repo', repo, '--base', base, ...(check && !textOnly ? ['--check', check] : []), ...(beforeProof ? ['--before-proof'] : []), ...(lightLane ? ['--tests-only-lane'] : [])], cwd: repo, show: true });
   checks.push({ name: 'commits', cmd: process.execPath, args: [path.join(here, 'check-commits.mjs'), '--repo', repo, '--base', base], cwd: repo });
-  checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : [])], cwd: repo, show: true });
+  // 2026-11-19: asked as data (--json). The text shown is made from it (sizeView), and every caller row is kept
+  // for the places check: the printed rows are capped.
+  checks.push({ name: 'size', cmd: process.execPath, args: [path.join(here, 'size-check.mjs'), '--repo', repo, '--base', base, ...(was ? ['--was', was] : []), '--json'], cwd: repo, show: true });
   checks.push({ name: 'one job', cmd: process.execPath, args: [path.join(here, 'one-job.mjs'), '--repo', repo, '--base', base], cwd: repo, show: true });
   // 2026-11-12: the list is searched again in this folder before the check, so a place that appeared after
   // it was written (a new caller, a sibling path) shows as open and cannot be missed.
   if (places) checks.push({ name: 'places', cmd: process.execPath, args: [path.join(here, 'places.mjs'), '--refresh', places, '--repo', repo, '--check', places, ...(check ? ['--check-lines', check] : [])], cwd: repo, show: true });
   // 2026-11-14: a P<n> outcome is looked up in the places list, which the places check rewrites as it refreshes
   // it: this check starts when that one has ended (`after`), never while the list is half written.
-  if (siblings) checks.push({ name: 'siblings', cmd: process.execPath, args: [path.join(here, 'siblings.mjs'), '--check', siblings, ...(places ? ['--places', places] : []), ...(lines && check ? ['--lines', lines, '--check-lines', check] : [])], cwd: repo, show: true, after: 'places' });
+  // 2026-11-19 (owner decision 8): the second look is tied to the ticket lines only, so one added check line no
+  // longer asks for it again; the siblings check gets the ticket lines alone.
+  if (siblings) checks.push({ name: 'siblings', cmd: process.execPath, args: [path.join(here, 'siblings.mjs'), '--check', siblings, ...(places ? ['--places', places] : []), ...(lines ? ['--lines', lines] : [])], cwd: repo, show: true, after: 'places' });
   const mechanical = git(repo, ['config', '--get', 'sanad.mechanical']);
   if (mechanical) checks.push({ name: 'mechanical', cmd: process.execPath, args: [mechanical, '--repo', repo, '--base', base], cwd: repo, show: true });
+  // 2026-11-19: a break list with a mistake was found only by the proof, after the test machine was in use. With
+  // --before-proof and the notes folder's break list, the proof's own checks before any run are one check here
+  // (red-proof.mjs --check-plan: local, no test machine, no copy).
+  const planKnown = Array.isArray(proof) && proof.length > 0;
+  if (beforeProof && breaks && planKnown) checks.push({ name: 'break plan', cmd: process.execPath, args: [path.join(here, 'red-proof.mjs'), '--repo', repo, '--breaks', breaks, '--base', base, ...(proofCwd ? ['--cwd', proofCwd] : []), '--check-plan', '--', ...proof], cwd: repo });
   // 2026-11-12 (audit C14): with no --lines, --check or --was those parts were left out without a word, and
   // the summary still read "N of N checks passed". Each is named as skipped (not a failure).
   const skipped = [
     lines ? (textOnly ? { name: 'ticket lines', why: 'a text-only change' } : null) : { name: 'ticket lines', why: 'no --lines' },
     check ? (textOnly ? { name: 'test labels', why: 'a text-only change' } : null) : { name: 'test labels', why: 'no --check' },
     was ? null : { name: 'size growth', why: 'no --was' },
+    beforeProof && breaks && !planKnown ? { name: 'break plan', why: 'no test command in the notes folder (task.json)' } : null,
   ].filter(Boolean);
+  if (part) {
+    const lists = part === 'lists';
+    return { files, checks: checks.filter(c => inPart(part, c.name)), remote, skipped: lists ? skipped.filter(s => s.name !== 'test labels') : [], placesOwed: lists && !places, siblingsOwed: lists && !siblings };
+  }
   return { files, checks, remote, skipped, placesOwed: !places, siblingsOwed: !siblings };
 }
 
@@ -389,13 +436,22 @@ export function otherTaskOnRemote(repo, remote) {
 function syncRemote(repo, remote) {
   const other = otherTaskOnRemote(repo, remote);
   if (other) return { ok: false, text: `another task's check runs on ${remote.host} now (${other}), and a sync would change the code under it. Run pre-review again when it ends.` };
-  let out = '';
-  try {
-    out = execFileSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000, stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (e) { out = String(e.stdout || '') + String(e.stderr || '') || String(e.message); }
-  const synced = /^SYNCED \S+ \S+ tree (\S+)/m.exec(out);
-  const via = /^VIA (\S+)/m.exec(out);
-  return synced ? { ok: true, tree: synced[1], via: via ? via[1] : '' } : { ok: false, text: (out.split(/\r?\n/).find(l => l.trim()) || 'the sync printed nothing').trim() };
+  // 2026-11-19: not a blocking call any more. The checks that run here start and print while the sync runs;
+  // only the checks on the test machine wait for it.
+  return new Promise(resolve => {
+    const done = (out) => {
+      const synced = /^SYNCED \S+ \S+ tree (\S+)/m.exec(out);
+      const via = /^VIA (\S+)/m.exec(out);
+      resolve(synced ? { ok: true, tree: synced[1], via: via ? via[1] : '' } : { ok: false, text: (out.split(/\r?\n/).find(l => l.trim()) || 'the sync printed nothing').trim() });
+    };
+    let out = '', child;
+    try { child = spawn(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, env: bashEnv(), windowsHide: true, timeout: 10 * 60 * 1000, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) { done(String(e.message)); return; }
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { out += d; });
+    child.on('error', e => done(out || String(e.message)));
+    child.on('close', () => done(out));
+  });
 }
 
 function runOne(check) {
@@ -416,7 +472,7 @@ function runOne(check) {
 
 // 2026-11-12 (audit C14): a failing check showed only its last 12 lines, so a ✗ or GAP line above them was
 // lost. Every line that names a problem is shown, plus the last 12 lines, each once, in their own order.
-const PROBLEM = /^(?:✗|GAP|BUG|UNTAGGED|UNPROVEN|NOT RUN|OPEN)/;
+const PROBLEM = /^(?:✗|GAP|BUG|UNTAGGED|UNPROVEN|NOT PROVEN|NO EVIDENCE|NOT RUN|OPEN)/;
 export function failureLines(text) {
   const keep = new Set(text.flatMap((l, i) => (PROBLEM.test(l.trim()) ? [i] : [])));
   for (let i = Math.max(0, text.length - 12); i < text.length; i++) keep.add(i);
@@ -435,9 +491,56 @@ export function runChecks(checks, run = runOne) {
   }));
 }
 
+// One result as its printed lines: the ✓ or ✗ line, then what it shows.
+function resultLines(r) {
+  const when = r.cached ? new Date(r.cached.at).toTimeString().slice(0, 5) : '';
+  const lines = [`  ${r.code === 0 ? '✓' : '✗'} ${r.name}${r.notRun ? ' — NOT RUN' : r.cached ? ` (same code: passed at ${when})` : ` (${(r.ms / 1000).toFixed(1)} s)`}`];
+  const text = String(r.out || '').replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).filter(l => l.trim());
+  if (r.code !== 0) lines.push(...failureLines(text).map(l => '      ' + l));
+  // The project check's GAP and NOTE lines are leads for the review: shown also when it passes (2026-11-12).
+  else if (r.show) lines.push(...text.filter(l => /^(?:SIZE|SIZE GREW|MECHANICAL|GAP|NOTE|PLACES|WIDE|SIBLINGS|  callers|  roles|EVIDENCE SKIPPED|NOT PROVEN TEST|NO EVIDENCE|  → the missing-run-evidence)/.test(l)).map(l => '      ' + l.trim()));
+  return lines;
+}
+
+// True when the lane switch `sanad.testsOnlyLane` is on and size-check says the change is tests only.
+// The size is only asked when the switch is on. A failed size answer means false: the full check runs.
+export function testsOnlyLane(repo, base) {
+  if (git(repo, ['config', '--get', 'sanad.testsOnlyLane']).toLowerCase() !== 'true') return false;
+  try { return sizeTask({ repo, base }).testsOnly === true; } catch { return false; }
+}
+
+// 2026-11-19: the size check answers as data (--json). The text shown is made here, as size-check prints it, and
+// `callersText` holds the row of every changed function (allCallers), not only the printed, capped rows. An
+// answer that is not that data (an error text, a fake check in a test) is kept as it is.
+function sizeView(r, was) {
+  let j = null;
+  try { j = JSON.parse(String(r.out || '').trim()); } catch { return r; }
+  if (!j || typeof j !== 'object' || !j.size || !j.signals || !Array.isArray(j.callers)) return r;
+  try {
+    const all = Array.isArray(j.allCallers) ? j.allCallers : null;
+    return { ...r, out: formatSize(j, was), callersText: formatSize({ ...j, callers: all || j.callers, moreSymbols: all ? 0 : j.moreSymbols }, ''), json: j };
+  } catch { return r; }
+}
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // opts.sync: tests only (in place of the real sync to the test machine). opts.noCache: run every check.
+// opts.print: called with each check's lines when that check ends, then with the summary (the command line passes
+// it; without it nothing is printed). The text given back keeps its shape: the summary, then the plan's order.
 export async function preReview(opts) {
-  const { files, checks, remote, skipped, placesOwed, siblingsOwed } = planChecks(opts);
+  const say = typeof opts.print === 'function' ? opts.print : () => {};
+  const label = (opts.beforeProof ? 'PRE-REVIEW (before the proof)' : 'PRE-REVIEW') + (opts.part ? ` (part: ${opts.part})` : '');
+  // 2026-11-19: another session's folder sat untracked in the repository, and one check read its 1,498 files for
+  // 852 s. That is one failed check now, before any other check starts.
+  const began = Date.now();
+  const set = changeSet(opts.repo, opts.base);
+  if (set.foreign.length) {
+    const block = resultLines({ name: 'changed files', code: 1, out: foreignLine(set), ms: Date.now() - began });
+    const summary = `${label}: 0 of 1 checks passed · ${opts.repo}`;
+    say(block.join('\n')); say(summary);
+    return { ok: false, text: [summary, ...block].join('\n') };
+  }
+  const { files, checks, remote, skipped, placesOwed, siblingsOwed } = planChecks({ ...opts, set });
   // Checks that passed on this exact code before are read, not run (pre-review-cache.mjs).
   const ident = opts.noCache ? null : runIdentity(opts.repo, opts.base);
   for (const c of checks) {
@@ -445,27 +548,79 @@ export async function preReview(opts) {
     const hit = lookup(c.key);
     if (hit) c.cached = hit;
   }
-  let synced = '';
-  if (checks.some(c => c.remote && !c.cached)) {
-    const sync = (opts.sync || syncRemote)(opts.repo, remote);
-    for (const c of checks.filter(c => c.remote && !c.cached)) {
+  // The sync to the test machine runs once, when the first check that needs it starts.
+  let synced = '', syncing = null;
+  const syncOnce = () => {
+    if (!syncing) {
+      syncing = Promise.resolve().then(() => (opts.sync || syncRemote)(opts.repo, remote)).then(sync => {
+        if (sync.ok) { synced = `  (no node_modules here: lint and types run on ${remote.host}, on this folder's code${sync.tree ? ', tree ' + String(sync.tree).slice(0, 12) : ''})`; say(synced); }
+        return sync;
+      });
+    }
+    return syncing;
+  };
+  const exec = opts.run || runOne;
+  // A check with `serial` waits for its turn: one at a time per name, across runs (at most 10 minutes, then it
+  // runs: a waiting check is never a lost check).
+  const inTurn = async (c, work) => {
+    if (!c.serial || c.notRun) return work();
+    for (let tries = 0; tries < 2400 && !claim(c.serial); tries++) await sleep(250);
+    try { return await work(); } finally { release(c.serial); }
+  };
+  const fresh = async (c) => {
+    if (c.remote) {
+      const sync = await syncOnce();
       if (!sync.ok) c.notRun = `not run on ${remote.host}: ${sync.text}`;
       else if (sync.via) c.args = ['-o', 'HostName=' + sync.via, ...c.args];
     }
-    if (sync.ok) synced = `  (no node_modules here: lint and types run on ${remote.host}, on this folder's code${sync.tree ? ', tree ' + String(sync.tree).slice(0, 12) : ''})`;
-  }
-  const results = await runChecks(checks, c => (c.cached ? Promise.resolve({ ...c, code: 0, out: c.cached.out, ms: 0 }) : (opts.run || runOne)(c)));
-  remember(results);
-  const size = results.find(r => r.name === 'size');
+    return inTurn(c, () => exec(c));
+  };
+  // One check: read when it is kept, else run, and kept at once when it passed. A check that another run has on
+  // this very code right now is not started a second time: this run waits for it and reads its answer. When that
+  // run ended with no kept pass (it failed, or it was stopped), this run runs the check itself.
+  const one = async (c) => {
+    if (c.cached) return { ...c, code: 0, out: c.cached.out, ms: 0 };
+    if (!c.key || c.notRun) return fresh(c);
+    for (let tries = 0; ; tries++) {
+      if (tries > 2 || claim(c.key)) {
+        try {
+          // Another run may have finished between our lookup and our lock: read again before starting.
+          const late = lookup(c.key);
+          if (late) return { ...c, cached: late, code: 0, out: late.out, ms: 0 };
+          const r = await fresh(c); remember([r]); return r;
+        }
+        finally { release(c.key); }
+      }
+      while (runningNow(c.key)) await sleep(250);
+      const hit = lookup(c.key);
+      if (hit) return { ...c, cached: hit, code: 0, out: hit.out, ms: 0 };
+      await sleep(50);
+    }
+  };
   // 2026-11-18 (audit): every changed function that has callers is searched on the list, or the places check fails.
-  const listed = results.find(r => r.name === 'places' && !r.notRun);
-  if (opts.places && listed && size) {
+  // 2026-11-19: the names that are missing are added to the list here (writePlaces), so their places show as open;
+  // the author no longer adds each by hand. The places check then runs once more on the new list, and fails.
+  const withCallers = async (listed, size, check) => {
+    if (!opts.places || !size || listed.notRun) return listed;
     let names = [];
     try { const m = /^Names: (.*)$/m.exec(fs.readFileSync(opts.places, 'utf8')); names = m ? m[1].split(',').map(s => s.trim()).filter(Boolean) : []; } catch { /* the places check says so */ }
-    const { names: missing, more, unreadable } = names.length ? unsearchedCallers(size.out, names, { repo: opts.repo, changed: files }) : { names: [], more: 0, unreadable: [] };
+    const { names: missing, more, unreadable } = names.length ? unsearchedCallers(size.callersText || size.out, names, { repo: opts.repo, changed: files }) : { names: [], more: 0, unreadable: [] };
     if (missing.length) {
+      // All at once; when the list refuses one name (too wide, or no hit), each alone, so the others still join.
+      let added = [];
+      try {
+        const { writePlaces } = await import('./places.mjs');
+        try { writePlaces({ repo: opts.repo, names: missing, out: opts.places }); added = [...missing]; }
+        catch {
+          for (const n of missing) { try { writePlaces({ repo: opts.repo, names: [n], out: opts.places }); added.push(n); } catch { /* named below, for the author */ } }
+        }
+      } catch { /* the list tool cannot be loaded: every name is named below */ }
+      if (added.length) {
+        const again = await exec(check);
+        listed = { ...again, ms: (listed.ms || 0) + (again.ms || 0) };
+      }
       listed.code = 1;
-      listed.out += '\n' + missing.map(n => `OPEN: ${n} — changed, not on the places list: it has callers; search it with places.mjs --names ${n} and close each place`).join('\n');
+      listed.out = String(listed.out || '') + '\n' + missing.map(n => `OPEN: ${n} — changed, not on the places list: it has callers; ${added.includes(n) ? 'it is added to the list now, close each of its places' : `search it with places.mjs --names ${n} and close each place`}`).join('\n');
     }
     // 2026-11-18 (repair round): a callers entry that cannot be read is no pass.
     if (unreadable.length) {
@@ -473,26 +628,63 @@ export async function preReview(opts) {
       listed.out += '\n' + unreadable.map(e => `OPEN: callers entry not readable — "${e.slice(0, 80)}": compare that changed function with the list's Names yourself, search it with places.mjs --names and close each place`).join('\n');
     }
     if (more) listed.out += `\nNOTE: ${more} more changed function(s) are not named by the size check (it prints a few rows); compare them with the list's Names yourself`;
-  }
-  for (const [owes, without] of [[placesOwed, placesWithout], [siblingsOwed, siblingsWithout]]) {
-    if (!owes) continue;
-    const owed = without(size && size.out, opts.repo);
-    if (owed.skipped) skipped.push(owed.skipped); else results.push(owed.result);
-  }
+    return listed;
+  };
+  // Each check's lines are printed when it ends. The places line waits for the size check: it can still change.
+  const owedResults = [];
+  let sizeEnded;
+  const sizeDone = new Promise(resolve => { sizeEnded = resolve; });
+  if (!checks.some(c => c.name === 'size')) sizeEnded(null);
+  const emit = (r) => say(resultLines(r).join('\n'));
+  const run = async (c) => {
+    let r = null;
+    try { r = await one(c); if (c.name === 'size') r = sizeView(r, opts.was); }
+    finally { if (c.name === 'size') sizeEnded(r); }
+    if (c.name === 'size') {
+      // With no --places or --siblings the size decides: skipped for a text-only change, else NOT RUN, at once.
+      for (const [owes, without] of [[placesOwed, placesWithout], [siblingsOwed, siblingsWithout]]) {
+        if (!owes) continue;
+        const owed = without(r.out, opts.repo);
+        if (owed.skipped) skipped.push(owed.skipped); else owedResults.push(owed.result);
+      }
+    }
+    if (c.name === 'places') r = await withCallers(r, await sizeDone, c);
+    emit(r);
+    if (c.name === 'size') owedResults.forEach(emit);
+    return r;
+  };
+  // The list checks start first; the results keep the plan's order.
+  const order = [...checks].sort((a, b) => Number(!LISTS.test(a.name)) - Number(!LISTS.test(b.name)));
+  const ended = await runChecks(order, run);
+  const results = [...checks.map(c => ended[order.indexOf(c)]), ...owedResults];
   const skippedText = skipped.length ? ` · ${skipped.length} skipped: ${skipped.map(s => s.name).join(', ')}` : '';
-  const label = opts.beforeProof ? 'PRE-REVIEW (before the proof)' : 'PRE-REVIEW';
-  const lines = [`${label}: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed${skippedText} · ${files.length} changed file(s) · ${opts.repo}`];
+  const summary = `${label}: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed${skippedText} · ${files.length} changed file(s) · ${opts.repo}`;
+  const lines = [summary];
   if (synced) lines.push(synced);
-  for (const r of results) {
-    const when = r.cached ? new Date(r.cached.at).toTimeString().slice(0, 5) : '';
-    lines.push(`  ${r.code === 0 ? '✓' : '✗'} ${r.name}${r.notRun ? ' — NOT RUN' : r.cached ? ` (same code: passed at ${when})` : ` (${(r.ms / 1000).toFixed(1)} s)`}`);
-    const text = r.out.replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).filter(l => l.trim());
-    if (r.code !== 0) lines.push(...failureLines(text).map(l => '      ' + l));
-    // The project check's GAP and NOTE lines are leads for the review: shown also when it passes (2026-11-12).
-    else if (r.show) lines.push(...text.filter(l => /^(?:SIZE|SIZE GREW|MECHANICAL|GAP|NOTE|PLACES|WIDE|SIBLINGS|  callers|  roles)/.test(l)).map(l => '      ' + l.trim()));
-  }
+  for (const r of results) lines.push(...resultLines(r));
   for (const s of skipped) lines.push(`  – ${s.name}: skipped (${s.why})`);
+  for (const s of skipped) say(`  – ${s.name}: skipped (${s.why})`);
+  say(summary);
   return { ok: results.every(r => r.code === 0), text: lines.join('\n') };
+}
+
+// 2026-11-19: which checks are a kept pass for the code as it is now, running nothing (for the printed status).
+// { foreign, checks: [{ name, kept, at, running, keyed }] }: `kept` a pass is kept for these exact inputs (`at`:
+// when it passed); `running` another run has it right now; `keyed` false for a check that is never kept or cannot
+// run here. `foreign`: the FOREIGN? line, when the change set stops the checks.
+export function checkStatus(opts) {
+  const set = changeSet(opts.repo, opts.base);
+  if (set.foreign.length) return { foreign: foreignLine(set), checks: [] };
+  const { checks } = planChecks({ ...opts, set });
+  const ident = runIdentity(opts.repo, opts.base);
+  return {
+    foreign: '',
+    checks: checks.map(c => {
+      const key = checkKey(c, ident);
+      const hit = lookup(key);
+      return { name: c.name, kept: Boolean(hit), at: hit ? hit.at : '', running: Boolean(runningNow(key)), keyed: Boolean(key) };
+    }),
+  };
 }
 
 function parse(argv) {
@@ -501,10 +693,30 @@ function parse(argv) {
     const k = argv[i];
     if (k === '--before-proof') { o.beforeProof = true; continue; }
     if (k === '--no-cache') { o.noCache = true; continue; }
-    if (!['--repo', '--base', '--was', '--lines', '--check', '--places', '--siblings', '--node'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
+    if (!['--repo', '--base', '--was', '--lines', '--check', '--places', '--siblings', '--node', '--part', '--notes'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
+  if (o.part !== undefined && !PARTS.includes(o.part)) throw new Error('--part must be one of: ' + PARTS.join(', '));
   return o;
+}
+
+// --notes (2026-11-19): the notes folder's own files stand for --lines, --check, --places and --siblings (each one
+// that is there). One of those options given with another file is a usage error, never a silent choice. With
+// --before-proof the folder's break list and the task's test command give the break plan check.
+async function fromNotes(o) {
+  if (!o.notes) return {};
+  const { paths, readTask } = await import('./notes-dir.mjs');
+  const p = paths(o.notes);
+  if (!fs.existsSync(p.dir)) throw new Error('--notes: no such folder: ' + p.dir);
+  const norm = (f) => (process.platform === 'win32' ? path.resolve(f).toLowerCase() : path.resolve(f));
+  for (const k of ['lines', 'check', 'places', 'siblings']) {
+    if (o[k] === undefined) { if (fs.existsSync(p[k])) o[k] = p[k]; }
+    else if (norm(o[k]) !== norm(p[k])) throw new Error(`--${k} ${o[k]} is not the notes folder's file (${p[k]}): give --notes alone, or the same file`);
+  }
+  if (!o.beforeProof || !fs.existsSync(p.breaks)) return {};
+  let side = null;
+  try { const task = readTask(o.notes); side = task && task.sides.find(s => s && Array.isArray(s.testCommand) && s.testCommand.length); } catch { /* a task file that cannot be read: the break plan is named as skipped */ }
+  return { breaks: p.breaks, proof: side ? side.testCommand : null, proofCwd: side && side.cwd ? side.cwd : '' };
 }
 
 if (isMain(import.meta.url)) {
@@ -514,11 +726,12 @@ if (isMain(import.meta.url)) {
     if (!repo) throw new Error('not inside a git repository: ' + (o.repo || process.cwd()));
     const integration = git(repo, ['config', '--get', 'sanad.integration']) || 'staging';
     const node = o.node || git(repo, ['config', '--get', 'sanad.node']) || process.execPath;
-    const { ok, text } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof, noCache: !!o.noCache });
-    process.stdout.write(text + '\n');
+    const notes = await fromNotes(o);
+    // Each check's lines are printed when it ends; the summary comes last.
+    const { ok } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof, noCache: !!o.noCache, part: o.part, ...notes, print: (text) => process.stdout.write(text + '\n') });
     process.exitCode = ok ? 0 : 1;
   } catch (error) {
-    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--before-proof] [--no-cache]\n');
+    process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--notes <dir>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--part lists|code] [--before-proof] [--no-cache]\n');
     process.exitCode = 2;
   }
 }

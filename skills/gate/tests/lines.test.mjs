@@ -38,3 +38,106 @@ test('the command writes lines.md and ticket.md beside it; a missing or empty fi
   assert.equal(run(['--from', path.join(root, 'blank.txt'), '--out', out]).status, 2);
   assert.equal(run(['--from', from, '--out', out, '--no-ticket']).status, 2, '--no-ticket needs --repo');
 });
+
+test('a ticket text with no ticket ID prints the --no-ticket command; with an ID or with --no-ticket it does not', () => {
+  const dir = fs.mkdtempSync(path.join(root, 'noid-'));
+  const out = path.join(dir, 'lines.md');
+  const from = path.join(dir, 't.txt');
+  fs.writeFileSync(from, 'Show the due date in the list\n');
+  let r = run(['--from', from, '--out', out]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^NOTE: no ticket ID in the text — if this task has no ticket, run: node .*lines\.mjs --from .*t\.txt --out .*lines\.md --no-ticket --repo <the repository>$/m);
+  assert.ok(fs.existsSync(out));
+  r = run(['--from', from, '--out', out, '--repo', '/some/repo']);
+  assert.match(r.stdout, /--no-ticket --repo \/some\/repo$/m);
+  fs.writeFileSync(from, 'TUW-243 show the due date\n');
+  assert.doesNotMatch(run(['--from', from, '--out', out]).stdout, /no ticket ID/);
+});
+
+// 2026-11-19: a line the user dropped was cut out by hand and every later line got a new number.
+import { dropLine, seedCheck } from '../scripts/lines.mjs';
+import { droppedLines } from '../scripts/check-ticket-lines.mjs';
+
+const THREE = '# Lines (the ticket, verbatim, 2026-11-19)\r\n\r\nT1. The list shows every subject.\r\nT2. Drafts stay hidden.\r\nT3. A late hand-in is marked late.\r\n';
+
+test("--drop T2 with the user's words keeps T3 as T3 and changes no other byte of the file", () => {
+  const file = path.join(fs.mkdtempSync(path.join(root, 'drop-')), 'lines.md');
+  fs.writeFileSync(file, THREE);
+  const r = run(['--drop', 'T2', '--words', 'leave the drafts rule for now', '--out', file]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^LINES: T2 dropped by the user: "leave the drafts rule for now" — .*no line has a new number\n$/);
+  const after = fs.readFileSync(file, 'utf8');
+  assert.equal(after, THREE.replace('T2. Drafts stay hidden.', 'T2. [dropped by the user: "leave the drafts rule for now"] Drafts stay hidden.'));
+  assert.deepEqual(readLines(after).map((l) => l.slice(0, 3)), ['T1:', 'T2:', 'T3:']);
+  assert.equal(readLines(after)[2], 'T3: A late hand-in is marked late.');
+  assert.deepEqual(droppedLines(after), [2]);
+});
+
+test('--drop is refused with no words, with words under 8 characters, twice, for a number that is not there, and for the last line left', () => {
+  const file = path.join(fs.mkdtempSync(path.join(root, 'drop-')), 'lines.md');
+  fs.writeFileSync(file, THREE);
+  for (const [args, why] of [
+    [['--drop', 'T2', '--out', file], /--words "<the user's words>" \(at least 8 characters\)/],
+    [['--drop', 'T2', '--words', 'skip it', '--out', file], /at least 8 characters/],
+    [['--drop', 'T2', '--words', '   a   b  ', '--out', file], /at least 8 characters/],
+    [['--drop', 'T9', '--words', 'leave it for later', '--out', file], /T9 is not in the lines file \(it has T1\.\.T3\)/],
+    [['--drop', '2', '--words', 'leave it for later', '--out', file], /--drop needs one line number/],
+  ]) {
+    const r = run(args);
+    assert.equal(r.status, 2, args.join(' ') + '\n' + r.stdout);
+    assert.match(r.stderr, why);
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), THREE, 'a refused drop writes nothing');
+  assert.equal(run(['--drop', 'T2', '--words', 'leave it for later', '--out', file]).status, 0);
+  const twice = run(['--drop', 't2', '--words', 'leave it for later', '--out', file]);
+  assert.equal(twice.status, 2);
+  assert.match(twice.stderr, /T2 is dropped already/);
+  assert.equal(run(['--drop', 'T1', '--words', 'leave it for later', '--notes', path.dirname(file)]).status, 0, '--notes names the folder of lines.md');
+  const last = run(['--drop', 'T3', '--words', 'leave it for later', '--out', file]);
+  assert.equal(last.status, 2);
+  assert.match(last.stderr, /T3 is the last ticket line left/);
+  assert.deepEqual(droppedLines(fs.readFileSync(file, 'utf8')), [1, 2]);
+});
+
+test('--drop refuses a file whose numbers are not in order, and words that would end the mark early stay inside it', () => {
+  assert.throws(() => dropLine('T1. one line here\nT3. another line here\n', 'T2', 'leave it for later'), /does not start with "T2\."/);
+  const d = dropLine('T1. one line here\nT2. another line here\n', 'T1', 'he said "no"] to this one');
+  assert.deepEqual(droppedLines(d.text), [1]);
+  assert.equal(readLines(d.text)[1], 'T2: another line here');
+});
+
+test('--seed-check writes one [Tn] line per ticket line that is not dropped and never overwrites a check file', () => {
+  const dir = fs.mkdtempSync(path.join(root, 'seed-'));
+  const file = path.join(dir, 'lines.md'), check = path.join(dir, 'check.md');
+  fs.writeFileSync(file, dropLine(THREE, 'T2', 'leave the drafts rule for now').text);
+  const r = run(['--seed-check', check]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^CHECK LINES: 2 seeded \(T1, T3\) — /);
+  const text = fs.readFileSync(check, 'utf8');
+  assert.deepEqual(text.split('\n').filter((l) => l.startsWith('- ')), ['- [T1] The list shows every subject.', '- [T3] A late hand-in is marked late.']);
+  fs.writeFileSync(check, '- [T1] my own line\n');
+  const again = run(['--seed-check', check, '--out', file]);
+  assert.equal(again.status, 2, again.stdout);
+  assert.match(again.stderr, /check\.md exists: it is not overwritten/);
+  assert.equal(fs.readFileSync(check, 'utf8'), '- [T1] my own line\n');
+  assert.equal(run(['--seed-check', path.join(dir, 'none', 'check.md')]).status, 2, 'no lines file beside it');
+  assert.equal(seedCheck('T1. only line here\n').count, 1);
+});
+
+test('--seed-check alone with --notes <dir> writes check.md of that folder (the form the printed step uses)', () => {
+  const dir = fs.mkdtempSync(path.join(root, 'seed-notes-'));
+  fs.writeFileSync(path.join(dir, 'lines.md'), THREE);
+  const r = run(['--seed-check', '--notes', dir]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^CHECK LINES: 3 seeded \(T1, T2, T3\) — /);
+  assert.equal(fs.readFileSync(path.join(dir, 'check.md'), 'utf8').split('\n').filter((l) => /^- \[T\d\] /.test(l)).length, 3);
+  const again = run(['--seed-check', '--notes', dir]);
+  assert.equal(again.status, 2);
+  assert.match(again.stderr, /check\.md exists: it is not overwritten/);
+  const none = run(['--seed-check']);
+  assert.equal(none.status, 2);
+  assert.match(none.stderr, /give the lines file/);
+  const drop = run(['--drop', 'T1', '--words', 'leave it for later']);
+  assert.equal(drop.status, 2, 'a drop names its lines file');
+  assert.match(drop.stderr, /give the lines file: --out <notes>\/lines\.md or --notes <dir>/);
+});

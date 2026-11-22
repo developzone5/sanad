@@ -14,12 +14,15 @@ const skip = !fs.existsSync(script) ? 'no scripts/eduquest/check-specs.mjs next 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'check-specs-'));
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 // git must not find a repository above the temp folders.
-const env = { ...process.env, GIT_CEILING_DIRECTORIES: root };
+const env = {
+  ...process.env, GIT_CEILING_DIRECTORIES: root,
+  GIT_CONFIG_GLOBAL: path.join(root, 'no-global-config'), GIT_CONFIG_NOSYSTEM: '1',
+};
 
 function repoFixture() {
   const repo = fs.mkdtempSync(path.join(root, 'repo-'));
-  execFileSync('git', ['init', '-q'], { cwd: repo, windowsHide: true });
-  for (const dir of ['EduQuest', 'eduquest-frontend/src']) fs.mkdirSync(path.join(repo, dir), { recursive: true });
+  for (const dir of ['.git/objects', '.git/refs', 'EduQuest', 'eduquest-frontend/src']) fs.mkdirSync(path.join(repo, dir), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
   return repo;
 }
 const run = (cwd, args) => spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', env, windowsHide: true });
@@ -49,4 +52,42 @@ test('outside a repository with no --repo it fails with the usage line; --repo s
   const given = run(outside, [out, '--repo', repo]);
   assert.equal(given.status, 0, given.stdout + given.stderr);
   assert.ok(same(spec(out, 'backend-full.json').cwd, path.join(repo, 'EduQuest')));
+});
+
+test('the gate and local pre-review share the app build info only', { skip }, async () => {
+  const { planChecks } = await import('../scripts/pre-review.mjs');
+  const repo = repoFixture();
+  const frontend = path.join(repo, 'eduquest-frontend');
+  const tsc = path.join(frontend, 'node_modules', 'typescript', 'bin', 'tsc');
+  fs.mkdirSync(path.dirname(tsc), { recursive: true });
+  fs.writeFileSync(tsc, '');
+  fs.writeFileSync(path.join(frontend, 'package.json'), '{}');
+  fs.writeFileSync(path.join(frontend, 'tsconfig.json'), JSON.stringify({
+    files: [],
+    references: [{ path: './tsconfig.app.json' }, { path: './tsconfig.node.json' }],
+  }));
+  fs.writeFileSync(path.join(frontend, 'src', 'app.ts'), '');
+  const { checks } = planChecks({
+    repo, base: 'HEAD', node: process.execPath, remote: null,
+    set: { files: ['eduquest-frontend/src/app.ts'], deleted: [] },
+  });
+  const app = checks.find(check => check.args?.includes('tsconfig.app.json'));
+  const node = checks.find(check => check.args?.includes('tsconfig.node.json'));
+
+  const out = path.join(root, 'out-incremental');
+  const r = run(repo, [out]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const { args } = spec(out, 'frontend-tsc.json');
+  const cache = args.at(-1);
+  assert.deepEqual(args, ['node_modules/typescript/bin/tsc', '--noEmit', '--project', 'tsconfig.app.json',
+    '--incremental', '--tsBuildInfoFile', app.args.at(-1)]);
+  assert.ok(same(path.dirname(cache), os.tmpdir()));
+  assert.ok(path.relative(repo, cache).startsWith('..' + path.sep));
+  assert.notEqual(cache, node.args.at(-1));
+
+  const other = repoFixture();
+  const otherOut = path.join(root, 'out-other-worktree');
+  const otherRun = run(other, [otherOut]);
+  assert.equal(otherRun.status, 0, otherRun.stdout + otherRun.stderr);
+  assert.notEqual(cache, spec(otherOut, 'frontend-tsc.json').args.at(-1));
 });

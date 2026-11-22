@@ -17,8 +17,17 @@
 // so a task planned small turned big only on its diff — SIZE GREW — when the expert planning step
 // before code was already missed).
 //
-// Usage: node size-check.mjs --repo <path> (--base <ref> | --files <a,b,...> [--names <n1,n2,...>]) [--was <size>] [--json]
-// Exit 0: sized (and not grown). 1: --was given and the change grew. 2: usage error.
+//
+// 2026-11-19: the answer as data. --json also holds `allCallers` (every caller row; the text prints 12 and a
+// "+N more" note that a reader once took for a function name), `testsOnly` (every changed file is a test file and
+// no other code uses one of them) and the signal `afterSave` (a changed function saves and then calls another
+// system; it never raises the size). The changed files come from change-set.mjs: a FOREIGN? answer (another
+// session's folder, more than 200 untracked files) ends the run with that one line before any file is read.
+// --from <commit> --at <commit> is the range form: only what differs between two exact commits, for a re-check
+// after a fix (the base form always compares with the merge base, so after an amend it sized the whole PR again).
+//
+// Usage: node size-check.mjs --repo <path> (--base <ref> | --from <commit> --at <commit> | --files <a,b,...> [--names <n1,n2,...>]) [--was <size>] [--json]
+// Exit 0: sized (and not grown). 1: --was given and the change grew. 2: usage error, or not sized (FOREIGN?).
 import fs from 'node:fs';
 import path from 'node:path';
 import { builtinModules, createRequire } from 'node:module';
@@ -26,6 +35,7 @@ import { execFileSync } from 'node:child_process';
 import { readStack } from './stack.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { isMain } from './is-main.mjs';
+import { changeSet, foreignLine } from './change-set.mjs';
 
 export const SIZES = ['tiny', 'small', 'medium', 'big'];
 const CODE = /\.(?:cs|[cm]?[jt]sx?|py|go|java|kt|rb|php|sql|razor|cshtml|vue|svelte)$/i;
@@ -74,7 +84,12 @@ export const SIGNALS = {
   bothSides: { size: 'medium', seat: 'the page rule and the server rule agree (the same cases tested on both)', label: 'server and page code in one change' },
   // Does not raise the size; adds the Client state lens (the seat on a panel, its checks in every review brief).
   clientState: { size: 'small', seat: 'Client state checks (the Client state seat on a panel)', label: 'client state (URL, cache, storage)' },
+  // 2026-11-19: does not raise the size either; it adds the after-save questions to the review. It is found by
+  // patterns in the changed function itself, so its label says what it cannot see.
+  afterSave: { size: 'small', seat: 'After-save checks (the call fails, times out, runs twice or arrives late)', label: 'a call to another system after a save (a call inside an unchanged helper is not seen)' },
 };
+// What the afterSave signal cannot see, for a reader of the JSON when the signal is absent.
+export const AFTER_SAVE_LIMIT = 'afterSave reads the changed function only (a plan: the named one): a call to another system inside a helper the change does not touch is not seen';
 
 // A file that names any DbContext type (AppDbContext, GetRequiredService<AppDbContext>(), an
 // IDbContextFactory<…>) or a DbSet is a database file, whatever its local variable is called
@@ -117,7 +132,24 @@ const RE = {
   infra: /(?:^|\/)(?:Dockerfile[^/]*|[^/]*compose[^/]*\.ya?ml|nginx[^/]*\.conf|appsettings[^/]*\.json|\.env[^/]*|vite\.config\.[cm]?[jt]s|next\.config\.[cm]?[jt]s|Program\.cs|Startup\.cs|web\.config)$|(?:^|\/)\.github\/workflows\//i,
   lockfile: /(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|packages\.lock\.json|Directory\.Packages\.props|Pipfile\.lock|poetry\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|composer\.lock)$/i,
   depLine: /^\s*"(?:@[\w.-]+\/)?[\w.-]+"\s*:\s*"[~^<>=]*[\dx*]|<PackageReference\b|<PackageVersion\b/,
+  // afterSave (2026-11-19). A save: the unit of work or a set-based write is sent to the database.
+  saved: /\bSaveChanges(?:Async)?\s*\(|\bExecute(?:Update|Delete)(?:Async)?\s*\(|\bExecuteSql\w*\s*\(|\.\s*Commit(?:Async|Transaction(?:Async)?)?\s*\(|\bBulk(?:Insert|Update|Delete|Merge)\w*\s*\(|\.\s*(?:save|saveAll|saveChanges|commit|insertOne|insertMany|updateOne|updateMany|deleteOne|deleteMany|bulkWrite|bulkCreate|createMany|upsert)\s*\(|\bprisma\s*\.\s*\w+\s*\.\s*(?:create|update|delete)\w*\s*\(|\$transaction\s*\(/,
+  // A call to another system: an HTTP client call, a queue or bus send, or a member call on a value whose name
+  // ends like a client of one (`_coreApiClient.SyncAsync(`, `emailSender.Send(`, `jobQueue.Enqueue(`).
+  outbound: /\bnew\s+HttpClient\b|\bCreateClient\s*\(|\.\s*(?:PostAsJsonAsync|PutAsJsonAsync|PatchAsJsonAsync|PostAsync|PutAsync|PatchAsync|GetFromJsonAsync|GetStringAsync|GetStreamAsync|SendAsync|SendMessageAsync|SendMessagesAsync|PublishAsync|Publish|EnqueueAsync|Enqueue|ProduceAsync|BasicPublish|sendToQueue|sendMessage|publish|enqueue)\s*(?:<[^>()]*>)?\s*\(|\bBackgroundJob\s*\.|(?<![\w$.])(?:fetch|axios|got|ky)\s*(?:\.\s*\w+\s*)?\(|(?<![\w$])_?\w*(?:[Cc]lient|[Gg]ateway|[Pp]ublisher|[Pp]roducer|[Ww]ebhook|[Nn]otifier|[Ss]ender|[Qq]ueue|[Bb]us|[Aa]pi)\s*\??\.\s*\w+\s*(?:<[^>()]*>)?\s*\(/,
 };
+// One function's code lines (codeOnly): whether it saves and, after that save, calls another system. The order is
+// the order of the lines; a call before the first save is another risk and is not this signal.
+function savesThenCalls(code) {
+  for (let i = 0; i < code.length; i++) {
+    const m = RE.saved.exec(code[i]);
+    if (!m) continue;
+    if (RE.outbound.test(code[i].slice(m.index + m[0].length))) return true;
+    for (let k = i + 1; k < code.length; k++) if (RE.outbound.test(code[k])) return true;
+    return false;
+  }
+  return false;
+}
 // Signals are read in code only (codeOnly below): a word in a comment, an i18n key or a log text is no
 // signal. These few are code that lives inside string text, so they are read in the whole line: SQL (in
 // upper case, as written in code), the multipart and download headers, and the browser event names.
@@ -160,11 +192,42 @@ function git(repo, args, { allowFail = false } = {}) {
   } catch (error) { if (allowFail) return ''; throw error; }
 }
 
+// A FOREIGN? answer of the change set: nothing was read. Its message is the shared line (foreignLine).
+export class ForeignError extends Error {
+  constructor(foreign) { super(foreignLine(foreign)); this.name = 'ForeignError'; this.foreign = foreign; }
+}
+// The range form: each of the two names is resolved once to a full commit id; a name that is no commit is refused.
+// `ancestor` is false when <from> is not an ancestor of <at> (an amend, a rebase): the two trees are still
+// compared, and the answer says so.
+function resolveRange(repo, range) {
+  const id = (label, ref) => {
+    if (typeof ref !== 'string' || !ref || ref.startsWith('-')) throw new Error(`${label} must be a commit, not ${JSON.stringify(ref)}`);
+    const full = git(repo, ['rev-parse', '--verify', '--quiet', ref + '^{commit}'], { allowFail: true }).trim();
+    if (!full) throw new Error(`${label} ${ref} is not a commit in this repository`);
+    return full;
+  };
+  const from = id('--from', range.from), at = id('--at', range.at);
+  let ancestor = true;
+  try { git(repo, ['merge-base', '--is-ancestor', from, at]); } catch { ancestor = false; }
+  return { from, at, ancestor };
+}
+
 // Changed files since the merge base with <base>, committed and not, as added/removed lines. A pure
 // rename and a binary file have no lines: they go to `extra.renamed` ("old → new") and `extra.binary`
 // (2026-11-12: both were dropped without a word, and a new untracked picture counted as code lines).
+//
+// 2026-11-19: the merge base and the untracked files come from change-set.mjs, the one list every tool reads. Its
+// FOREIGN? answer ends the run here, before any untracked file is read (another session's folder was 1,498 files,
+// each read line by line: 852 s).
+// The range form: `base` is { from, at }, two exact commits. Only `git diff <from> <at>` is read: no merge base,
+// no work folder, no untracked file. It also compares a commit with its amended copy, which is not its child.
 export function readDiff(repo, base, extra = {}) {
-  const from = git(repo, ['merge-base', base, 'HEAD']).trim();
+  const range = base && typeof base === 'object' ? base : null;
+  // A name that starts with `-` would be read by git as an option.
+  if (range) for (const ref of [range.from, range.at]) if (typeof ref !== 'string' || !ref || ref.startsWith('-')) throw new Error(`the range form needs two commits, not ${JSON.stringify(ref)}`);
+  const set = range ? null : changeSet(repo, base);
+  if (set && set.foreign.length) throw new ForeignError(set.foreign);
+  const from = range ? range.from : set.mergeBase;
   const files = new Map();
   extra.renamed = []; extra.binary = [];
   let cur = null, oldName = '', block = null;
@@ -173,7 +236,7 @@ export function readDiff(repo, base, extra = {}) {
     if (block.binary) extra.binary.push(block.name);
     else if (block.renameFrom && block.renameTo) extra.renamed.push(`${block.renameFrom} → ${block.renameTo}`);
   };
-  for (const line of git(repo, ['diff', '-U0', '--no-color', '--no-ext-diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', from]).split(/\r?\n/)) {
+  for (const line of git(repo, ['diff', '-U0', '--no-color', '--no-ext-diff', '--find-renames', '--src-prefix=a/', '--dst-prefix=b/', from, ...(range ? [range.at] : [])]).split(/\r?\n/)) {
     if (line.startsWith('diff --git ')) {
       endBlock();
       const m = /^diff --git "?a\/(.+?)"? "?b\/(.+?)"?$/.exec(line);
@@ -208,7 +271,7 @@ export function readDiff(repo, base, extra = {}) {
     else if (line.startsWith('-')) cur.removed.push(line.slice(1));
   }
   endBlock();
-  for (const name of git(repo, ['ls-files', '-z', '--others', '--exclude-standard']).split('\0').filter(Boolean)) {
+  for (const name of range ? [] : set.untracked) {
     let bytes; try { bytes = fs.readFileSync(path.join(repo, name)); } catch { continue; }
     // Git's own test: a NUL byte in the first 8000 bytes means a binary file.
     if (bytes.subarray(0, 8000).includes(0)) { extra.binary.push(name); continue; }
@@ -270,6 +333,12 @@ export function signals(files, { plan = false, repo } = {}) {
     if (server && repo) {
       if (isBackgroundFile(repo, f.name)) add('concurrency', base);
       else if (!plan && enclosingCode(repo, f).some(code => code.some(l => RE.concurrency.test(l)))) add('concurrency', base);
+    }
+    // 2026-11-19: a changed function (a plan: a named one) that saves and then calls another system, read whole.
+    // Server code, or a file that names a database handle: a page's `form.save()` and `fetch(` are not this.
+    if (server || db) {
+      if (plan) { for (const d of f.named || []) if (savesThenCalls(d.code)) add('afterSave', `${base}:${d.name}`); }
+      else if (repo && enclosingCode(repo, f).some(savesThenCalls)) add('afterSave', base);
     }
   }
   if (sides.server && sides.page) found.set('bothSides', [sides.server, sides.page]);
@@ -711,18 +780,41 @@ function objectAt(lines, i) {
 }
 // The member of an object literal that holds line i: `{ object, member, at, exported }` (member '' when its key is
 // no plain name: a spread, a computed key), or null outside an object or on its closing line.
+// 2026-11-20 (fix round): which lines hold code, from the one reader of comments (codeLines), kept per file text. A
+// comment line is a blank-free line with no code: // lines, /* */ lines and the inside of a block comment even when
+// its lines have no leading star.
+const codeMaps = new WeakMap();
+function codeMapOf(lines) {
+  let m = codeMaps.get(lines);
+  if (!m) { m = codeLines(lines.join('\n')); codeMaps.set(lines, m); }
+  return m;
+}
 function memberAt(lines, i) {
   if (!String(lines[i] || '').trim()) return null;
+  const isCode = codeMapOf(lines);
+  const isComment = (k) => Boolean(String(lines[k]).trim()) && !isCode[k];
   const o = objectAt(lines, i);
   if (!o) return null;
   let first = o.at + 1;
   while (first < lines.length && !String(lines[first]).trim()) first++;
   const mi = indent(lines[first]);
   if (indent(lines[i]) < mi) return null;
-  for (let k = i; k > o.at; k--) {
-    if (!String(lines[k]).trim() || indent(lines[k]) !== mi || /^\s*[\])}]/.test(lines[k])) continue;
-    const key = /^\s*(?:async\s+)?\*?\s*([A-Za-z_$][\w$]*)\s*(?::|\(|,|$)/.exec(lines[k]);
-    return { object: o.name, member: key ? key[1] : '', at: k, exported: o.exported };
+  // 2026-11-20 (promote-students task): a comment line (//, /* */, a JSDoc `*` line) is never a member key; one
+  // above a member belongs to the member below it. It was taken as the key line, so the member had no name and
+  // its callers read as unknown (size big).
+  // 2026-11-20 (fix round): comment lines come from the code map, not a pattern: "*name(" is a generator member, and a
+  // block comment whose lines have no leading star is still a comment.
+  let from = i;
+  if (isComment(i)) {
+    let n = i + 1;
+    while (n < lines.length && (!String(lines[n]).trim() || isComment(n))) n++;
+    if (n < lines.length && indent(lines[n]) === mi && !/^\s*[\])}]/.test(lines[n])) from = n;
+  }
+  for (let k = from; k > o.at; k--) {
+    if (!String(lines[k]).trim() || isComment(k) || indent(lines[k]) !== mi || /^\s*[\])}]/.test(lines[k])) continue;
+    // 2026-11-20 (fix round): a quoted key ('get-x', "save") and a getter, setter, async or static member read as named members.
+    const key = /^\s*(?:(?:static|async|get|set)\s+)*\*?\s*(?:([A-Za-z_$][\w$]*)|'([^']+)'|"([^"]+)")\s*(?::|\(|,|$)/.exec(lines[k]);
+    return { object: o.name, member: key ? (key[1] || key[2] || key[3]) : '', at: k, exported: o.exported };
   }
   return null;
 }
@@ -1150,7 +1242,7 @@ function jsSkipLines(repo, file) {
 // class's Apply: 18 "callers", sized big; it has 2).
 const CS = /\.cs$/i;
 const TYPE_DECL = /^\s*(?:(?:public|private|protected|internal|static|sealed|abstract|partial|readonly|ref|unsafe|file|new)\s+)*(?:class|record(?:\s+(?:class|struct))?|struct|interface)\s+([A-Za-z_]\w*)/;
-function declaringType(lines, at) {
+export function declaringType(lines, at) {
   if (at == null || !lines[at]) return { name: '', names: [] };
   const depth = indent(lines[at]);
   for (let i = at - 1; i >= 0; i--) {
@@ -1163,7 +1255,7 @@ function declaringType(lines, at) {
 }
 // The C# types that derive from the given ones (a class or interface whose base list names one of them, generic
 // arguments left out), with the interfaces each lists, through up to three levels (2026-11-18).
-function derivedTypeNames(repo, names) {
+export function derivedTypeNames(repo, names) {
   const out = new Set(), known = new Set(names);
   let level = [...names];
   for (let pass = 0; pass < 3 && level.length; pass++) {
@@ -1316,21 +1408,24 @@ function memberCallers(repo, { name, file, object, member }) {
   if (!member) { row.unresolved = [file]; return row; }
   const follow = followExport(repo, file, object), found = [];
   const use = (local, ns) => new RegExp(String.raw`(?<![\w$.])` + (ns ? escapeRe(ns) + String.raw`\s*\??\.\s*` + escapeRe(local) : escapeRe(local)) + String.raw`\s*\??\.\s*` + escapeRe(member) + String.raw`(?![\w$])`, 'g');
+  // 2026-11-20 (fix round): a member with a quoted key is also used as obj['key']; that form is read on the line with its
+  // strings kept (codeOnly blanks them), so the matcher is marked `raw`.
+  const useKey = (local, ns) => Object.assign(new RegExp(String.raw`(?<![\w$.])` + (ns ? escapeRe(ns) + String.raw`\s*\??\.\s*` + escapeRe(local) : escapeRe(local)) + String.raw`\s*\??\.?\s*\[\s*['"]` + escapeRe(member) + String.raw`['"]\s*\]`, 'g'), { raw: true });
   const scan = (f, matchers) => {
     const skip = jsSkipLines(repo, f);
     fileText(repo, f).split(/\r?\n/).forEach((text, i) => {
       if (skip.has(i + 1)) return;
-      const code = codeOnly(text);
+      const code = codeOnly(text), keep = text.replace(/\/\/.*$/, '');
       let n = 0;
-      for (const re of matchers) n += [...code.matchAll(re)].length;
+      for (const re of matchers) n += [...(re.raw ? keep : code).matchAll(re)].length;
       if (n) found.push({ file: f, line: i + 1, n });
     });
   };
-  scan(file, [use(object)]);
+  scan(file, [use(object), useKey(object)]);
   for (const f of follow.files) {
     if (f === file || SKIP_PATH.test(f)) continue;
-    const matchers = [...(follow.local.get(f) || [])].map(a => use(a));
-    for (const { ns, exported } of follow.ns.get(f) || []) matchers.push(use(exported, ns));
+    const matchers = [...(follow.local.get(f) || [])].flatMap(a => [use(a), useKey(a)]);
+    for (const { ns, exported } of follow.ns.get(f) || []) matchers.push(use(exported, ns), useKey(exported, ns));
     if (matchers.length) scan(f, matchers);
   }
   const sum = list => list.reduce((n, r) => n + r.n, 0);
@@ -1378,17 +1473,20 @@ function spelledByGit(repo, names) {
 }
 // `names` (plan mode only): the names the places list searched; each one defined in a planned file is read whole
 // and its callers are counted (plannedSymbols), as a diff counts the callers of each changed function.
-export function sizeTask({ repo, base, files: planned, names = null }) {
+// `range` ({ from, at }, in place of `base`): the range form of readDiff, sized as a diff.
+export function sizeTask({ repo, base, files: planned, names = null, range = null }) {
   const root = path.resolve(git(path.resolve(repo), ['rev-parse', '--show-toplevel']).trim());
   texts.clear();
   oldTexts.clear();
   importsCache.clear();
   skipCache.clear();
   jsListCache.clear(); stmtCache.clear(); indexCache.clear(); depsCache.clear(); hostedCache.clear();
-  const plan = !base;
+  const plan = !base && !range;
   const named = plan && names && names.length ? names : null;
   const extra = { renamed: [], binary: [] };
-  const files = plan ? spelledByGit(root, planned.map(n => n.replace(/\\/g, '/'))).map(name => ({ name, added: [], removed: [], hunks: [], named: named && KIND(name) === 'code' ? namedDefinitions(root, name, named) : [] })) : readDiff(root, base, extra);
+  const pinned = range ? resolveRange(root, range) : null;
+  const files = plan ? spelledByGit(root, planned.map(n => n.replace(/\\/g, '/'))).map(name => ({ name, added: [], removed: [], hunks: [], named: named && KIND(name) === 'code' ? namedDefinitions(root, name, named) : [] })) : readDiff(root, pinned || base, extra);
+  if (pinned) pinned.workFolder = rangeWorkFolder(root, pinned, files);
   const found = signals(files, { plan, repo: root });
   const moved = [];
   const symbols = plan ? plannedSymbols(files) : allChangedSymbols(root, files, moved);
@@ -1401,16 +1499,87 @@ export function sizeTask({ repo, base, files: planned, names = null }) {
   let stack = null; try { stack = readStack(root); } catch { /* not fatal */ }
   const read = [...new Set(files.flatMap(f => (f.named || []).map(d => `${path.basename(f.name)}:${d.name}`)))];
   const unread = named ? named.filter(n => !files.some(f => (f.named || []).some(d => d.name === n))) : [];
-  return { mode: plan ? 'plan' : 'diff', size, stack: stack && stack.line, signals: Object.fromEntries(found), roles: roles(size, found), callers: callerRows,
+  const tests = testsOnlyOf(root, files, extra);
+  const r = { mode: plan ? 'plan' : 'diff', size, stack: stack && stack.line, signals: Object.fromEntries(found), roles: roles(size, found), callers: callerRows,
     moreSymbols: Math.max(0, allRows.length - MAX_SYMBOLS), moved, files: files.length, codeFiles, lines, renamed: extra.renamed, binary: extra.binary,
-    names: named, read, unread };
+    names: named, read, unread,
+    // 2026-11-19: every row, in the order the functions were analysed. `callers` above stays the printed, capped list.
+    allCallers: allRows, testsOnly: tests.testsOnly, testsUsedBy: tests.usedBy, limits: [AFTER_SAVE_LIMIT] };
+  if (pinned) r.range = pinned;
+  return r;
+}
+
+// The range form reads each changed file's text, and searches callers, in the work folder. A changed file whose
+// text there is not the <at> commit's would be read at the wrong lines: that is refused by name. Other tracked
+// files that differ only make the caller search less exact: the answer carries `workFolder: false` and says so.
+function rangeWorkFolder(root, pinned, files) {
+  const differs = new Set(git(root, ['diff', '--name-only', '-z', pinned.at, '--']).split('\0').filter(Boolean));
+  const wrong = files.map(f => f.name).filter(n => differs.has(n));
+  if (wrong.length) throw new Error(`the work folder is not at ${pinned.at.slice(0, 10)} for ${wrong.slice(0, 3).join(', ')}${wrong.length > 3 ? ` and ${wrong.length - 3} more` : ''}: check that commit out, the range form reads the changed files from the work folder`);
+  return differs.size === 0;
+}
+
+/**
+ * Tests only (2026-11-19, owner rule 3: a change that touches only tests gets a light path). True when every
+ * changed file is a test file by its name (TEST_FILE), pure renames (both names) and binary files too, and no
+ * code that is not a test uses one of them. A file named like a test that other code imports (JS/TS, by its
+ * import path) or whose types other code names (C#) is product code under a test name: `usedBy` lists
+ * "<test file> ← <the file that uses it>" and the answer is false. Other languages are judged by name only.
+ */
+function testsOnlyOf(root, files, extra) {
+  const names = [...new Set([...files.map(f => f.name), ...extra.binary, ...extra.renamed.flatMap(r => r.split(' → '))])];
+  if (!names.length || !names.every(n => TEST_FILE.test(n))) return { testsOnly: false, usedBy: [] };
+  const usedBy = usedByOtherCode(root, names);
+  return { testsOnly: !usedBy.length, usedBy };
+}
+const stripExt = n => n.replace(/\.(?:d\.ts|[cm]?[jt]sx?)$/i, '');
+// A test runner's own config names its setup files by path: that is the test run, not product code.
+const TEST_CONFIG = /(?:^|\/)(?:vite|vitest|jest|playwright|karma|cypress|wdio)(?:\.[\w-]+)?\.config\.[cm]?[jt]s$|(?:^|\/)vitest\.workspace\.[cm]?[jt]s$/i;
+function usedByOtherCode(root, names) {
+  // What to search for: the import name of a JS/TS file (its base name with no extension), each type a C# file declares.
+  const wanted = new Map();
+  const want = (word, entry) => { if (!wanted.has(word)) wanted.set(word, []); wanted.get(word).push(entry); };
+  for (const name of names) {
+    if (JS.test(name)) want(stripExt(path.posix.basename(name)), { name, js: true });
+    else if (CS.test(name)) for (const line of fileText(root, name).split(/\r?\n/)) { const m = TYPE_DECL.exec(line); if (m) want(m[1], { name, type: m[1] }); }
+  }
+  const out = new Set(), words = [...wanted.keys()].filter(Boolean);
+  for (let i = 0; i < words.length; i += 100) {
+    const args = ['grep', '--untracked', '-n', '-I', '--no-color', '-F'];
+    for (const w of words.slice(i, i + 100)) args.push('-e', w);
+    for (const l of git(root, args, { allowFail: true }).split(/\r?\n/)) {
+      const m = /^(.+?):(\d+):(.*)$/.exec(l);
+      if (!m || !CODE.test(m[1]) || TEST_FILE.test(m[1]) || SKIP_PATH.test(m[1]) || TEST_CONFIG.test(m[1])) continue;
+      const [, file, , text] = m;
+      for (const w of words.slice(i, i + 100)) {
+        if (!text.includes(w)) continue;
+        for (const e of wanted.get(w)) {
+          if (e.js) {
+            // An import path that leads to the file: a relative one resolved from the importing file, or an
+            // aliased one (`@/tests/helpers`) whose folders are the end of the file's own path.
+            if (!JS.test(file)) continue;
+            const target = stripExt(e.name);
+            for (const s of text.matchAll(/['"`]([^'"`\s]+)['"`]/g)) {
+              const spec = stripExt(s[1]);
+              const hit = spec.startsWith('.') ? [spec, spec + '/index'].some(p => path.posix.normalize(path.posix.join(path.posix.dirname(file), p)) === target)
+                : spec.split('/').length > 2 && /\b(?:import|require|from)\b/.test(text) && ('/' + target).endsWith('/' + spec.split('/').slice(1).join('/'));
+              if (hit) out.add(`${e.name} ← ${file}`);
+            }
+          } else if (CS.test(file) && new RegExp('(?<![\\w$])' + escapeRe(e.type) + '(?![\\w$])').test(codeOnly(text))) out.add(`${e.name} ← ${file}`);
+        }
+      }
+    }
+  }
+  return [...out].sort();
 }
 
 export function format(r, was) {
   const out = [];
   if (r.stack) out.push('Stack: ' + r.stack);
   const why = Object.entries(r.signals).map(([k, w]) => `${SIGNALS[k].label} (${w.join(', ')})`);
-  out.push(`SIZE: ${r.size} (${r.mode}) — ${why.length ? why.join('; ') : r.size === 'tiny' ? 'docs, tests, texts or styles only' : 'behavior code with no risk signal'}`);
+  // 2026-11-19: a change of test files only says so (the tests-only path of the loop reads `testsOnly` in the JSON).
+  out.push(`SIZE: ${r.size} (${r.mode}) — ${why.length ? why.join('; ') : r.size === 'tiny' ? (r.testsOnly ? 'tests only' : 'docs, tests, texts or styles only') : 'behavior code with no risk signal'}`);
+  if (r.range) out.push(`  range: ${r.range.from.slice(0, 10)} → ${r.range.at.slice(0, 10)}${r.range.ancestor ? '' : ' (the first is not an ancestor of the second: the two trees are compared)'}${r.range.workFolder === false ? '; other files in the work folder differ from the second commit, callers were searched there' : ''}`);
   out.push('  roles: ' + r.roles.join('; '));
   // A plan can count one name in two planned files: each of those rows then carries its file (file:Function).
   const twice = c => r.callers.some(d => d !== c && d.name === c.name);
@@ -1434,13 +1603,17 @@ function args(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--json') { o.json = true; continue; }
-    if (!['--repo', '--base', '--files', '--was', '--names'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
+    if (!['--repo', '--base', '--files', '--was', '--names', '--from', '--at'].includes(k) || argv[i + 1] === undefined) throw new Error('Unknown or empty option: ' + k);
     o[k.slice(2)] = argv[++i];
   }
-  if (!o.repo || (!o.base === !o.files)) throw new Error('--repo and exactly one of --base or --files are required.');
+  // The range form: --from and --at together. A --base given with them is not read (the brief's re-check passes
+  // both): the range is between the two commits, whatever the base is.
+  if (!o.from !== !o.at) throw new Error('--from and --at go together (two exact commits).');
+  if (o.from && o.files) throw new Error('--from and --at size a real change, not planned --files.');
+  if (!o.repo || (!o.from && !o.base === !o.files)) throw new Error('--repo and exactly one of --base or --files are required.');
   if (o.was && !SIZES.includes(o.was)) throw new Error('--was must be one of ' + SIZES.join(', ') + '.');
   // The real diff is read as it is; --names only tells a plan which code it will change.
-  if (o.names !== undefined && o.base) throw new Error('--names goes with --files (plan mode), not with --base.');
+  if (o.names !== undefined && (o.base || o.from)) throw new Error('--names goes with --files (plan mode), not with --base.');
   if (o.names !== undefined && !commaList(o.names).length) throw new Error('--names needs at least one name.');
   return o;
 }
@@ -1449,11 +1622,14 @@ const commaList = s => s ? s.split(',').map(n => n.trim()).filter(Boolean) : nul
 if (isMain(import.meta.url)) {
   try {
     const o = args(process.argv.slice(2));
-    const r = sizeTask({ repo: o.repo, base: o.base, files: commaList(o.files), names: commaList(o.names) });
+    const r = sizeTask({ repo: o.repo, base: o.from ? undefined : o.base, files: commaList(o.files), names: commaList(o.names), range: o.from ? { from: o.from, at: o.at } : null });
     process.stdout.write((o.json ? JSON.stringify(r) : format(r, o.was)) + '\n');
     process.exitCode = o.was && SIZES.indexOf(r.size) > SIZES.indexOf(o.was) ? 1 : 0;
   } catch (error) {
-    process.stderr.write('SIZE: ' + String(error.message).split('\n')[0] + '\nUsage: node size-check.mjs --repo <path> (--base <ref> | --files <a,b,...> [--names <n1,n2,...>]) [--was <size>] [--json]\n');
+    // FOREIGN? is no usage error: the shared line alone on stdout (one per folder), and once after "SIZE: " on
+    // stderr, where the brief reads why a size check failed.
+    if (error instanceof ForeignError) process.stdout.write(error.message + '\n');
+    process.stderr.write('SIZE: ' + String(error.message).split('\n')[0] + (error instanceof ForeignError ? '\n' : '\nUsage: node size-check.mjs --repo <path> (--base <ref> | --from <commit> --at <commit> | --files <a,b,...> [--names <n1,n2,...>]) [--was <size>] [--json]\n'));
     process.exitCode = 2;
   }
 }

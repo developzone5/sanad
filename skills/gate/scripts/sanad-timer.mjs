@@ -5,8 +5,9 @@
 //   node sanad-timer.mjs wait <notes-dir> <why…>          start a wait (the user, a machine, a stuck run)
 //   node sanad-timer.mjs pause <notes-dir> <why…>         other work in the middle (the user's side request)
 //   node sanad-timer.mjs resume <notes-dir>               back to the task: its last step goes on
-//   node sanad-timer.mjs report <notes-dir>               print each step's minutes and the total
-//   node sanad-timer.mjs request                          a new task was routed: write its first request time (Sanad Step 0)
+//   node sanad-timer.mjs report [notes-dir]               print each step's minutes and the total (no folder: this session's timer)
+//   node sanad-timer.mjs week [timers-dir]                totals of the saved timers of the last 7 days
+//   node sanad-timer.mjs request [--repo <path>]          a new task was routed: end the old timer, start the new one (Sanad Step 0)
 //   node sanad-timer.mjs end <notes-dir>                  the task is done: stop the hooks' idle marks
 //
 // 2026-11-09 (TUW-238): the user asked three times "how much time … which parts take too long", and the
@@ -26,8 +27,10 @@
 // before the first edit; a timer that ends or pauses stays named as the session's timer before
 // (sanad-timer-last-<id>), so the hooks never start the next task at a message of this one.
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isMain } from './is-main.mjs';
 
 const FILE = 'timer.tsv';
@@ -40,10 +43,76 @@ const PAUSED = 'paused: ';
 // The time Sanad routed the task: the hooks start the timer there (hooks/lib/timer-idle.cjs routedAt).
 const requestPointer = () => path.join(path.dirname(pointer()), path.basename(pointer()).replace('sanad-timer-active', 'sanad-task-start'));
 
-/** A new task was routed now: its first request. Without it the hooks guess the start and the report says so. */
-export function requestStart(now = new Date()) {
-  fs.mkdirSync(path.dirname(pointer()), { recursive: true });
-  fs.writeFileSync(requestPointer(), now.toISOString());
+/** The repo name a timer folder carries: the folder's git top, else the folder's own name (as the hooks name it). */
+function repoName(dir) {
+  const folder = path.resolve(dir || process.cwd());
+  let top = '';
+  try {
+    let at = folder;
+    while (at && !fs.existsSync(at)) { const up = path.dirname(at); if (up === at) break; at = up; }
+    top = execFileSync('git', ['-C', at, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, windowsHide: true }).trim();
+  } catch { /* not in a repository: the folder's own name */ }
+  return path.basename(top || folder).replace(/[^A-Za-z0-9_.-]/g, '_') || 'task';
+}
+
+/**
+ * A new task was routed now: its first request. 2026-11-19: an older task of this session that never ended is
+ * ended here, so the new task's marks go to a new timer. 2026-11-20: the new timer starts here too, with the
+ * mark "start: the user's request" and as this session's active timer. Before, it waited for the hooks to see
+ * a code edit in the session's own folder, and a task in another work tree ran with no timer at all, while
+ * `report` showed the old task. `repo` is the task's folder (--repo), else the current folder.
+ * Returns { ended, dir }: the timer it ended ('' for none) and the new timer's folder.
+ */
+export function requestStart(now = new Date(), { repo, unlessFresh = false } = {}) {
+  const state = path.dirname(pointer());
+  fs.mkdirSync(state, { recursive: true });
+  // `sanad.mjs start` asks again for a task whose `request` already ran: the timer of that request is kept
+  // (its start is the earlier time). Fresh = the active timer began with a request less than an hour ago.
+  if (unlessFresh) {
+    try {
+      const active = fs.readFileSync(pointer(), 'utf8').trim();
+      const first = active ? readMarks(active)[0] : null;
+      if (first && /^start: the user's request/.test(first.text) && now - first.at < 3600000) return { ended: '', dir: active };
+    } catch { /* none active */ }
+  }
+  let ended = '';
+  try {
+    const before = fs.readFileSync(pointer(), 'utf8').trim();
+    const last = before ? readMarks(before).pop() : null;
+    if (last && !(last.kind === 'step' && /^end(?: \(|$)/.test(last.text))) mark(before, 'step', 'end (auto: a new task was routed)', now);
+    if (before) { clearActive(before); ended = before; }
+  } catch { /* no active timer */ }
+  const name = repoName(repo);
+  const dir = path.join(state, 'timers', now.toISOString().replace(/[:.]/g, '').slice(0, 15) + '-' + name);
+  mark(dir, 'step', `start: the user's request — ${name}`, now);
+  fs.writeFileSync(pointer(), dir);
+  // The old request file (an older script wrote one) would start another timer at the next edit: gone.
+  try { fs.rmSync(requestPointer()); } catch { /* none */ }
+  return { ended, dir };
+}
+
+/** The folder the report reads with no folder given: this session's active timer, else the one before. */
+export function sessionTimer() {
+  for (const p of [pointer(), lastPointer()]) {
+    try { const dir = fs.readFileSync(p, 'utf8').trim(); if (dir && fs.existsSync(path.join(dir, FILE))) return dir; } catch { /* none */ }
+  }
+  return '';
+}
+
+// Budgets: seconds per stage and size (budgets.json). The size is SANAD_TASK_SIZE, else medium.
+const budgetsFile = () => process.env.SANAD_BUDGETS_FILE || path.join(path.dirname(fileURLToPath(import.meta.url)), 'budgets.json');
+/** Returns { map: Map(stage -> seconds) } or { error: text }. A zero, text or missing value is an error: no OVER then. */
+export function loadBudgets(size = process.env.SANAD_TASK_SIZE || 'medium') {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(budgetsFile(), 'utf8')); } catch (e) { return { error: `budgets.json cannot be read (${e.code || e.message})` }; }
+  const row = data && data[size];
+  if (!row || typeof row !== 'object') return { error: `budgets.json has no size "${size}"` };
+  const map = new Map();
+  for (const [stage, v] of Object.entries(row)) {
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return { error: `budgets.json: "${stage}" must be a number above 0` };
+    map.set(stage, v);
+  }
+  return { map };
 }
 
 /** Names the timer the hooks mark idle time on. A different timer that was running pauses. */
@@ -67,7 +136,7 @@ export function pause(dir, why, now = new Date()) {
 
 /** Back to the task: the last step before the pause goes on, and the timer is the active one again. */
 export function resume(dir, now = new Date()) {
-  const steps = readMarks(dir).filter((m) => m.kind === 'step' && m.text !== 'resumed');
+  const steps = readMarks(dir).filter((m) => m.kind === 'step' && m.text !== 'resumed' && !/^end(?: \(|$)/.test(m.text));
   const last = steps.length ? steps[steps.length - 1].text.replace(/^resumed: /, '') : 'work';
   setActive(dir, now);
   mark(dir, 'step', `resumed: ${last}`, now);
@@ -104,7 +173,9 @@ export function report(dir, now = new Date()) {
   const all = readMarks(dir);
   // A "side" line is a review that ran beside the stages ("review <start> <end>"): not a step of the timeline.
   const marks = all.filter((m) => m.kind !== 'side');
-  const beside = all.filter((m) => m.kind === 'side').map((m) => {
+  // A "run" side line is one proof or check start: "run <tool> <tree id>". It counts runs, not minutes.
+  const runs = all.filter((m) => m.kind === 'side' && m.text.startsWith('run ')).map((m) => m.text.split(' '));
+  const beside = all.filter((m) => m.kind === 'side' && !m.text.startsWith('run ')).map((m) => {
     const [name, from, to] = m.text.split(' ');
     return { name, minutes: Math.max(0, (new Date(to) - new Date(from)) / 60000) };
   }).filter((s) => s.name && Number.isFinite(s.minutes));
@@ -128,7 +199,7 @@ export function report(dir, now = new Date()) {
   for (const r of rows) {
     if (r.kind === 'wait') { byStage.set('waiting', (byStage.get('waiting') || 0) + r.minutes); continue; }
     // The automatic timer's first marks, by what happens in them: reading and planning, then code.
-    const name = r.text.replace(/^resumed: /, '').replace(/^start \(auto(?:, estimate)?\): the user's message.*$/, 'read and plan').replace(/^(?:start \(auto\): )?first code edit.*$/, 'code');
+    const name = r.text.replace(/^resumed: /, '').replace(/^start(?: \(auto(?:, estimate)?\))?: the user's (?:message|request).*$/, 'read and plan').replace(/^(?:start \(auto\): )?first code edit.*$/, 'code');
     if (name !== 'resumed') stage = name;
     if (isEnd(r)) continue;
     byStage.set(stage || name, (byStage.get(stage || name) || 0) + r.minutes);
@@ -150,12 +221,66 @@ export function report(dir, now = new Date()) {
     const clock = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     lines.push(`start: first request ${clock(marks[0].at)}${estimate} · first edit after ${fmt((edit.at - marks[0].at) / 60000).trim()} min`);
   }
+  const extra = [];
+  // 2026-11-19: the workflow minutes are the work that is neither reading and planning nor code. Report only.
+  const work = total - waited;
+  const read = byStage.get('read and plan') || 0, code = byStage.get('code') || 0;
+  extra.push(`workflow minutes ${fmt(Math.max(0, work - read - code)).trim()} (work ${fmt(work).trim()} minus read and plan ${fmt(read).trim()} and code ${fmt(code).trim()})`);
+  const budgets = loadBudgets();
+  if (budgets.error) extra.push(`budgets: ${budgets.error}; no OVER shown`);
+  else for (const [name, n] of byStage) {
+    const limit = budgets.map.get(name);
+    if (limit && n * 60 > limit) extra.push(`OVER: ${name} ${fmt(n).trim()} min, budget ${fmt(limit / 60).trim()} min`);
+  }
+  const perTool = new Map();
+  for (const [, tool, tree] of runs) { const e = perTool.get(tool) || { n: 0, trees: new Set() }; e.n++; e.trees.add(tree || '?'); perTool.set(tool, e); }
+  for (const [tool, e] of perTool) extra.push(`${tool}: ${e.n} run${e.n === 1 ? '' : 's'} on ${e.trees.size} tree${e.trees.size === 1 ? '' : 's'}`);
+  // The start line stays the last line (the ship brief reads it there).
+  const startAt = lines.findIndex((l) => l.startsWith('start: first request'));
+  lines.splice(startAt < 0 ? lines.length : startAt, 0, ...extra);
   return lines.join('\n');
+}
+
+/** The totals of the saved timers of the last 7 days (each <timers-dir>/<stamp>-<repo>/timer.tsv). */
+export function week(timersDir, now = new Date()) {
+  let names = [];
+  try { names = fs.readdirSync(timersDir); } catch { return `WEEK: no timers in ${timersDir}`; }
+  const t = { timers: 0, work: 0, workflow: 0, proof: 0, review: 0 };
+  for (const name of names) {
+    const dir = path.join(timersDir, name);
+    const marks = readMarks(dir).filter((m) => m.kind !== 'side');
+    if (!marks.length || now - marks[0].at > 7 * 86400000) continue;
+    const text = report(dir, now);
+    const num = (re) => { const m = re.exec(text); return m ? Number(m[1]) : 0; };
+    t.timers++;
+    t.work += num(/total \(work (\d+(?:\.\d+)?),/);
+    t.workflow += num(/^workflow minutes (\d+(?:\.\d+)?)/m);
+    t.proof += num(/[ ·]proof (\d+(?:\.\d+)?)/);
+    t.review += num(/[ ·]review (\d+(?:\.\d+)?)/);
+  }
+  const f = (n) => n.toFixed(1);
+  return `WEEK: ${t.timers} timers · work ${f(t.work)} min · workflow ${f(t.workflow)} min · proof ${f(t.proof)} min · review ${f(t.review)} min`;
 }
 
 if (isMain(import.meta.url)) {
   const [cmd, dir, ...words] = process.argv.slice(2);
-  if (cmd === 'request') { requestStart(); console.log('TIMER request: the task starts now'); process.exit(0); }
+  if (cmd === 'request') {
+    const at = process.argv.indexOf('--repo');
+    const { ended, dir: started } = requestStart(new Date(), { repo: at > 1 ? process.argv[at + 1] : '' });
+    console.log(`TIMER request: the task starts now; its timer is ${started}${ended ? `; the timer before (${ended}) was ended` : ''}`);
+    process.exit(0);
+  }
+  if (cmd === 'report' && !dir) {
+    const found = sessionTimer();
+    if (!found) { console.log('TIMER: no timer for this session'); process.exit(0); }
+    console.log(`TIMER folder: ${found}`);
+    console.log(report(found));
+    process.exit(0);
+  }
+  if (cmd === 'week') {
+    console.log(week(dir || path.join(process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state'), 'timers')));
+    process.exit(0);
+  }
   if (!cmd || !dir) {
     console.error('Usage: sanad-timer.mjs mark|wait|pause|resume|report|end <notes-dir> [step words…]');
     process.exit(2);

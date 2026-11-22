@@ -82,22 +82,25 @@ const tokenize = remembered(shellCommand.tokenize);
 // arbitrary helper script is not verification. Matched at the START (after env-var
 // prefixes / benign wrappers), never as a free substring — so `git commit -m
 // "fix go test"` or `echo run pytest` never spoof a verify.
+// 2026-11-20: a name must be a whole word (END): `vitest-ish`, `pytest-foo`, `make tests`, `docker buildx` were
+// credited as verification, with or without an `X=` prefix before them.
+const END = '(?![\\w-])';
 const VERIFY_BODY =
-  'dotnet\\s+(build|test|publish)\\b|' +
-  '(npm|pnpm|yarn|bun)\\s+(test\\b|build\\b|run\\s+(build|test|typecheck|check|lint)(?:[\\s:]|$))|' +
-  'npx\\s+(vitest|jest|playwright\\s+test|tsc|mocha|eslint)\\b|' +
-  'deno\\s+(test|check)\\b|node\\s+--(check|test)\\b|' +
-  'pytest\\b|python3?\\s+-m\\s+(pytest|unittest)\\b|' +
-  'go\\s+(test|build|vet)\\b|cargo\\s+(test|build|check|clippy)\\b|' +
-  'mvn\\b|gradlew?\\b|make\\s+(test|check|build)|' +
-  'mix\\s+(test|compile)|swift\\s+(test|build)|flutter\\s+(test|build)|' +
-  'docker\\s+(compose\\s+)?build|' +
-  'vitest|jest\\b|phpunit|rspec|tsc\\b';
+  'dotnet\\s+(build|test|publish)' + END + '|' +
+  '(npm|pnpm|yarn|bun)\\s+(test' + END + '|build' + END + '|run\\s+(build|test|typecheck|check|lint)(?:[\\s:]|$))|' +
+  'npx\\s+(vitest|jest|playwright\\s+test|tsc|mocha|eslint)' + END + '|' +
+  'deno\\s+(test|check)' + END + '|node\\s+--(check|test)\\b|' +
+  'pytest' + END + '|python3?\\s+-m\\s+(pytest|unittest)' + END + '|' +
+  'go\\s+(test|build|vet)' + END + '|cargo\\s+(test|build|check|clippy)' + END + '|' +
+  'mvn' + END + '|gradlew?' + END + '|make\\s+(test|check|build)' + END + '|' +
+  'mix\\s+(test|compile)' + END + '|swift\\s+(test|build)' + END + '|flutter\\s+(test|build)' + END + '|' +
+  'docker\\s+(compose\\s+)?build' + END + '|' +
+  'vitest' + END + '|jest' + END + '|phpunit' + END + '|rspec' + END + '|tsc' + END;
 const VERIFY_ANCHORED = new RegExp('^(?:' + VERIFY_BODY + ')', 'i');
 
 function verificationWords(seg) {
   const s = String(seg).trim()
-    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/, '') // VAR=val prefixes
+    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*/, '') // VAR=val prefixes
     .replace(/^(?:sudo|time|env|command|timeout\s+\d+[smh]?)\s+/, '');      // benign wrappers
   const tokens = tokenize(s);
   if (!tokens.length) return [];
@@ -147,11 +150,11 @@ function segmentIsVerify(seg) {
   if (/^(?:npx\s+)?tsc\b/i.test(command) && /(?:^|\s)(?:--listFilesOnly|--showConfig|--help|--version|-h|-v)(?:\s|=|$)/i.test(command)) return false;
   // A red-proof run that ends with green on the fixed tree runs the tests on the code as it is: a test run
   // (2026-11-11, TUW-242: a proved tree left the stop asking for tests on every turn of a paused task). Its
-  // other modes (warm, drop copies, restore, show the remote command) and a run without --then-green test
-  // no fixed tree.
+  // other modes (warm, drop copies, restore, show the remote command, check the break plan: 2026-11-19) and a
+  // run without --then-green test no fixed tree.
   if (/^node(?:\.exe)?\s+\S*red-proof\.mjs(?:\s|$)/i.test(command)) {
     const own = command.split(/\s--\s/)[0];
-    return /(?:^|\s)--then-green(?:\s|$)/.test(own) && !/(?:^|\s)--(?:warm|drop-copies|restore|show-remote)(?:\s|$)/.test(own);
+    return /(?:^|\s)--then-green(?:\s|$)/.test(own) && !/(?:^|\s)--(?:warm|drop-copies|restore|show-remote|check-plan)(?:\s|$)/.test(own);
   }
   return VERIFY_ANCHORED.test(command);
 }
@@ -272,7 +275,7 @@ function hiddenCheckRunners(cmd) {
 // identity: a failed compound command is still retried as a whole.
 const DISPLAY_RE = /^(?:grep|egrep|fgrep|rg|head|tail|tee|cat|sort|uniq|wc|cut|tr|less|more|column|findstr|awk|sed\s+-n|Select-String|Select-Object|Out-String|Out-File|Out-Null|Out-Host|Tee-Object|Format-Table|Format-List|ForEach-Object|Where-Object|Measure-Object|sls|select|%|\?)(?:\s|$)/i;
 function isDisplaySegment(seg) {
-  const s = String(seg).trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/, '');
+  const s = String(seg).trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*/, '');
   return DISPLAY_RE.test(s);
 }
 function identitySegments(segs) {
@@ -295,7 +298,7 @@ function stripRedirects(words) {
 // Preserve environment overrides in retry identity; they may choose a different
 // provider/configuration even when the executable and test arguments are equal.
 function verificationIdentity(seg) {
-  const environment = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/.exec(String(seg).trim())[0];
+  const environment = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*/.exec(String(seg).trim())[0];
   return environment + stripRedirects(verificationWords(seg)).join(' ');
 }
 
@@ -790,7 +793,7 @@ const DELETE_PROGRAM = /^(?:rm|rmdir|rd|del|erase|ri|remove-item|rimraf|unlink)$
 const VALUE_OPTION = /^-(?:value|encoding|itemtype|filter|include|exclude|inputobject|delimiter|stream|width|erroraction|ea|warningaction|wa)$/i;
 function programArgs(seg) {
   const s = String(seg).trim()
-    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*/, '')
+    .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*/, '')
     .replace(/^(?:sudo|time|env|command|nohup|timeout\s+\d+[smh]?)\s+/, '').replace(/^&\s+/, '');
   const words = tokenize(s);
   return { program: String(words[0] || '').split(/[\\/]/).pop().replace(/\.(?:exe|cmd|bat|ps1)$/i, '').toLowerCase(), args: words.slice(1) };
@@ -1224,7 +1227,36 @@ function proofWords(words) { return words.map((w) => String(w).replace(/\\/g, '/
 function proofLaunch(segs, expanded, at) {
   const checks = segs.map((s, i) => i).filter((i) => segmentIsVerify(segs[i]));
   if (checks.length !== 1 || checkRunner(segs[checks[0]]) !== 'red-proof') return null;
-  return { args: proofWords(stripRedirects(verificationWords(expanded[checks[0]])).slice(2)), at: String(at || '') };
+  // shown: the result holds the proof's own lines and nothing else. The proof ends the command, only a `cd`
+  // stands before it, and its output goes to no file (2026-11-19; see proofRefusedShown).
+  const last = checks[0] === segs.length - 1 && segs.slice(0, checks[0]).every((s) => LEADING_CD.test(String(s)));
+  const toFile = tokenize(segs[checks[0]]).some((w) => !/^\d*>&(?:\d+|-)$/.test(w) && /^(?:&>|\d*>>?|<)/.test(w));
+  return { args: proofWords(stripRedirects(verificationWords(expanded[checks[0]])).slice(2)), at: String(at || ''), shown: last && !toFile };
+}
+
+// A usage refusal of red-proof (2026-11-19). A mistyped option ended the proof in two seconds with exit 2
+// and ran nothing. The scan read that as a failed check, so the push guard asked for a CHECK RETIRED line.
+// Such a run is no result now: no credit, no failure, as a run that tested nothing already is. red-proof
+// prints this exact line last, and only for a usage refusal. A refusal that judged the break plan (a break
+// that matches twice, an unproven break) does not print it and stays a failed check.
+const PROOF_REFUSED = 'RED-PROOF: REFUSED — nothing ran';
+// The proof's own exit code is 2 and nothing else in the result says failed. Never when a later step hides
+// the code (rec.hidden): then only the run record can say it.
+function proofExitTwo(rec, t, text) {
+  if (rec.hidden) return false;
+  const exit = t.task?.exitCode ?? t.exitCode ?? t.exit_code ?? (/^Exit code (-?\d+)/m.exec(text) || [])[1];
+  if (exit === undefined || exit === null || Number(exit) !== 2) return false;
+  return !FAIL_MARKERS.some((re) => re !== EXIT_LINE && re.test(text)) && !/RED-PROOF: PROVED\b/.test(text);
+}
+// The result itself shows the refusal: exit 2, and its last line is exactly the refusal line.
+function proofRefusedShown(rec, t, text) {
+  if (!rec.proof.shown || !proofExitTwo(rec, t, text)) return false;
+  const rows = text.split(/\r?\n/).map((l) => l.replace(/\s+$/, '')).filter(Boolean);
+  return rows.length > 0 && rows[rows.length - 1] === PROOF_REFUSED;
+}
+// The run's own record says the same: exit 2, the refusal line as its last RED-PROOF line, no green run.
+function proofRefusedRecord(run) {
+  return run.exit === 2 && run.verdict === PROOF_REFUSED && run.green === 'none';
 }
 
 // This run's record, or null: one record only, of the same arguments, that started after the launch and
@@ -1262,8 +1294,13 @@ function proofResult(st, rec, blk, entry, outcome) {
     const exit = rec.hidden ? undefined : (t.task?.exitCode ?? t.exitCode ?? t.exit_code ?? (/^Exit code (-?\d+)/m.exec(text) || [])[1]);
     return { outcome, green: said && (exit === undefined || exit === null || Number(exit) === 0 || Number(exit) === 1) };
   }
+  // A usage refusal that ran nothing is no result (2026-11-19).
+  if (proofRefusedShown(rec, t, text)) return { outcome: 'none', green: false };
   const run = proofRunRecord(st, rec.proof, entry.timestamp);
   if (!run) return { outcome, green: false };
+  // The same refusal with its lines in a file: the record decides only where the result gave no line of the
+  // proof's own (outcome 'none'), or showed its exit code 2 and no other failure.
+  if (proofRefusedRecord(run) && (outcome === 'none' || proofExitTwo(rec, t, text))) return { outcome: 'none', green: false };
   const sameTree = /^[0-9a-f]{40,64}$/i.test(String(run.treeStart || '')) && run.treeStart === run.treeEnd;
   const green = run.green === 'passed' && (run.exit === 0 || run.exit === 1) && sameTree;
   if (outcome !== 'none') return { outcome, green };
@@ -1536,7 +1573,7 @@ function reportSeen(agent, text, kind) {
 }
 // A reviewer run is complete: credit it for the push gate and the task timer.
 function creditReviewer(st, agent, seq, at) {
-  reviewDone(st, agent.at, String(at || ''));
+  reviewDone(st, agent.at, String(at || ''), agent.call, agent.seat);
   agent.done = true;   // 2026-11-18: this run has reported (res.lastRunningReviewer, the review record)
   if (agent.launch > st.res.lastReviewerRun) { st.res.lastReviewerRun = agent.launch; st.res.lastReviewerResult = seq; }
 }
@@ -1666,6 +1703,7 @@ function readRefutations(st, report, key, readKey = '') {
   // A refutation is read fence-free (code blocks blanked, same places); a CONFIRMED or UNSURE line is read in a code block
   // too, as it only withdraws or reopens (2026-11-18, audit 3 repair: note-check.mjs reads it there as well).
   const text = raw.replace(FENCED, (b) => b.replace(/[^\n]/g, ' '));
+  readSameLines(st, text, launch);
   // The checker's last verdict for a note wins (2026-11-17): the verdict lines of both kinds, in the order written.
   const verdicts = [...[...text.matchAll(REFUTED_RE)].map((m) => ({ at: m.index, m })), ...[...raw.matchAll(NOT_REFUTED_RE)].map((m) => ({ at: m.index, m, other: true }))]
     .sort((a, b) => a.at - b.at);
@@ -1743,6 +1781,65 @@ function keepUserWords(st, seq, words) {
   st.userWords.push({ seq, text: userText(words).slice(0, USER_WORDS_CHARS) });
   pruneUserWords(st);
 }
+// A carried decision (2026-11-19, the owner's yes; off unless he sets `git config sanad.carryDecision true`).
+// An answer the owner gave in the AskUserQuestion dialog is kept with its call id (st.decisions), also when
+// no note is open. It may close a LATER note only when all of these hold: the independent note checker wrote
+// `SAME <n> = <k>`, note k was closed by that dialog answer, the quoted words are in that answer, no file
+// either note names changed since the answer, and note n is no Blocker and names no security or ticket-line
+// matter. The author never links two notes: only the checker's line does.
+const DECISIONS_KEPT = 40;
+const DECISION_CHARS = 2000;
+function keepDecision(st, id, seq, words) {
+  st.decisions.push({ id: String(id), seq, text: userText(words).slice(0, DECISION_CHARS) });
+  if (st.decisions.length > DECISIONS_KEPT) st.decisions.splice(0, st.decisions.length - DECISIONS_KEPT);
+}
+// The checker's line, read outside code blocks: `SAME 7 = 3`, `SAME: NOTE 7 = NOTE 3`, with list or bold marks.
+const SAME_RE = /^[ \t]*(?:(?:[-*•]|\d{1,3}[.)]|#{1,6}|>)[ \t]+)?[`*_]*SAME[`*_]*[ \t]*:?[ \t]*(?:NOTE[ \t]+)?[`*_]*(\d{1,4})[`*_]*[ \t]*=[ \t]*(?:NOTE[ \t]+)?[`*_]*(\d{1,4})[`*_]*(?![\d.,]*\d)/gm;
+// Each SAME line of the checker run launched at `launch`: both notes exist and were written before that run
+// started. The newest launch's line for a note stands (st.sameAs: { n, k, launch }).
+function readSameLines(st, text, launch) {
+  for (const m of text.matchAll(SAME_RE)) {
+    const n = Number(m[1]), k = Number(m[2]);
+    if (n === k || !st.res.reviewNotes[n - 1] || !st.res.reviewNotes[k - 1]) continue;
+    if (!(st.noteSeqs[n - 1] < launch) || !(st.noteSeqs[k - 1] < launch)) continue;
+    const at = st.sameAs.findIndex((x) => x.n === n);
+    if (at !== -1 && st.sameAs[at].launch > launch) continue;
+    if (at !== -1) st.sameAs.splice(at, 1);
+    st.sameAs.push({ n, k, launch });
+  }
+}
+// A note the owner's earlier answer never closes: it reopens a round, whatever was decided before.
+const NEVER_CARRIED = /\b(?:secur\w+|auth\w*|access|permission\w*|roles?|tenant\w*|secret\w*|token\w*|password\w*|injection|idor|xss|csrf|ticket|data[ \t]+loss|saved[ \t]+data)\b|\b[TC]\d+\b/i;
+// A tag (T3, C2) names a ticket line or a check, in brackets, grouped ([C1, C2]) or bare: the same limit as the word ticket.
+const neverCarried = (note) => note.kind === 'Blocker' || NEVER_CARRIED.test(String(note.text || ''));
+// The owner's switch, read only when every other condition of a carried decision holds (a rare line).
+const carrySwitches = new Map();
+function carrySwitch(cwd) {
+  const dir = String(cwd || '');
+  if (!dir) return false;
+  if (!carrySwitches.has(dir)) {
+    let on = false;
+    try {
+      on = require('child_process').execFileSync('git', ['config', '--get', 'sanad.carryDecision'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000, windowsHide: true }).trim().toLowerCase() === 'true';
+    } catch (e) { on = false; }
+    carrySwitches.set(dir, on);
+  }
+  return carrySwitches.get(dir);
+}
+// The note k whose dialog answer may close note n with the quoted words, or 0.
+function carriedFrom(notes, n, note, quote, c) {
+  const link = (c.same || []).find((x) => x.n === n);
+  if (!link || !(link.launch < c.seq) || neverCarried(note)) return 0;
+  const first = notes[link.k - 1];
+  // The limit holds for the earlier note too: its answer is never reused for a limited matter.
+  if (!first || neverCarried(first)) return 0;
+  const by = first && first.outcome === 'user' ? (c.closedBy || []).find((b) => b.n === link.k) : null;
+  const said = by ? (c.decisions || []).find((d) => d.id === by.id) : null;
+  if (!said || !said.text.includes(quote)) return 0;
+  const changed = (c.changes || []).some((e) => { const ch = typeof e === 'number' ? { seq: e, path: '' } : e; return ch.seq > said.seq && ch.seq < c.seq && (changeCancels(ch, note, '') || changeCancels(ch, first, '')); });
+  if (changed) return 0;
+  return typeof c.carry === 'function' && c.carry() === true ? link.k : 0;
+}
 function humanTurn(st, words) {
   const seq = ++st.seq;
   st.res.turnClaim = false;
@@ -1804,7 +1901,8 @@ function applyOutcomes(notes, seqs, words, plain, ctx) {
 function openNotesAfter(r, text) {
   const notes = (r && Array.isArray(r.reviewNotes) ? r.reviewNotes : []).map((n) => ({ ...n }));
   applyOutcomes(notes, (r && r.reviewNoteSeqs) || [], (r && r.reviewUserWords) || [], String(text || '').replace(FENCED, ''),
-    { seq: Infinity, edits: (r && r.reviewEditSeqs) || [], changes: (r && r.reviewChangeSeqs) || [], passes: (r && r.reviewPassSeqs) || [], refutable: (r && r.reviewRefutable) || [] });
+    { seq: Infinity, edits: (r && r.reviewEditSeqs) || [], changes: (r && r.reviewChangeSeqs) || [], passes: (r && r.reviewPassSeqs) || [], refutable: (r && r.reviewRefutable) || [],
+      same: (r && r.reviewSame) || [], decisions: (r && r.reviewDecisions) || [], closedBy: [...((r && r.reviewClosedBy) || [])], carry: () => carrySwitch(r && r.reviewCwd) });
   return notes.filter((n) => !n.outcome);
 }
 const FIXED_NEEDS_CHANGE = 'a fixed line needs a code change and a passing test after the note; a note that needs no change, or a text-only fix (a doc, a locale or a config file), is refuted by the note check or closed by the words the user typed';
@@ -1843,7 +1941,16 @@ function applyOutcome(notes, seqs, words, n, kind, rest, ctx) {
   const quote = q ? userText(q[1]) : '';
   if (quote.length < 8) { note.problem = 'a user line needs the user\'s exact words in quotes (8 characters or more)'; return; }
   const after = seqs[n - 1];
-  if (words.some((w) => w.seq > after && w.text.includes(quote))) { note.outcome = 'user'; delete note.problem; }
+  const typed = words.find((w) => w.seq > after && w.text.includes(quote));
+  if (typed) {
+    note.outcome = 'user'; delete note.problem;
+    // Closed by a dialog answer: its call id is kept, so the note checker may tie a later note to it.
+    const answer = (c.decisions || []).find((d) => d.seq === typed.seq && d.text.includes(quote));
+    if (answer && Array.isArray(c.closedBy) && !c.closedBy.some((b) => b.n === n)) c.closedBy.push({ n, id: answer.id });
+    return;
+  }
+  const from = carriedFrom(notes, n, note, quote, c);
+  if (from) { note.outcome = 'user'; note.carried = from; delete note.problem; }
   else note.problem = 'the quoted words are not in a message the user typed after this report';
 }
 
@@ -1874,7 +1981,7 @@ function openNotesMessage(open) {
   return 'Reviewer notes without an outcome (rule 5: every reviewer note is fixed, or the user decides it):\n' + rows.join('\n') + '\n' +
     'To ask the user about a note, stop with the question and no verdict line or push command.\n' +
     'Answer each one in your next message, on its own line: `NOTE ' + k + ': fixed — <what changed and its test>` (only after a code change and a passing test that follow the note), `NOTE ' + k + ': refuted — <the note check\'s evidence>` (only a note the note check refuted, never a Blocker) or `NOTE ' + k + ': user — "<the user\'s exact words>"`. ' +
-    'The NOTE lines go in a message with no tool call (text in a message that also runs a tool may never reach the record). A note is never closed by the author\'s own judgement.';
+    'The NOTE lines go in a message with no tool call (text in a message that also runs a tool may never reach the record). A note is never closed by the author\'s own judgement. (SG-NOTES)';
 }
 
 // The reducer state of one scan: plain data only (Maps and Sets become arrays in the cache), so a
@@ -1925,10 +2032,14 @@ function newScanState() {
     noteClasses: [],           // the checklist line each note names, or an empty string (same order; see noteClass)
     reportKeys: [],            // each note a reviewer run gave: '<agent id>@<launch seq>#<note number>' (see addReport)
     userWords: [],             // what the user typed while a note was open: { seq, text } (see pruneUserWords)
+    decisions: [],             // the owner's dialog answers: { id (the AskUserQuestion call), seq, text } (see keepDecision)
+    sameAs: [],                // the note checker's SAME lines: { n, k, launch } (see readSameLines)
+    closedBy: [],              // notes closed by a dialog answer: { n, id } (see applyOutcome)
+    cwd: '',                   // the session's folder, from its newest entry (the owner's switch is read there)
   };
 }
 const STATE_MAPS = ['pending', 'background', 'verificationStates', 'providerStates', 'reviewerCalls', 'reviewerAgents', 'reviewerAt', 'helperCalls', 'helpersRunning', 'stopCalls', 'helperPending', 'expertCalls', 'expertAgents', 'askCalls', 'seatCalls'];
-const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'syncMoves', 'helperEdits', 'noteSeqs', 'editSeqs', 'changeSeqs', 'refutable', 'verdictLaunch', 'noteSeats', 'noteClasses', 'reportKeys', 'userWords'];
+const STATE_LISTS = ['reviews', 'retirements', 'probes', 'passes', 'remoteCheckouts', 'syncMoves', 'helperEdits', 'noteSeqs', 'editSeqs', 'changeSeqs', 'refutable', 'verdictLaunch', 'noteSeats', 'noteClasses', 'reportKeys', 'userWords', 'decisions', 'sameAs', 'closedBy'];
 function saveState(st) {
   const o = { ...st, finishedUncollected: [...st.finishedUncollected] };
   for (const k of STATE_MAPS) o[k] = [...st[k]];
@@ -1947,7 +2058,8 @@ function restoreState(o) {
   for (const k of STATE_LISTS) { if (!Array.isArray(o[k])) return null; st[k] = o[k]; }
   for (const [k, v] of Object.entries(st.res)) if (typeof o.res[k] !== typeof v || Array.isArray(o.res[k]) !== Array.isArray(v)) return null;
   st.finishedUncollected = new Set(o.finishedUncollected);
-  st.res = o.res; st.seq = o.seq;
+  if (typeof o.cwd !== 'string') return null;
+  st.res = o.res; st.seq = o.seq; st.cwd = o.cwd;
   return st;
 }
 
@@ -2033,8 +2145,19 @@ function fillToolRecord(rec, blk, entry, seq, editsOnly = false) {
 }
 const emptyRecord = (background) => ({ editSeq: -1, editPath: '', nonGitEditSeq: -1, noteEditSeq: -1, contentChangeSeq: -1, contentChanges: [], nonRemoteEditSeq: -1, remotes: [], nonSyncEditSeq: -1, nonSyncEditPath: '', syncs: [], verifySeq: -1, verifyKey: '', evidence: false, providerSeq: -1, rangeDiffSeq: -1, gitRepo: '', background });
 
-function reviewDone(st, launchAt, doneAt) {
-  if (launchAt && doneAt && !st.reviews.some((r) => r.launchAt === launchAt)) st.reviews.push({ launchAt, doneAt });
+// Each finished run is its own entry, even when two share a launch time (2026-11-20): id = the tool-use id of
+// the launch, seat = who it was. An entry saved by an older scan has no id: it stays valid, and the first run
+// with the same launch time fills in its id and seat instead of adding a second entry.
+function reviewDone(st, launchAt, doneAt, id, seat) {
+  if (!launchAt || !doneAt) return;
+  if (!id) {
+    if (!st.reviews.some((r) => r.launchAt === launchAt)) st.reviews.push({ launchAt, doneAt });
+    return;
+  }
+  if (st.reviews.some((r) => r.id === id)) return;
+  const old = st.reviews.find((r) => r.launchAt === launchAt && !r.id);
+  if (old) { old.id = id; old.seat = seat || 'reviewer'; return; }
+  st.reviews.push({ launchAt, doneAt, id, seat: seat || 'reviewer' });
 }
 
 // The tool ids a line's tool_result blocks answer (as the host writes them: compact JSON, so quotes
@@ -2061,6 +2184,7 @@ function feedLine(st, l) {
   try { entry = JSON.parse(l); } catch (e) { return; }
   if (!entry || /^api-request/.test(String(entry.type || ''))) return;
   placeHelperEdits(st, entry.timestamp);
+  if (typeof entry.cwd === 'string' && entry.cwd) st.cwd = entry.cwd;
   const res = st.res;
   // The user's own words: a later `NOTE n: user — "…"` line must quote them (2026-11-12).
   const words = humanWords(entry);
@@ -2152,7 +2276,7 @@ function feedLine(st, l) {
       }
       // Reviewer notes (2026-11-12): what this turn claims, and each note's outcome line.
       if (claimsReview(blk.text)) res.turnClaim = true;
-      if (applyOutcomes(res.reviewNotes, st.noteSeqs, st.userWords, plain, { seq, edits: st.editSeqs, changes: st.changeSeqs, passes: st.passes.map((p) => p.seq), refutable: st.refutable })) pruneUserWords(st);
+      if (applyOutcomes(res.reviewNotes, st.noteSeqs, st.userWords, plain, { seq, edits: st.editSeqs, changes: st.changeSeqs, passes: st.passes.map((p) => p.seq), refutable: st.refutable, same: st.sameAs, decisions: st.decisions, closedBy: st.closedBy, carry: () => carrySwitch(st.cwd) })) pruneUserWords(st);
       continue;
     }
 
@@ -2226,7 +2350,7 @@ function feedLine(st, l) {
     if (blk.type === 'tool_result' && blk.tool_use_id && st.askCalls.has(blk.tool_use_id)) {
       const questions = st.askCalls.get(blk.tool_use_id);
       st.askCalls.delete(blk.tool_use_id);
-      if (blk.is_error !== true && !userRejected(blk, entry)) for (const answer of askAnswers(blk, entry, questions)) keepUserWords(st, seq, answer);
+      if (blk.is_error !== true && !userRejected(blk, entry)) for (const answer of askAnswers(blk, entry, questions)) { keepUserWords(st, seq, answer); keepDecision(st, blk.tool_use_id, seq, answer); }
       continue;
     }
 
@@ -2240,11 +2364,11 @@ function feedLine(st, l) {
       const at = st.reviewerAt.get(blk.tool_use_id) || '';
       st.reviewerAt.delete(blk.tool_use_id);
       if (id && blk.is_error !== true) {
-        const agent = { launch, at, seat, done: t.status === 'completed' };
+        const agent = { launch, at, seat, call: blk.id, done: t.status === 'completed' };
         if (agent.done) { reportSeen(agent, resultText(blk, null), 'hand'); reportSeen(agent, resultText(blk, null), 'notice'); }
         st.reviewerAgents.set(id, agent);
       }
-      if (id && t.status === 'completed') reviewDone(st, at, String(entry.timestamp || ''));
+      if (id && t.status === 'completed') reviewDone(st, at, String(entry.timestamp || ''), blk.tool_use_id, seat);
       // A synchronous reviewer returns its finished report in this result: its notes count (2026-11-12).
       if (id && t.status === 'completed' && blk.is_error !== true) addReport(st, resultText(blk, null), id + '@' + launch, seq, entry.timestamp, seat);
       if (id && t.status === 'completed' && launch > res.lastReviewerRun) { res.lastReviewerRun = launch; res.lastReviewerResult = seq; }
@@ -2543,7 +2667,8 @@ function creditHelperEdit(st, { edit }) {
 // through a temp file and a rename, so a reader sees a whole file; two hooks at once: last wins.
 // ---------------------------------------------------------------------------
 
-const SCAN_CACHE_VERSION = 1;
+// 2: the saved state gained the owner's dialog answers, the SAME lines and the session folder (2026-11-19).
+const SCAN_CACHE_VERSION = 2;
 const MARK_BYTES = 4096;
 const CHECKPOINT_MS = 2000;
 function fileMark(fd, offset) {
@@ -2567,8 +2692,35 @@ function stateFolder() {
 }
 // The user's own state folder is written for real sessions only (a transcript under .claude/projects);
 // anything else (a test's transcript) only where SANAD_STATE_DIR points.
+// 2026-11-20: an Orca session keeps its transcript under <orca>/claude-profiles/<id>/home/projects/..., not under
+// .claude/projects, so the stop gate had no memory there and blocked the same failure on every stop (6 blocks in
+// one session). The real path of the transcript must lie INSIDE one trusted root: ~/.claude/projects, the projects
+// folder of CLAUDE_CONFIG_DIR, or <APPDATA>/orca/claude-profiles/<id>/home/projects. A folder of the same names
+// anywhere else (a test fixture, a temp folder) is not a session and writes no user state.
+function realPath(p) {
+  let cur = path.resolve(String(p || '')), rest = '';
+  for (let i = 0; i < 64; i++) {
+    try { return path.join(fs.realpathSync.native(cur), rest); } catch (e) { /* the file may not exist yet */ }
+    const up = path.dirname(cur);
+    if (up === cur) break;
+    rest = path.join(path.basename(cur), rest);
+    cur = up;
+  }
+  return path.resolve(String(p || ''));
+}
+const norm = (p) => realPath(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 function stateAllowed(transcriptPath) {
-  return !!(proc && proc.env && proc.env.SANAD_STATE_DIR) || /\/\.claude\/projects\//i.test(path.resolve(String(transcriptPath || '')).replace(/\\/g, '/'));
+  if (proc && proc.env && proc.env.SANAD_STATE_DIR) return true;
+  const env = (proc && proc.env) || {};
+  const file = norm(transcriptPath);
+  const inside = (root) => file.startsWith(root + '/');
+  let home = '';
+  try { home = require('os').homedir(); } catch (e) { return false; }
+  if (inside(norm(path.join(home, '.claude', 'projects')))) return true;
+  if (env.CLAUDE_CONFIG_DIR && inside(norm(path.join(env.CLAUDE_CONFIG_DIR, 'projects')))) return true;
+  const profiles = norm(path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'orca', 'claude-profiles'));
+  if (!inside(profiles)) return false;
+  return /^[^/]+\/home\/projects\/./.test(file.slice(profiles.length + 1));
 }
 function cacheFolder() { return path.join(stateFolder(), 'scan-cache'); }
 
@@ -2705,7 +2857,19 @@ function finishScan(st) {
   const res = st.res;
   const { verificationStates, providerStates, retirements, probes, passes, background, pending, helpersRunning, finishedUncollected, remoteCheckouts, reviews } = st;
   // The same failed check is retired only by its named replacement passing AFTER the line.
-  const retired = (state) => retirements.some((r) => r.failed.includes(state.command) && r.seq > state.seq &&
+  // 2026-11-20: a replacement named by a CHECK RETIRED line that then failed itself is still the same check. A later
+  // CHECK RETIRED line for the original check, with another replacement that passes, retires it too (before, that
+  // second failure stayed open and the stop was blocked on it after the proof had passed). Only when the first line
+  // named that replacement BEFORE it ran (r0.seq < at): a failure named as a replacement only afterwards is not covered.
+  // F2: the link from a retirement to its replacement ends when the replacement has passed once, and at any code edit
+  // after the line: a replacement that fails for real after a new edit is a new failure, not the retired check.
+  // Round 2, R2 (2026-11-20): only a CODE edit ends the link (the same isCodePath rule as "Code files were edited"); a docs edit
+  // (README.md, *.md) did, and an honest retirement was refused after a README change. A change with no known path still counts.
+  const editAts = [...st.editSeqs, ...st.changeSeqs.filter((c) => !c.path || isCodePath(c.path)).map((c) => c.seq)];
+  const linked = (r0, command, at) => !editAts.some((e) => e > r0.seq && e < at) && !passes.some((p) => p.command === command && p.seq > r0.seq && p.seq < at);
+  const namesFailed = (r, command, at) => r.failed.includes(command) ||
+    retirements.some((r0) => r0.seq < at && r0.replacement.includes(command) && r0.failed.some((f) => r.failed.includes(f)) && linked(r0, command, at));
+  const retired = (state) => retirements.some((r) => namesFailed(r, state.command, state.seq) && r.seq > state.seq &&
     passes.some((p) => r.replacement.includes(p.command) && p.seq > r.seq));
   const probed = (state) => probes.some((p) => p.command.includes(state.command) && p.seq > state.seq);
   for (const state of verificationStates.values()) {
@@ -2770,6 +2934,13 @@ function finishScan(st) {
   // Notes closed by the note check, with its evidence, for the ship brief (2026-11-17).
   res.refutedNotes = res.reviewNotes.filter((n) => n.outcome === 'refuted').map((n) => ({ n: n.n, kind: n.kind, text: n.text, evidence: n.evidence || '' }));
   res.reviewUserWords = st.userWords;
+  // Carried decisions (2026-11-19): what the final text's outcome lines need, and each note closed that way,
+  // with the note whose answer closed it, for the ship brief.
+  res.reviewSame = st.sameAs;
+  res.reviewDecisions = st.decisions;
+  res.reviewClosedBy = st.closedBy;
+  res.reviewCwd = st.cwd;
+  res.carriedNotes = res.reviewNotes.filter((n) => n.outcome === 'user' && n.carried).map((n) => ({ n: n.n, kind: n.kind, text: n.text, from: n.carried }));
   // Each note's seat and the checklist line it names, same index as reviewNotes (2026-11-17, review score).
   res.reviewNoteSeats = st.noteSeats;
   res.reviewNoteClasses = st.noteClasses;
@@ -2782,5 +2953,5 @@ module.exports = {
   segmentEditPaths, shellEditPaths, shellWriteTargets, verifyFailed, resultText,
   scanTranscript,
   verificationCommand,
-  reportNotes, claimsReview, openNotesMessage, openNotesAfter, stateFolder, stateAllowed,
+  humanWords, reportNotes, claimsReview, openNotesMessage, openNotesAfter, stateFolder, stateAllowed,
 };
