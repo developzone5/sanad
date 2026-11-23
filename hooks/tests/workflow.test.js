@@ -60,7 +60,7 @@ function invoke(hook, entries, options = {}) {
   const codePaths = { exports: {} };
   vm.runInNewContext(source('lib/code-paths.cjs'), { require: n => n === 'fs' ? fakeFs : require(n), module: codePaths }, { timeout: 1000 });
   const module = { exports: {} };
-  vm.runInNewContext(source('lib/transcript-scan.js'), { require: n => n === 'fs' ? fakeFs : n === './verification-target.cjs' ? verificationTarget.exports : n === './shell-command.cjs' ? shellCommand.exports : n === './code-paths.cjs' ? codePaths.exports : require(n), module, Buffer }, { timeout: 1000 });
+  vm.runInNewContext(source('lib/transcript-scan.js'), { require: n => n === 'fs' ? fakeFs : n === './verification-target.cjs' ? verificationTarget.exports : n === './shell-command.cjs' ? shellCommand.exports : n === './code-paths.cjs' ? codePaths.exports : n === './session-root.cjs' ? require(path.join(root, 'lib', 'session-root.cjs')) : require(n), module, Buffer }, { timeout: 1000 });
   let stdout = '';
   const halt = Symbol('exit');
   const gitReads = [];

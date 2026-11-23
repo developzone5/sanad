@@ -49,7 +49,14 @@ async function runIn(fx, cmd, ...args) {
 }
 const start = (fx) => run(fx, 'start', '--repo', fx.repo, '--notes', fx.notes, '--base', 'base', '--suite', 'node run full-suite', '--side', 'page', '--fix-files', 'a.js', '--', 'node', '--test', 'a.test.mjs');
 const note = (fx, name, text) => fs.writeFileSync(path.join(fx.notes, name), text);
-const commit = (fx, text) => { fs.writeFileSync(path.join(fx.repo, 'a.js'), text); gitIn(fx.repo, 'add', 'a.js'); gitIn(fx.repo, 'commit', '-q', '-m', 'change'); return gitIn(fx.repo, 'rev-parse', 'HEAD'); };
+// The author's own read of its diff (the self-read step), recorded for the commit at HEAD.
+const selfRead = (fx, found = 'none') => run(fx, 'self-read', '--repo', fx.repo, '--notes', fx.notes, '--found', found);
+// A commit the author has read (the steps after the self-read step); `read: false` leaves the step due.
+const commit = (fx, text, { read = true } = {}) => {
+  fs.writeFileSync(path.join(fx.repo, 'a.js'), text); gitIn(fx.repo, 'add', 'a.js'); gitIn(fx.repo, 'commit', '-q', '-m', 'change');
+  if (read && fs.existsSync(path.join(fx.notes, 'task.json'))) selfRead(fx);
+  return gitIn(fx.repo, 'rev-parse', 'HEAD');
+};
 const stepsOf = (out) => [...out.matchAll(/^STEP (\S+)/gm)].map((m) => m[1]);
 const proved = (fx, extra = {}) => { process.env.SANAD_STATE_DIR = fx.state; writeEntry(fx.repo, 'k1', { ok: true, breaks: 2, code: codeFingerprint(fx.repo), files: {}, targets: {}, caught: {}, ...extra }); };
 const receipt = (fx, tree, name = 'check-1') => { fs.mkdirSync(path.join(fx.notes, 'evidence', name), { recursive: true }); fs.writeFileSync(path.join(fx.notes, 'evidence', name, 'metadata.json'), JSON.stringify({ runId: 'r1', status: 'passed', executable: 'node', args: ['run', 'full-suite'], source: { treeBefore: tree, treeAfter: tree } })); };
@@ -98,6 +105,28 @@ test('each state of a small task prints its due step, with every path filled', a
   assert.deepEqual(stepsOf(r.out), ['new-tests-once', 'commit']);
   assert.match(r.out, /\$ node --test a\.test\.mjs/);
   gitIn(fx.repo, 'commit', '-q', '-am', 'fix');
+  // 2026-11-22 (owner, PR 3 item 1): the author reads its own diff before the checks, the proof and the review.
+  r = run(fx, 'next');
+  assert.deepEqual(stepsOf(r.out), ['self-read']);
+  assert.match(r.out, /\$ git -C \S+.* diff base\.\.\.HEAD/);
+  assert.match(r.out, /"Every change" lines of \S*review-checklist\.md/);
+  assert.match(r.out, /\$ node \S*sanad\.mjs self-read --repo .* --found FOUND/);
+  // An uncommitted edit: nothing is recorded, and the step stays due.
+  fs.writeFileSync(path.join(fx.repo, 'a.js'), 'export const a = 3;\n');
+  const dirty = selfRead(fx);
+  assert.equal(dirty.status, 1, dirty.out);
+  assert.match(dirty.out, /SELF-READ: not recorded — commit the change first/);
+  gitIn(fx.repo, 'checkout', '--', 'a.js');
+  assert.equal(selfRead(fx, '').status, 2);
+  const read = selfRead(fx, 'none');
+  assert.equal(read.status, 0, read.out);
+  assert.match(read.out, /^SELF-READ: recorded for commit [0-9a-f]{10} — none$/m);
+  r = run(fx, 'next');
+  assert.deepEqual(stepsOf(r.out), ['checks-before-proof', 'breaks']);
+  // A later commit makes the step due again: the record is for the commit read.
+  gitIn(fx.repo, 'commit', '-q', '--allow-empty', '-m', 'one more');
+  assert.deepEqual(stepsOf(run(fx, 'next').out), ['self-read']);
+  assert.equal(selfRead(fx, 'fixed the empty-list case; test a.test.mjs').status, 0);
   r = run(fx, 'next');
   assert.deepEqual(stepsOf(r.out), ['checks-before-proof', 'breaks']);
   assert.match(r.out, /BACKGROUND \$ node \S*pre-review\.mjs --before-proof --part code --was small/);
@@ -489,7 +518,8 @@ test('ready: a suite argument with an apostrophe, written the way q() writes it,
   assert.equal(sameCommand(['node', 'run', 'spec', 'files/user', 's test.mjs'], line), false);
 });
 
-const addFile = (fx, name, text) => { fs.writeFileSync(path.join(fx.repo, name), text); gitIn(fx.repo, 'add', name); gitIn(fx.repo, 'commit', '-q', '-m', 'add ' + name); };
+// A commit the author has read, as commit() above.
+const addFile = (fx, name, text) => { fs.writeFileSync(path.join(fx.repo, name), text); gitIn(fx.repo, 'add', name); gitIn(fx.repo, 'commit', '-q', '-m', 'add ' + name); if (fs.existsSync(path.join(fx.notes, 'task.json'))) selfRead(fx); };
 
 test('ready: the tests-only lane asks for no proof entry; the normal lane still does', async () => {
   const fx = fixture();

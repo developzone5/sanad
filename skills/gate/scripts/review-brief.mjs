@@ -75,6 +75,7 @@ import { changeSet, foreignLine } from './change-set.mjs';
 import { paths as notePaths, readPins, addPin, readDecisions } from './notes-dir.mjs';
 import { makeCopy, dropCopies } from './review-copy.mjs';
 import { lateCheckLines, parseSiblings } from './siblings.mjs';
+import { stopRound, reopensRound } from './steps.mjs';
 // Read as a whole, so an export a later release adds (droppedLines) is used when it is there.
 import * as ticketLinesTool from './check-ticket-lines.mjs';
 
@@ -325,7 +326,10 @@ export function chooseSize(facts, routed) {
 // the kind can be counted by kind across tasks (hooks/lib/transcript-scan.js noteClass, review-score.mjs).
 // 2026-11-19: the finding line's shape stands once, here; the review brief and the re-check brief both use it.
 export const FINDING_SHAPE = '`Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`';
-const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; or "no findings" and what you checked. When a finding falls under a line of the review checklist, name that line in round brackets ( ) after the kind, as the checklist names it (CALLERS, CLIENT STATE, DATABASE, FAILURES / LOCALES, USERS FOUND BY SEARCH, …): `Bug (CLIENT STATE) — file:line — …`. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any. Last, one line `ONE JOB: yes|no`: does this PR do more than one thing? A yes is also a `Question` finding that names the jobs (user rule 2026-11-15).';
+// 2026-11-22 (owner, PR 3 item 3): a Bug or a Blocker brings the test that shows it, fenced so the scanner never reads
+// its lines as notes or a verdict. The reviewer stays read-only; the author adds the test and runs it.
+export const TEST_IN_NOTE = 'Where a test can show a Bug or a Blocker, put that test\'s code under the note, always inside a fenced code block (```); you run no test: the author adds it and runs it on the reviewed code.';
+const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; or "no findings" and what you checked. When a finding falls under a line of the review checklist, name that line in round brackets ( ) after the kind, as the checklist names it (CALLERS, CLIENT STATE, DATABASE, FAILURES / LOCALES, USERS FOUND BY SEARCH, …): `Bug (CLIENT STATE) — file:line — …`. ' + TEST_IN_NOTE + ' Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any. Last, one line `ONE JOB: yes|no`: does this PR do more than one thing? A yes is also a `Question` finding that names the jobs (user rule 2026-11-15).';
 // The standing rules. A new rule replaces one of these or becomes a script check. The last two (2026-11-16, PR #784:
 // a teammate found 6 real issues after 5 reviewers passed the PR): the author's design was never attacked, and weak
 // spots passed because "the old code does it too".
@@ -754,6 +758,44 @@ export function pinTask(notesDir) {
 }
 export const pinRef = (task, round) => `refs/sanad/review/${task}/${round}`;
 
+// This task's review notes from the session log, as notes.mjs reads them: { list } or { failed: <why> }. `taskOnly`
+// (the round limit, attack 2026-11-22): only a session log written since this task started (task.json), so another
+// task's notes in the same repository never count.
+async function readSessionNotes(repo, notesDir, { taskOnly = false } = {}) {
+  try {
+    const tool = await import('./notes.mjs');
+    if (typeof tool.sessionNotes !== 'function') throw new Error('notes.mjs has no sessionNotes');
+    // A folder with no task.json (no `sanad.mjs start`) cannot be scoped to one task: the repository's newest log, as before.
+    const scoped = taskOnly && fs.existsSync(path.join(notesDir, 'task.json'));
+    const got = await tool.sessionNotes(scoped ? { notes: notesDir } : { repo, notes: notesDir });
+    return { list: Array.isArray(got) ? got : (got && Array.isArray(got.notes) ? got.notes : []) };
+  } catch (e) { return { failed: e.code === 'ERR_MODULE_NOT_FOUND' ? 'the notes tool notes.mjs is not installed' : String(e.message || e).split(/\r?\n/)[0] }; }
+}
+
+// 2026-11-22 (owner): the round limit is a refusal, not printed text. A re-run ran 4 review rounds with
+// sanad.stopRound 2, because only the step printer knew the limit. Past the owner's stop round (git config
+// sanad.stopRound, 3 when it is not set) this tool writes no brief for a new round unless:
+//   - an OPEN note is a Blocker, a security note or a ticket-line note (steps.mjs reopensRound); or
+//   - a note of the last round (numbered after the last pin's `notes` count) is such a note answered `fixed`: its fix
+//     needs the re-check the push guard asks for; or
+//   - a note of the last round was answered with the owner's own words (`user`), such as "fix now".
+// Only the owner raises the limit; the author never sets a switch. Notes that cannot be read show no exception, so the
+// round is refused. `since`: the last pin's note count (none for an older pin: only the open rule). '' when it may run.
+export function roundLimitRefusal({ round, stop, notes, since }) {
+  if (!(Number(round) > Number(stop))) return '';
+  const head = `ROUND LIMIT: round ${round} is past the owner's stop round ${stop} (git config sanad.stopRound; 3 when it is not set). No brief was written.`;
+  const tail = ' The open notes go to the owner in one list (notes.mjs ask): fix now, or a known limit in the PR text. Only an open Blocker, security note or ticket-line note, the fix of one found in the last round, or the owner\'s words on a note of the last round open another round; only the owner raises the limit.';
+  if (!notes || notes.failed || !Array.isArray(notes.list)) return `${head} The notes could not be read (${(notes && notes.failed) || 'no list'}), so no open Blocker, security note or ticket-line note can be shown.${tail}`;
+  const lastRound = (n) => Number.isInteger(since) && Number(n.n) > since;
+  const opens = (n) => {
+    const state = n.state || 'open';
+    if (state === 'open') return reopensRound(n);
+    if (!lastRound(n)) return false;
+    return state === 'user' || (state === 'fixed' && reopensRound(n));
+  };
+  return notes.list.some((n) => n && opens(n)) ? '' : head + tail;
+}
+
 // The files a pin refuses: code that is not in the pinned commit. A reviewer of that commit would never see them.
 export function pinRefusal(set) {
   if (set.foreign && set.foreign.length) return foreignLine(set);
@@ -820,7 +862,7 @@ export function buildRecheckBrief({ repo, branch, from, to, round, fromRound = '
   const list = Array.isArray(notes.list) ? notes.list : [];
   const why = notes.failed || (list.length ? '' : 'the notes reader gave no note for this task');
   return tidy([
-    'You are a code reviewer on a re-check after a fix. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; or "no findings" and what you checked. Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any.', '',
+    'You are a code reviewer on a re-check after a fix. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; or "no findings" and what you checked. ' + TEST_IN_NOTE + ' Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any.', '',
     `Re-check, round ${round}. The round number is information only: report every finding you have.`, '',
     `Repo: ${repo}, branch ${branch}. The fix is the change from commit ${from}${fromRound ? ` (round ${fromRound}, already reviewed)` : ''} to commit ${to}: \`git diff ${from} ${to}\`. Only these two commits count. When a file in the folder differs from the new commit, the commit counts: \`git show ${to}:<path>\`.`, '',
     '## Files the fix changed', '',
@@ -966,6 +1008,24 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     const set = pinning ? changeSet(repo, base, { at: head }) : null;
     const pinStop = set ? pinRefusal(set) : '';
     if (pinStop) throw new Error(pinStop.startsWith('FOREIGN?') ? '--pin: no brief was written\n' + pinStop : pinStop);
+    // 2026-11-22 (owner): the round limit is this tool's refusal (see roundLimitRefusal). It is asked right before a
+    // round is saved, with the kind that save uses, so a repeat at one commit and a new round are told apart the way
+    // addPin tells them (attack: a --pin after a re-check at one commit). Each pin keeps the count of notes known then
+    // (`notes`), so the next check can tell the last round's notes.
+    let taskList = null;
+    const taskNotes = async () => (taskList ||= await readSessionNotes(repo, notesDir, { taskOnly: true }));
+    const guardRound = async (kind) => {
+      const pins = readPins(notesDir);
+      if (!pins.length) return;
+      const last = pins[pins.length - 1];
+      const again = last.kind === kind && last.commit === head && last.tree === git(repo, ['rev-parse', head + '^{tree}']);
+      const round = again ? last.round : pins.reduce((max, x) => Math.max(max, Number.isInteger(x.round) ? x.round : 0), 0) + 1;
+      const stop = stopRound(git(repo, ['config', '--get', 'sanad.stopRound']));
+      if (round <= stop) return;
+      const refusal = roundLimitRefusal({ round, stop, notes: await taskNotes(), since: Number.isInteger(last.noteCount) ? last.noteCount : undefined });
+      if (refusal) throw new Error(refusal);
+    };
+    const noteCount = async () => { const got = await taskNotes(); return got.failed ? undefined : got.list.reduce((max, n) => Math.max(max, Number(n.n) || 0), 0); };
     const checks = checkLines(fs.readFileSync(o.check, 'utf8'));
     if (!checks.length) throw new Error('the check file has no lines');
     const linesText = fs.readFileSync(o.lines, 'utf8');
@@ -1021,17 +1081,12 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
       } else {
         // The callers of what the fix changed, from the size check's range form. No answer is said, never shown as "none".
         const range = sizeFacts(repo, base, { extra: ['--from', last.commit, '--at', head] });
-        let notes;
-        try {
-          const tool = await import('./notes.mjs');
-          if (typeof tool.sessionNotes !== 'function') throw new Error('notes.mjs has no sessionNotes');
-          const got = await tool.sessionNotes({ repo, notes: notesDir });
-          notes = { list: Array.isArray(got) ? got : (got && Array.isArray(got.notes) ? got.notes : []) };
-        } catch (e) { notes = { failed: e.code === 'ERR_MODULE_NOT_FOUND' ? 'the notes tool notes.mjs is not installed' : String(e.message || e).split(/\r?\n/)[0] }; }
+        const notes = await readSessionNotes(repo, notesDir);
         // With no signals (the size check failed) the risk reviewer re-checks too: nothing says the fix is free of risk.
         const risk = facts.signals ? fixSignals(facts.signals, files) : null;
         const withRisk = risk === null || Object.keys(risk).length > 0;
-        const saved = addPin(notesDir, { kind: 'recheck', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: ['whole diff', ...(withRisk ? ['risk files'] : [])], frozen: '', signals: signalKeys });
+        await guardRound('recheck');
+        const saved = addPin(notesDir, { kind: 'recheck', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: ['whole diff', ...(withRisk ? ['risk files'] : [])], frozen: '', signals: signalKeys, noteCount: await noteCount() });
         const refNote = keepPin(saved.round);
         const branchNow = git(repo, ['branch', '--show-current']) || '(detached)';
         const briefFile = path.join(notesDir, `brief-recheck-${saved.round}.md`), launchFile = path.join(notesDir, 'launch.md');
@@ -1064,7 +1119,8 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     let pinLines = '', copy = '';
     if (pinning) {
       const one = Boolean(ONE_REVIEW[chosen.size]);
-      const pin = { kind: 'full', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: one ? ['fresh eyes'] : ['fresh eyes', 'risk files', 'whole diff', 'other engine'], frozen: '', signals: signalKeys };
+      await guardRound('full');
+      const pin = { kind: 'full', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: one ? ['fresh eyes'] : ['fresh eyes', 'risk files', 'whole diff', 'other engine'], frozen: '', signals: signalKeys, noteCount: await noteCount() };
       let saved = addPin(notesDir, pin);
       pinLines = keepPin(saved.round);
       if (!one && !o['no-frozen']) {

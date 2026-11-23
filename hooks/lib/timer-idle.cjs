@@ -30,7 +30,13 @@ const IDLE = 'idle: the session stopped (waiting for the user or helpers)';
 const STALE_HOURS = 8;
 
 const stateDir = () => process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state');
-const realSession = (input) => /\/\.claude\/projects\//i.test(String((input && input.transcript_path) || '').replace(/\\/g, '/'));
+// 2026-11-22: an Orca session keeps its log under <APPDATA>/orca/claude-profiles/<id>/home/projects (or the projects
+// folder of CLAUDE_CONFIG_DIR), so its timer got the start mark and nothing else: no stage, no wait. The trusted
+// roots are the scanner's (session-root.cjs); a log under a .claude/projects folder still counts, as before.
+const realSession = (input) => {
+  const file = String((input && input.transcript_path) || '');
+  return /\/\.claude\/projects\//i.test(file.replace(/\\/g, '/')) || require('./session-root.cjs').inSessionRoot(file);
+};
 function pointerName(input) {
   const id = (input && input.session_id) || path.basename(String((input && input.transcript_path) || '').replace(/\\/g, '/'), '.jsonl');
   const key = String(id || '').replace(/[^A-Za-z0-9_-]/g, '');

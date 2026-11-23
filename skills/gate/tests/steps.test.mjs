@@ -15,6 +15,8 @@ function facts(over = {}) {
     checks: { code: undefined, all: undefined },
     suite: { done: false, receipt: null, ci: '', mark: 'full' },
     notes: { known: true, all: [], open: [] }, decisions: [], pushed: false,
+    // The author read its own diff at this commit (the self-read step is done); a test of that step sets it.
+    selfRead: 'h2',
   };
   for (const [k, v] of Object.entries(over)) base[k] = v && typeof v === 'object' && !Array.isArray(v) && base[k] && typeof base[k] === 'object' && !Array.isArray(base[k]) ? { ...base[k], ...v } : v;
   return base;
@@ -22,6 +24,18 @@ function facts(over = {}) {
 const ctx = { gate: '/g', repo: '/r/my repo', notes: '/n', base: 'origin/staging', engine: 'claude', size: 'small', lane: 'small', sides: [{ name: 'page', cwd: '/r/my repo/web', test: 'npx vitest run a.test.ts', fixFiles: ['web/a.ts'] }] };
 const text = (f) => render(due(f), ctx, f).join('\n');
 const ids = (f) => due(f).map((s) => s.id);
+
+// 2026-11-22 (owner, PR 3 item 1; attack): the author reads its own diff before the checks, and again after a fix
+// committed after a review, before the re-check.
+test('self-read is due after the commit until recorded for HEAD, and again for a fix after a review', () => {
+  assert.deepEqual(ids(facts({ selfRead: '' })), ['self-read']);
+  assert.deepEqual(ids(facts({ selfRead: 'h1' })), ['self-read'], 'a record for an older commit does not count');
+  assert.notDeepEqual(ids(facts({ selfRead: 'h2' })), ['self-read']);
+  const fixRound = { pins: [{ round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' }], lastPin: { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' }, pinAtHead: false };
+  assert.deepEqual(ids(facts({ ...fixRound, selfRead: 'h1' })), ['self-read'], 'the fix commit h2 is read before the re-check');
+  assert.deepEqual(ids(facts({ ...fixRound, selfRead: 'h2' })), ['fix-round']);
+  assert.match(text(facts({ selfRead: '' })), /\$ node \S*sanad\.mjs self-read --repo '\/r\/my repo' --notes \/n --found FOUND/);
+});
 
 test('step ids are unique', () => {
   const all = STEPS.map((s) => s.id);
@@ -72,14 +86,18 @@ test('Y5: the printed gate command carries --notes, so the goals can be counted'
   assert.match(gate.lines(ctx, facts()).map((l) => l.text).join('\n'), /verdict --gate --repo .* --notes \/n --tests/);
 });
 
-test('Y5: the owner list never offers a note about saved data, access, security or a ticket line', () => {
+// 2026-11-22 (owner): from the stop round on, only a Blocker, a security note and a ticket-line note reopen a round;
+// every other open note of the round goes to the owner's list.
+test('Y5: the owner list never offers a security or a ticket-line note; any other note of the stop round goes to it', () => {
   const notes = [
     { n: 1, kind: 'Gap', text: 'a rare timing case on a slow network (RARE)', round: 2 },
-    { n: 2, kind: 'Gap', text: 'the saved data is deleted on retry (RARE)', round: 2 },
+    { n: 2, kind: 'Gap', text: 'the saved data is deleted on retry', round: 2 },
     { n: 3, kind: 'Gap', text: 'the ticket line 4 is not met (RARE)', round: 2 },
     { n: 4, kind: 'Gap', text: 'a user may get more permissions (RARE)', round: 2 },
+    { n: 5, kind: 'Bug', text: 'T2: the header shows the filter count', round: 2 },
+    { n: 6, kind: 'Bug', text: 'the add panel shows "no match" when its first page fails', round: 2 },
   ];
-  assert.deepEqual(askOwner(notes, 2, 2).map((n) => n.n), [1]);
+  assert.deepEqual(askOwner(notes, 2, 2).map((n) => n.n), [1, 2, 6]);
 });
 
 test('a Big task asks the owner for the design only with the switch on', () => {
@@ -104,8 +122,8 @@ test('the stop round comes from the owner number, and a Blocker is never on the 
     { n: 7, kind: 'Gap', text: 'an old rare case from round 1', round: 1 },
   ];
   assert.deepEqual(askOwner(notes, 2, 3), []);
-  assert.deepEqual(askOwner(notes, 2, 2).map((n) => n.n), [1]);
-  assert.deepEqual(askOwner(notes.map((n) => ({ ...n, round: 3 })), 3).map((n) => n.n), [1, 7]);
+  assert.deepEqual(askOwner(notes, 2, 2).map((n) => n.n), [1, 5, 6]);
+  assert.deepEqual(askOwner(notes.map((n) => ({ ...n, round: 3 })), 3).map((n) => n.n), [1, 5, 6, 7]);
 });
 
 test('with sanad.stopRound 2 the round-2 fix prints the ASK THE OWNER list; with the default it prints at round 3', () => {

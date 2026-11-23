@@ -165,7 +165,7 @@ test('add refuses a bad list, bad UTF-8, or conflicting replacement options', (t
   const invalid = '{"breaks":[]}';
   fs.writeFileSync(f.list, invalid);
   refused(f.add(['--put', 'replacement']), /JSON array/);
-  refused(f.add(['--put', 'replacement', '--put-file', f.source]), /Supply one of --put or --put-file/);
+  refused(f.add(['--put', 'replacement', '--put-file', f.source]), /Supply one of --put, --put-file or --put-from/);
   const bytes = Buffer.from([0xc3, 0x28]);
   fs.writeFileSync(f.source, bytes);
   refused(f.add(['--put', 'replacement']), /UTF-8/);

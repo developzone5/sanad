@@ -259,7 +259,9 @@ export function addPin(notes, pin, opts) {
     const again = Boolean(last) && last.kind === fields.kind && last.commit === fields.commit && last.tree === fields.tree;
     const round = again ? last.round : pins.reduce((max, x) => Math.max(max, Number.isInteger(x.round) ? x.round : 0), 0) + 1;
     // The same round written again keeps its first time: earlier reports of that round still count.
-    const saved = { ...p, ...fields, round, ...(again && last.at ? { at: last.at } : {}) };
+    // A round written again keeps its first note count too (review-brief's round limit: the notes after it are that
+    // round's own, re-check 2026-11-22).
+    const saved = { ...p, ...fields, round, ...(again && last.at ? { at: last.at } : {}), ...(again && Number.isInteger(last.noteCount) ? { noteCount: last.noteCount } : {}) };
     writeStore(file, { version: VERSION, pins: again ? [...pins.slice(0, -1), saved] : [...pins, saved] }, mine);
     return saved;
   });

@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { isMain } from './is-main.mjs';
+import { holdTestMachine } from './test-machine-lock.mjs';
 
 // Credential key names are matched as whole words after splitting camelCase,
 // PascalCase, snake_case and kebab-case (accessToken, ClientSecret, x-api-key
@@ -433,6 +434,8 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
   const receipt = { runId: crypto.randomUUID(), executable: redactCommand(executable, secrets), args: args.map(a => redactCommand(a, secrets)), cwd: fs.realpathSync.native(cwd), source, startedAt: new Date().toISOString(), status: 'running' };
   fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
   const lock = source ? takeLock(receipt, timeoutMs) : null;
+  // The test machine, once held (below): freed after the last look there, and in `finally` on any other way out.
+  let freeMachine = () => {};
   try {
     const remote = source && !sourceFailure ? remoteTarget(executable, args, source.toplevel) : null;
     const askRemote = async () => (typeof remoteProbe === 'function' ? remoteProbe : probeRemote)(remote, executable);
@@ -446,6 +449,12 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
     // A source that could not be bound already fails the receipt: only a bound run is read for these lines.
     const problem = source && !sourceFailure ? lineProblem(executable, args, cwd, source, remote) : null;
     if (problem) return refuse(redactCommand(problem, secrets));
+    // 2026-11-22 (owner): never beside a proof on the test machine (its sync and its copies); held to the last look.
+    if (remote) {
+      const held = await holdTestMachine(remote.host, 'check', 'evidence');
+      if (!held) return refuse(`The test machine (${remote.host}) stayed busy with a proof, so this check did not start beside it. Run it again when the proof ends.`);
+      freeMachine = held;
+    }
     if (remote) {
       receipt.remote = { host: remote.host, repo: remote.repo, treeBefore: null, treeAfter: null };
       let refused = null;
@@ -455,7 +464,7 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
         if (there.dirty) refused = `The folder on the test machine (${remote.host}) has changed files that are not part of this code. Clean it there, then run remote-sync.sh and the check again.`;
         else if (there.tree !== source.treeBefore) refused = `The test machine holds other code (tree ${String(there.tree).slice(0, 12)}; this folder is ${source.treeBefore.slice(0, 12)}). Run remote-sync.sh, then the check again.`;
       } catch { refused = `Cannot read the code on the test machine (${remote.host}) before the check.`; }
-      if (refused) return refuse(refused);
+      if (refused) { freeMachine(); return refuse(refused); }
     }
     const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let failure = null, fallback;
@@ -501,13 +510,17 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
         }
       } catch { sourceFailure ||= `Cannot read the code on the test machine (${remote.host}) after the check.`; }
     }
+    freeMachine();
     failure ||= sourceFailure;
     Object.assign(receipt, { completedAt: new Date().toISOString(), nativeExitCode: terminal.code, signal: terminal.signal, reason: failure,
       status: !failure && terminal.code === 0 ? 'passed' : 'failed', stdoutBytes: stdout.bytes, stderrBytes: stderr.bytes,
       stdout: path.join(runDir, 'stdout.log'), stderr: path.join(runDir, 'stderr.log') });
     fs.writeFileSync(path.join(runDir, 'metadata.json'), JSON.stringify(receipt, null, 2));
     return { ...receipt, runDir };
-  } finally { if (lock) { try { fs.rmSync(lock, { force: true }); } catch { /* a stale lock expires on its own */ } } }
+  } finally {
+    freeMachine();
+    if (lock) { try { fs.rmSync(lock, { force: true }); } catch { /* a stale lock expires on its own */ } }
+  }
 }
 
 export async function assertHttp({ url, expectedStatus, options = {}, expectedCode, codePath = 'code', assertState, timeoutMs = 10000, maxBytes = 1024 * 1024 }) {

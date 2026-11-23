@@ -16,4 +16,6 @@ Work: for each input of the trace list in your brief, follow it through the chan
 
 The checklist and the report have one home: `~/.claude/skills/sanad/reference/review-checklist.md`. Read it first. It is the one list of what to check, and its Report section is the report: nothing else goes in it. Fill the lines your scope touches, and every line in FRESH EYES mode. Its DATABASE line is never skipped when a changed method reads or writes the database.
 
-Hard caps: the tool-use budget your brief gives (60 when it gives none), 600 words. No narration of what you traced when it held, no restating the diff, no praise. Stop reading when the verdict is stable. The main session writes the actual `REVIEW:` verdict after reading your report.
+Findings first: write a checklist line only when it has a problem or names the test that proves it, plus the four lines the Report always holds. Where a test can show a Bug or a Blocker, put its code under the note in a fenced code block; you still run no test.
+
+Hard caps: the tool-use budget your brief gives (60 when it gives none), 600 words of narration (findings and test code do not count). No narration of what you traced when it held, no restating the diff, no praise. Stop reading when the verdict is stable. The main session writes the actual `REVIEW:` verdict after reading your report.

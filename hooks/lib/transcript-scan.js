@@ -1409,6 +1409,23 @@ const NOTE_LINE = new RegExp('^(\\s*)((?:[-*•]|\\d{1,3}[.)])\\s+)?(?:(?:\\*\\*
   '(?:(Blocker|Bug|Gap|Question)' + QUALIFIER + '(?:\\s+[—–](?:\\s|$)|\\s+-(?:\\s|$)|\\s*:)|(EXTRA TEST)' + QUALIFIER + ':)');
 const FENCE_LINE = /^\s*(```|~~~)/;
 const NOTE_CHARS = 300;
+// A finding line that only says there is none (2026-11-22, owner: "EXTRA TEST: none." is no note). The whole text is
+// none, n/a, nothing or not applicable, with a full stop at most. Only an EXTRA TEST line may add a reason after a dash
+// ("EXTRA TEST: none — the tests cover it"), and only one that names no file:line and no defect: "Bug: none — the save
+// drops page 2" stays a note (attack, 2026-11-22). Such a line keeps its number, closed at once (see addReport).
+const NONE_ONLY = /^(?:none|n\/a|nothing|not applicable)\s*[.!]?$/i;
+const NONE_REASON = /^(?:none|n\/a|nothing|not applicable)\s*[.!]?\s*[—–-]\s+(.+)$/i;
+// The reason must say why no test is missing (re-check, 2026-11-22: "none — retries duplicate invoices" names a defect
+// in words no list of defect words holds): it says the tests cover it, or that nothing is missing, and names no
+// file:line and no "but".
+const COVERED_REASON = /\b(?:cover(?:s|ed|ing)?|already (?:tested|covered|checked)|tested (?:above|already)|nothing (?:else|more|to add|missing)|no (?:gap|extra test|other case|case left)|not needed)\b/i;
+const DEFECT_WORDS = /\w\.\w+[`*_"']*:\d|\b(?:but|except|however|although|though|missing|untested|not tested|fails?|failing|wrong|broken|bug|crash\w*|drops?|loses?|leaks?)\b/i;
+function noneFinding(kind, rest) {
+  const text = String(rest || '').replace(/[*_`]+/g, '').trim();
+  if (NONE_ONLY.test(text)) return true;
+  const r = kind === 'EXTRA TEST' ? NONE_REASON.exec(text) : null;
+  return Boolean(r) && COVERED_REASON.test(r[1]) && !DEFECT_WORDS.test(r[1]);
+}
 // A finding-shaped line the note parser did not read (2026-11-17, audit 2): a severity or priority tag at the start of
 // the line (after an optional list mark and bold), then text: [P0]..[P4], P1: / P1 —, [High], High:, Critical, Major,
 // Severe, Medium, Low, Severity:, Issue, Finding, Problem, Defect, Vulnerability. Narrow on purpose: prose, headings,
@@ -1514,6 +1531,9 @@ function reportNotes(report, classes, unread) {
     for (let j = i + 1; j < end; j++) parts.push(rows[j]);
     taken = end - 1;
     const note = { kind: m ? m[3] || m[4] : 'Question', text: parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, NOTE_CHARS) };
+    // 2026-11-22: a line that only says there is none (noneFinding) stays in the list, so every later note keeps its
+    // number; it is marked, and addReport closes it at once.
+    if (m && end === i + 1 && noneFinding(note.kind, rows[i].slice(m[0].length))) note.none = true;
     if (rows.slice(i, end).some(asksUser)) note.asks = true;
     notes.push(note);
     if (Array.isArray(classes)) classes.push(m ? noteClass(m[0]) : '');
@@ -1616,8 +1636,9 @@ function addReport(st, report, key, seq, at, seat, questionsOnly = false, readKe
   // One Blocker, once per report (a keyless file report is keyed by its own text).
   // Audit 2 (2026-11-17): the same Blocker when notes were read but a finding-shaped line was not (a severity tag the
   // reader does not know), so one minor note cannot hide a serious finding; its text counts and quotes those lines.
-  const noneRead = !read.some((n) => /^(?:Blocker|Bug|Gap)$/.test(n.kind));
-  if (!questionsOnly && (noneRead || unread.length) && FAIL_VERDICT.test(String(report || '').replace(/\r/g, ''))) {
+  const noneRead = !read.some((n) => !n.none && /^(?:Blocker|Bug|Gap)$/.test(n.kind));
+  // 2026-11-22 (owner): a verdict line inside a fenced code block (a reviewer's test) is an example, not the verdict.
+  if (!questionsOnly && (noneRead || unread.length) && FAIL_VERDICT.test(String(report || '').replace(/\r/g, '').replace(FENCED, ''))) {
     const failKey = (key || 'file@' + require('crypto').createHash('sha1').update(String(report).replace(/\r/g, '').trim()).digest('hex')) + '#fail';
     if (!st.reportKeys.includes(failKey)) {
       st.reportKeys.push(failKey);
@@ -1633,7 +1654,8 @@ function addReport(st, report, key, seq, at, seat, questionsOnly = false, readKe
       : notes.some((n) => n.text === note.text);
     if (seen) continue;
     // asks (2026-11-18, audit 3): a Gap or Bug that asks the user to decide is the user's, like a Question.
-    notes.push({ n: notes.length + 1, kind: note.kind, text: note.text, outcome: null, ...(note.asks ? { asks: true } : {}) });
+    // A "none" line keeps its number, closed from the start (outcome 'none'): no answer is asked for it.
+    notes.push({ n: notes.length + 1, kind: note.kind, text: note.text, outcome: found.none ? 'none' : null, ...(note.asks ? { asks: true } : {}) });
     st.noteSeqs.push(seq);
     st.noteSeats.push(seat || 'reviewer');
     st.noteClasses.push(classes[i] || '');
@@ -2696,31 +2718,11 @@ function stateFolder() {
 // .claude/projects, so the stop gate had no memory there and blocked the same failure on every stop (6 blocks in
 // one session). The real path of the transcript must lie INSIDE one trusted root: ~/.claude/projects, the projects
 // folder of CLAUDE_CONFIG_DIR, or <APPDATA>/orca/claude-profiles/<id>/home/projects. A folder of the same names
-// anywhere else (a test fixture, a temp folder) is not a session and writes no user state.
-function realPath(p) {
-  let cur = path.resolve(String(p || '')), rest = '';
-  for (let i = 0; i < 64; i++) {
-    try { return path.join(fs.realpathSync.native(cur), rest); } catch (e) { /* the file may not exist yet */ }
-    const up = path.dirname(cur);
-    if (up === cur) break;
-    rest = path.join(path.basename(cur), rest);
-    cur = up;
-  }
-  return path.resolve(String(p || ''));
-}
-const norm = (p) => realPath(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// anywhere else (a test fixture, a temp folder) is not a session and writes no user state. The roots are one rule in
+// session-root.cjs, shared with the task timer (2026-11-22).
 function stateAllowed(transcriptPath) {
   if (proc && proc.env && proc.env.SANAD_STATE_DIR) return true;
-  const env = (proc && proc.env) || {};
-  const file = norm(transcriptPath);
-  const inside = (root) => file.startsWith(root + '/');
-  let home = '';
-  try { home = require('os').homedir(); } catch (e) { return false; }
-  if (inside(norm(path.join(home, '.claude', 'projects')))) return true;
-  if (env.CLAUDE_CONFIG_DIR && inside(norm(path.join(env.CLAUDE_CONFIG_DIR, 'projects')))) return true;
-  const profiles = norm(path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'orca', 'claude-profiles'));
-  if (!inside(profiles)) return false;
-  return /^[^/]+\/home\/projects\/./.test(file.slice(profiles.length + 1));
+  return require('./session-root.cjs').inSessionRoot(transcriptPath, (proc && proc.env) || {});
 }
 function cacheFolder() { return path.join(stateFolder(), 'scan-cache'); }
 
