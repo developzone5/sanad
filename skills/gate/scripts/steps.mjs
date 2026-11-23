@@ -54,6 +54,29 @@ export function askOwner(notes, round, stop = DEFAULT_STOP_ROUND) {
   return (notes || []).filter((n) => n && n.open !== false && (n.round ?? round) === round && !reopensRound(n));
 }
 
+/**
+ * Why the proof is not offered yet, or '' (2026-11-23, owner: one proof per round). The proof comes after every code
+ * change of the round: the builder's own read is recorded for this commit, the checks before the proof passed on this
+ * code, and (`notes`) no note of the round that the builder can fix is open. A Question, a note that asks the owner,
+ * and a note on the owner's list past the stop round wait for the owner, not for a fix, so they hold nothing.
+ */
+export function proofHold(f, { notes = true } = {}) {
+  // Uncommitted work is not in the builder's read of the commit (re-check 4, 2026-11-23: edits after a pin got the proof).
+  if (f.git.clean === false) return 'there is uncommitted work: commit it, then record the builder\'s own read (sanad.mjs self-read)';
+  if (f.git.head && f.selfRead !== f.git.head) return "the builder's own read is not recorded for this commit (sanad.mjs self-read)";
+  // Also at a pinned commit (attack, 2026-11-23): a pin made without a pass of the checks does not open the proof.
+  if (f.checks && f.checks.beforeProof === false) return 'the checks before the proof have not passed on this code (pre-review --before-proof)';
+  // After a review whose notes this session cannot read, a Blocker there is not known to be fixed (re-check 4: a note in
+  // a report file only opened the proof). `sanad.mjs status` reads them from the session log.
+  if (notes && f.pins.length && !f.notes.known) return "the review's notes could not be read here: fix and answer them first (sanad.mjs status reads them)";
+  if (notes && f.pins.length && f.notes.known) {
+    const owner = new Set(askOwner(f.notes.open, f.round, f.stop).map((n) => n.n));
+    const fixable = f.notes.open.filter((n) => n && !/^question$/i.test(String(n.kind || '')) && !n.asks && !owner.has(n.n));
+    if (fixable.length) return `${fixable.length} note(s) still to fix and answer (notes.mjs answer): ${fixable.slice(0, 8).map((n) => 'NOTE ' + n.n).join(', ')}`;
+  }
+  return '';
+}
+
 /** A note that still opens a review round past the stop round: a Blocker, a security note or a ticket-line note. */
 export function reopensRound(n) {
   if (!n) return false;
@@ -72,7 +95,9 @@ function proofLine(c, side, since) {
 const lightLane = (f) => Boolean(f.testsOnly && f.switches && f.switches.testsOnlyLane);
 const sidesOf =(c) => (c.sides && c.sides.length ? c.sides : [{ name: 'tests', cwd: '', test: 'TEST-COMMAND', fixFiles: [] }]);
 const listFlags = (c) => `--lines ${note(c, 'lines.md')} --check ${note(c, 'check.md')} --places ${note(c, 'places.md')} --siblings ${note(c, 'siblings.md')}`;
-const preReview = (c, extra = '') => `${tool(c, 'pre-review.mjs')}${extra} --was ${q(c.size || 'SIZE')} ${listFlags(c)}`;
+// --notes too (attack, 2026-11-23): only with it does --before-proof read the folder's break list and the task's test
+// command, so the break plan check runs (or fails when no command is named).
+const preReview = (c, extra = '') => `${tool(c, 'pre-review.mjs')}${extra} --was ${q(c.size || 'SIZE')} ${listFlags(c)} --notes ${p(c.notes)}`;
 // A text-path change that adds or changes a test file has the proof steps too (f.textProof). The brief tool
 // rejects a --proof-log file that is not there: the text path and the tests-only lane have no proof log.
 const noProofStep = (f) => lightLane(f) || (f.lane === 'text' && !f.textProof);
@@ -156,9 +181,16 @@ export const STEPS = [
       { text: `read it as a hostile reviewer against the "Every change" lines of ${p(CHECKLIST)}; fix what you find (test first) and commit`, plain: true },
       { text: `${tool(c, 'sanad.mjs')} self-read --repo ${p(c.repo)} --notes ${p(c.notes)} --found FOUND   (FOUND: what you found and fixed, or none)` },
     ] },
-  { id: 'checks-before-proof', loop: 'Step 3, item 3', lanes: ALL, beside: 'breaks', unknown: (f) => f.checks.code === undefined,
-    done: (f) => f.checks.code === true || f.proof.done || f.pinAtHead,
-    lines: (c) => [{ text: preReview(c, ' --before-proof --part code'), background: true }] },
+  // 2026-11-23 (owner, one proof per round): every check that needs no proof runs before it, all parts, and the proof
+  // waits for its pass on this very code (pre-review-cache.mjs rememberBeforeProof). Run 3 of the small task ran only
+  // `--part code` here, started the proof beside it, and the test-assert, ticket-quote and places fixes the later run
+  // asked for voided two proofs.
+  { id: 'checks-before-proof', loop: 'Step 3, item 3', lanes: ALL, beside: 'breaks',
+    done: (f) => f.checks.beforeProof === true || f.proof.done || f.pinAtHead,
+    lines: (c) => [
+      { text: preReview(c, ' --before-proof') },
+      { text: 'fix what it finds and commit, then run it again: the proof waits until it passes on this commit', plain: true },
+    ] },
   { id: 'breaks', loop: 'Step 3, item 4', lanes: CODE, light: true,
     done: (f) => f.has.breaks,
     lines: (c) => [
@@ -167,7 +199,14 @@ export const STEPS = [
     ] },
   { id: 'proof', loop: 'Step 3, item 5', lanes: CODE, light: true,
     done: (f) => f.proof.done,
-    lines: (c) => sidesOf(c).map((s) => ({ text: proofLine(c, s) })) },
+    lines: (c, f) => {
+      // One proof per round (re-check 3): after a review, an open note to fix holds the proof too, since its fix changes the code.
+      const hold = proofHold(f, { notes: true });
+      if (!hold) return sidesOf(c).map((s) => ({ text: proofLine(c, s) }));
+      // The way on is printed too (re-check, 2026-11-23: at a pinned commit the checks step is over, so only this step
+      // can name the command that opens the proof).
+      return [{ text: `the proof waits: ${hold}`, plain: true }, ...(f.checks && f.checks.beforeProof === false ? [{ text: preReview(c, ' --before-proof') }] : [])];
+    } },
   { id: 'review', loop: 'Step 3.5, items 1-3', lanes: ALL, early: true,
     done: (f) => f.pinAtHead,
     lines: (c, f) => [
@@ -188,23 +227,34 @@ export const STEPS = [
     // Due when the last pinned commit is not HEAD: a fix was made after the reviewers read.
     when: (f) => f.pins.length > 0 && !f.pinAtHead,
     done: () => false,
-    lines: (c, f) => [
-      ...(f.git.clean ? [] : [{ text: `git -C ${p(c.repo)} status --short   (commit the fix batch first)`, plain: true }]),
-      { text: preReview(c, ' --before-proof'), background: true },
-      ...(lightLane(f) ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s, f.lastPin.ref || f.lastPin.commit) + '   (PARTIAL)' }))),
-      { text: brief(c, f, '--recheck') },
-      ...(f.last ? [...(lightLane(f) ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s) + '   (the last round: the full proof)' }))), ...suiteLines(c, f)] : []),
-      ...ownerList(f),
-    ] },
+    lines: (c, f) => {
+      // 2026-11-23 (owner, one proof per round): every code change of the round comes first (each note's fix, the own
+      // read, the checks before the proof); then the proof and the re-check, once.
+      const hold = proofHold(f, { notes: true });
+      return [
+        ...(f.git.clean ? [] : [{ text: `git -C ${p(c.repo)} status --short   (commit the fix batch first)`, plain: true }]),
+        ...(f.checks.beforeProof ? [] : [{ text: preReview(c, ' --before-proof') }]),
+        ...(hold ? [{ text: `the proof and the re-check wait: ${hold}`, plain: true }] : [
+          // The last round runs the full proof only (re-check 3: both were printed for one side).
+          ...(lightLane(f) || f.last ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s, f.lastPin.ref || f.lastPin.commit) + '   (PARTIAL)' }))),
+          { text: brief(c, f, '--recheck') },
+          ...(f.last ? [...(lightLane(f) ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s) + '   (the last round: the full proof)' }))), ...suiteLines(c, f)] : []),
+        ]),
+        ...ownerList(f),
+      ];
+    } },
   { id: 'last-round', loop: 'Step 3.5, item 6', lanes: ALL,
     // After a re-check with no open note: the full proof, the suite once, the full checks.
     when: (f) => f.pinAtHead && f.lastPin.kind === 'recheck',
     done: (f) => (noProofStep(f) || f.proof.done) && f.suite.done && f.checks.all !== false,
-    lines: (c, f) => [
-      ...(noProofStep(f) || f.proof.done ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s) }))),
-      ...(f.suite.done ? [] : suiteLines(c, f)),
-      { text: preReview(c) },
-    ] },
+    lines: (c, f) => {
+      const hold = noProofStep(f) || f.proof.done ? '' : proofHold(f, { notes: true });
+      return [
+        ...(noProofStep(f) || f.proof.done ? [] : hold ? [{ text: `the proof waits: ${hold}`, plain: true }, ...(f.checks && f.checks.beforeProof === false ? [{ text: preReview(c, ' --before-proof') }] : [])] : sidesOf(c).map((s) => ({ text: proofLine(c, s) }))),
+        ...(f.suite.done ? [] : suiteLines(c, f)),
+        { text: preReview(c) },
+      ];
+    } },
   { id: 'verdict', loop: 'Step 3.5, item 7', lanes: ALL, unknown: () => true,
     done: (f) => f.pushed === true,
     lines: (c) => [{ text: `${tool(c, 'notes.mjs')} verdict --review --repo ${p(c.repo)}` }] },

@@ -49,6 +49,17 @@ async function runIn(fx, cmd, ...args) {
 }
 const start = (fx) => run(fx, 'start', '--repo', fx.repo, '--notes', fx.notes, '--base', 'base', '--suite', 'node run full-suite', '--side', 'page', '--fix-files', 'a.js', '--', 'node', '--test', 'a.test.mjs');
 const note = (fx, name, text) => fs.writeFileSync(path.join(fx.notes, name), text);
+// A whole `pre-review --before-proof` run that passed on the work tree as it is now (pre-review-cache.mjs).
+async function beforeProofPassedHere(fx) {
+  const cache = await import('../scripts/pre-review-cache.mjs');
+  const keep = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = fx.state;
+  // For the task's base, as sanad.mjs reads it (re-check 4: a pass is for one base).
+  let base = '';
+  try { base = JSON.parse(fs.readFileSync(path.join(fx.notes, 'task.json'), 'utf8')).base || ''; } catch { /* none */ }
+  if (!base) { let i = ''; try { i = cp.execFileSync('git', ['-C', fx.repo, 'config', '--get', 'sanad.integration'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* unset */ } base = 'origin/' + (i || 'staging'); }
+  try { cache.rememberBeforeProof(fx.repo, cache.workTree(fx.repo), true, cache.notesInputs(cache.BEFORE_PROOF_FILES.map((n) => path.join(fx.notes, n))), undefined, base); } finally { if (keep === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = keep; }
+}
 // The author's own read of its diff (the self-read step), recorded for the commit at HEAD.
 const selfRead = (fx, found = 'none') => run(fx, 'self-read', '--repo', fx.repo, '--notes', fx.notes, '--found', found);
 // A commit the author has read (the steps after the self-read step); `read: false` leaves the step due.
@@ -129,10 +140,16 @@ test('each state of a small task prints its due step, with every path filled', a
   assert.equal(selfRead(fx, 'fixed the empty-list case; test a.test.mjs').status, 0);
   r = run(fx, 'next');
   assert.deepEqual(stepsOf(r.out), ['checks-before-proof', 'breaks']);
-  assert.match(r.out, /BACKGROUND \$ node \S*pre-review\.mjs --before-proof --part code --was small/);
+  // 2026-11-23 (owner, one proof per round): every part, in the foreground; the proof waits for its pass on this code.
+  assert.match(r.out, /^ {2}\$ node \S*pre-review\.mjs --before-proof --was small/m);
+  assert.doesNotMatch(r.out, /--part code/);
   note(fx, 'breaks.json', JSON.stringify([{ name: 'b1', file: 'a.js', find: 'a = 2', put: 'a = 1', mustFail: ['x'] }]));
   r = run(fx, 'next');
-  assert.deepEqual(stepsOf(r.out), ['checks-before-proof', 'proof']);
+  assert.deepEqual(stepsOf(r.out), ['checks-before-proof'], 'the proof is not printed beside checks that have not passed');
+  // The checks passed on this code (what a passing `pre-review --before-proof` keeps): the proof is due.
+  await beforeProofPassedHere(fx);
+  r = run(fx, 'next');
+  assert.deepEqual(stepsOf(r.out), ['proof']);
   assert.ok(r.out.includes(`--old base --files a.js --breaks ${n}/breaks.json --then-green --log ${n}/proof-page.log -- node --test a.test.mjs`), r.out);
   // No printed command keeps a path to fill in.
   for (const line of r.out.split(/\r?\n/).filter((l) => l.includes('$ '))) assert.doesNotMatch(line, /<[a-z ]+>/i, line);
@@ -151,8 +168,16 @@ test('each state of a small task prints its due step, with every path filled', a
   r = run(fx, 'next');
   assert.deepEqual(stepsOf(r.out), ['fix-round']);
   assert.match(r.out, /pre-review\.mjs --before-proof /);
+  // 2026-11-23 (owner, one proof per round): the proof and the re-check wait for the checks to pass on the fix's code,
+  // and for every note the builder can fix to be answered.
+  assert.match(r.out, /the proof and the re-check wait: the checks before the proof have not passed on this code/);
+  assert.doesNotMatch(r.out, /--changed-since/);
+  await beforeProofPassedHere(fx);
+  assert.match((await runIn(fx, 'next')).out, /the proof and the re-check wait: 1 note\(s\) still to fix and answer \(notes\.mjs answer\): NOTE 1/);
+  fx.notesList = { known: true, all: [{ n: 1, kind: 'Bug', text: 'the date is a day off', state: 'fixed' }] };
+  r = await runIn(fx, 'next');
   assert.match(r.out, /--changed-since refs\/sanad\/review\/t\/1 /);
-  assert.match(run(fx, 'next', '--last').out, /the last round: the full proof/);
+  assert.match((await runIn(fx, 'next', '--last')).out, /the last round: the full proof/);
 
   // A clean re-check of that commit: the full proof (the record is for the older tree), the suite, the checks.
   const fixed = gitIn(fx.repo, 'rev-parse', 'HEAD');

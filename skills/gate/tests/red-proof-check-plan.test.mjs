@@ -213,3 +213,57 @@ test('the FOREIGN? guard runs before any run: a folder of 201 untracked files is
   assert.equal(lastLine(r), REFUSED);
   nothingRan(f);
 });
+
+// 2026-11-23 (owner, item 2): run 3 of the small task ran two full proofs whose two breaks did not parse (an unbalanced
+// `.catch(`). A break whose file does not parse with the break put in is refused before any run; PLAN OK says the
+// parse is syntax only.
+test('a break that leaves its file unparsable is refused before any run, by --check-plan and by a real run', () => {
+  const f = fixture();
+  const broken = { ...cleans, name: 'cleans broken badly', put: 'cleans: (false' };
+  for (const extra of [['--check-plan'], ['--then-green', '--parallel', '1']]) {
+    const r = f.proof([broken], extra);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stdout, /BREAK INVALID ✗ cleans broken badly: with the break put in, rule\.cjs does not parse \(.+\)/);
+    assert.match(r.stdout, /RED-PROOF: NOT PROVED ✗ — 1 break\(s\) leave their file unparsable\. Nothing ran; files untouched\./);
+    nothingRan(f);
+  }
+  assert.equal(fs.readFileSync(path.join(f.repo, 'rule.cjs'), 'utf8'), RULE, 'the file is untouched');
+});
+
+test('PLAN OK says the parse is syntax only: a break with a missing name parses and passes the plan', () => {
+  const f = fixture();
+  const r = f.proof([{ ...cleans, put: 'cleans: missingName' }], ['--check-plan']);
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /Each break's file was parsed with the break put in \(1 parsed\): syntax only — a missing name or a type error is not caught here; the run finds those\./);
+  assert.equal(lastLine(r), 'PLAN OK');
+});
+
+// 2026-11-23 (owner): after BREAK INVALID the same proof does not run again until a break or a file changed (run 9).
+test('a break saved as invalid on this exact code stops the same proof before any run; a changed break or code runs', async () => {
+  const f = fixture();
+  const rec = await import('../scripts/proof-record.mjs');
+  const keep = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = f.env.SANAD_STATE_DIR;
+  try {
+    const key = rec.recordKey([process.execPath, 'check.cjs'], '');
+    rec.writeBreakResult(f.repo, key, cleans, { state: 'invalid', tree: rec.codeFingerprint(f.repo), run: 'earlier', ms: null });
+  } finally { if (keep === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = keep; }
+  const again = f.proof([cleans], ['--then-green', '--parallel', '1']);
+  assert.equal(again.status, 2, again.stdout);
+  assert.match(again.stdout, /BREAK INVALID ✗ cleans broken: it was invalid on this exact code the last time, and neither the break nor the code changed since/);
+  assert.match(again.stdout, /RED-PROOF: NOT RUN ✗ — 1 break\(s\) already ended BREAK INVALID on this code\. Change the break \(breaks\.mjs\) or the code first\. Nothing ran; files untouched\./);
+  nothingRan(f);
+  // --fresh does not open it either (re-check 3).
+  const fresh = f.proof([cleans], ['--then-green', '--parallel', '1', '--fresh']);
+  assert.equal(fresh.status, 2, fresh.stdout);
+  assert.match(fresh.stdout, /RED-PROOF: NOT RUN ✗/);
+  nothingRan(f);
+  // The break changed: it runs (and is caught).
+  const changed = f.proof([{ ...cleans, put: 'cleans: 0' }], ['--then-green', '--parallel', '1']);
+  assert.doesNotMatch(changed.stdout, /NOT RUN ✗/);
+  assert.ok(f.ran() > 0, 'the changed break ran');
+  // The same break on changed code runs too.
+  f.write({ 'src/extra.test.cjs': CLEAN_JS.replace("'clean'", "'clean twice'") });
+  const code = f.proof([cleans], ['--then-green', '--parallel', '1']);
+  assert.doesNotMatch(code.stdout, /NOT RUN ✗/);
+});
