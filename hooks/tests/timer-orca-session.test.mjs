@@ -60,6 +60,26 @@ test('a session in the projects folder of CLAUDE_CONFIG_DIR marks its stages', (
   } finally { delete process.env.CLAUDE_CONFIG_DIR; }
 });
 
+// 2026-11-23 (owner, item 4): only a proof call that runs tests counts as a proof run. Run 3 of the small task counted
+// 10 runs; 4 were a --help call and plan checks that ran nothing.
+test('a proof call that runs no test (--help, --check-plan, --show-remote, --warm) is no proof run; a real proof is one', () => {
+  const s = session(path.join(process.env.APPDATA, 'orca', 'claude-profiles', 'p4', 'home', 'projects', 'C--repo'));
+  for (const flag of ['--help', '--check-plan', '--show-remote', '--warm', '"--warm"', "'--check-plan'"]) s.run(`node /x/gate/scripts/red-proof.mjs --repo . ${flag} -- npx vitest run`);
+  assert.deepEqual(s.marks().filter((m) => m.startsWith('side run proof')), [], 'no run counted');
+  assert.ok(s.marks().includes('step proof'), 'the time still shows as the proof stage');
+  s.run('node /x/gate/scripts/red-proof.mjs --repo . --breaks b.json --then-green -- npx vitest run');
+  assert.equal(s.marks().filter((m) => m.startsWith('side run proof')).length, 1);
+  // Re-check: a test filter "--warm" after ` -- ` belongs to the test command; the proof runs and is counted.
+  s.run('node /x/gate/scripts/red-proof.mjs --repo . --breaks b.json -- npx vitest run -t "--warm"');
+  assert.equal(s.marks().filter((m) => m.startsWith('side run proof')).length, 2);
+  // A quoted "--" ends the proof's own options too.
+  s.run('node /x/gate/scripts/red-proof.mjs --repo . --breaks b.json "--" npx vitest run -t "--warm"');
+  assert.equal(s.marks().filter((m) => m.startsWith('side run proof')).length, 3);
+  // Another command's ` -- ` before the proof does not end the proof's options (re-check 3).
+  s.run('git diff -- src && node /x/gate/scripts/red-proof.mjs --help');
+  assert.equal(s.marks().filter((m) => m.startsWith('side run proof')).length, 3);
+});
+
 test('a log in a folder of the same names outside the trusted roots is no session: nothing is marked', () => {
   const s = session(path.join(scratch, 'elsewhere', 'claude-profiles', 'p3', 'home', 'projects', 'C--repo'));
   assert.equal(s.run('node /x/gate/scripts/red-proof.mjs --test a.test.ts -- npx vitest run'), '');

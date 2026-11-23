@@ -32,6 +32,7 @@ import { parseSiblings, jobOpenReason } from './siblings.mjs';
 import { requestStart, report as timerReport } from './sanad-timer.mjs';
 import { readRecord, codeFingerprint, recordKey } from './proof-record.mjs';
 import { foreignLine as foreignText } from './change-set.mjs';
+import { beforeProofPassed, notesInputs, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
 import { due, render, switchLines, stopRound, askOwner, pathFor, GATE_DIR, q } from './steps.mjs';
 
 export const EVIDENCE_OPEN = (tree) => `<!-- sanad-evidence tree=${tree} -->`;
@@ -336,7 +337,8 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
     // 2026-11-20 (timed task): every proof log of the folder (proof*.log), so the review step names them all.
     proofLogs: dir ? (() => { try { return fs.readdirSync(dir).filter((n) => /^proof.*\.log$/i.test(n)).sort().map((n) => at(n)); } catch { return []; } })() : [],
     proof: { done: proofDone, missingSides, entries: ents.length, breaks: proved.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
-    checks: { code: undefined, all: undefined },
+    // beforeProof (2026-11-23): the last whole `pre-review --before-proof` run passed on the work tree as it is now.
+    checks: { code: undefined, all: undefined, beforeProof: !foreign && ahead > 0 && dir ? beforeProofPassed(top, undefined, notesInputs(BEFORE_PROOF_FILES.map((n) => at(n))), base) : false },
     suite: { done: Boolean(receipt || ci), receipt, ci, mark: task.suite || '' },
     notes: { known: read.known, all, open: read.known ? all.filter(isOpen) : [] },
     decisions, pushed,

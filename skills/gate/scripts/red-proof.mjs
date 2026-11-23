@@ -171,6 +171,7 @@ import { bashEnv, gitBash } from './git-bash.mjs';
 import { selectCommand } from './proof-select.mjs';
 import { changeSet, foreignLine } from './change-set.mjs';
 import { holdTestMachine } from './test-machine-lock.mjs';
+import { syntaxProblem } from './ts-parser.mjs';
 
 // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
 // missing element, a type, reference or build error, or a timeout means the test itself (or the
@@ -1304,6 +1305,31 @@ async function main() {
       process.exit(2);
     }
   }
+  // 2026-11-23 (owner): each break's file, with the break put in, must parse, before any run (run 3 of the small task: two
+  // breaks with an unbalanced `.catch(` ended BREAK INVALID after a full run, twice). Syntax only: a missing name or a
+  // type error parses, and the run finds those. Here only, on this machine: the test machine's copy (--plan) skips it.
+  let syntaxNote = '';
+  if (!plan && repo && Array.isArray(breaks)) {
+    const broken = [], unparsed = new Set();
+    let parsed = 0;
+    for (const b of breaks) {
+      let text;
+      try { text = textAt(b.file); } catch { continue; }
+      const next = applyBreak(text, b.find, b.put);
+      if (next === null) continue;   // the find check above names it
+      // Only a break that makes a parsable file unparsable is refused: a file that did not parse before the break (a
+      // fixture of plain text, a language this reader does not know) is left to the run, as before.
+      const before = syntaxProblem(repo, b.file, text);
+      if (before !== '') { unparsed.add(b.file); continue; }
+      const problem = syntaxProblem(repo, b.file, next);
+      if (problem === null) { unparsed.add(b.file); continue; }
+      parsed++;
+      if (problem) broken.push({ b, problem });
+    }
+    for (const x of broken) say(`  BREAK INVALID ✗ ${x.b.name}: with the break put in, ${x.b.file} does not parse (${x.problem}); write a break that keeps the file valid code`);
+    if (broken.length) { say(`RED-PROOF: NOT PROVED ✗ — ${broken.length} break(s) leave their file unparsable. Nothing ran; files untouched.`); process.exit(2); }
+    syntaxNote = ` Each break's file was parsed with the break put in (${parsed} parsed${unparsed.size ? `, ${unparsed.size} file(s) not parsed: ${[...unparsed].slice(0, 3).join(', ')}` : ''}): syntax only — a missing name or a type error is not caught here; the run finds those.`;
+  }
   // --check-plan ends here (2026-11-19): every check above ran, and nothing else does. One more check is its own:
   // every mustFail part must name a test. A part in no title of the changed test files may still name an older
   // test, so it is refused only when no file of the repository holds its words (the breaks file itself left out).
@@ -1326,7 +1352,7 @@ async function main() {
       process.exit(2);
     }
     const count = breaks.filter(x => !x.single).length;
-    say(`RED-PROOF: plan checked — ${count} break(s): each is filled in and its find matches once, no mustFail part is ambiguous or names no test, and no new "nothing happens" check is left unproven. No run started, no test machine contacted, no copy taken.`);
+    say(`RED-PROOF: plan checked — ${count} break(s): each is filled in and its find matches once, no mustFail part is ambiguous or names no test, and no new "nothing happens" check is left unproven.${syntaxNote} No run started, no test machine contacted, no copy taken.`);
     say('PLAN OK');
     process.exit(0);
   }
@@ -1424,6 +1450,19 @@ async function main() {
   // old-code run (2026-11-19): else an honest --old proof left nothing for the checks before review to read.
   const keepsFacts = !plan && !partial && (keepsRecord || hasOld);
   const proof = { key: recordKey(command, recordCwd), proved: false, code: '', why: '' };
+  // 2026-11-23 (owner): after BREAK INVALID the same proof does not run again until a break or a file changed (run 3 of
+  // the small task ran the same invalid breaks twice). A break saved as invalid on this exact code (its result, by break
+  // id: name, file, find, put and mustFail; by code id: codeFingerprint) stops the run before any copy or sync.
+  function refuseRepeatInvalid(tree) {
+    // --fresh too (re-check 3): it reruns saved results, but a break that does not compile on this code stays invalid.
+    if (!keepsRecord || !tree) return;
+    let bad = [];
+    try { bad = breakStates(repo, proof.key, breaks, tree, readRecord(repo)).filter((s) => s.saved === 'invalid'); } catch { return; }
+    if (!bad.length) return;
+    for (const s of bad) say(`  BREAK INVALID ✗ ${s.name}: it was invalid on this exact code the last time, and neither the break nor the code changed since`);
+    say(`RED-PROOF: NOT RUN ✗ — ${bad.length} break(s) already ended BREAK INVALID on this code. Change the break (breaks.mjs) or the code first. Nothing ran; files untouched.`);
+    process.exit(2);
+  }
   function takeBack(reason) {
     try { writeEntry(repo, proof.key, { ok: false, reason: String(reason).slice(0, 300), base, command, cwd: recordCwd, ...(partial ? { partial: true } : {}) }); }
     catch { /* not written: an entry's code id still voids it after any edit */ }
@@ -1532,6 +1571,7 @@ async function main() {
     // folder moved between them, or the sync sent another tree, the code id is of other code than the one sent.
     let treeBefore = '';
     if (keepsFacts || keepsRecord) { treeBefore = treeId(repo); proof.code = codeFingerprint(repo); if (treeId(repo) !== treeBefore) treeBefore = ''; }
+    refuseRepeatInvalid(proof.code);
     const sync = spawnSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000 });
     const syncOut = (sync.stdout || '') + (sync.stderr || '');
     const remoteDown = 'RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).';
@@ -1660,6 +1700,17 @@ async function main() {
           const order = [...new Set(sentCaught.map(c => c.i))].sort((a, b) => a - b);
           const at = order[reportedCaught++];
           if (at !== undefined && breaks[at] && !breaks[at].single && String(breaks[at].name) === caughtRow[2]) l += caughtTail(breakId(breaks[at]), proof.code);
+        }
+        // 2026-11-23: an invalid break the test machine names is saved here too, so the same proof does not run again on
+        // the same code with the same break (refuseRepeatInvalid).
+        // The break is found by its whole name (attack, 2026-11-23: a name that holds ": " was cut at it): the longest
+        // name of the list that the line names, followed by ": ".
+        const invalidRow = /^\s*BREAK INVALID ✗ (.*)$/.exec(l);
+        if (invalidRow && keepsRecord && proof.code && !proof.why) {
+          const named = breaks.filter((x) => !x.single && invalidRow[1].startsWith(String(x.name) + ': ')).sort((x, y) => String(y.name).length - String(x.name).length);
+          // Two breaks of that same name: the line cannot tell which one, so neither is saved (re-check 3).
+          const b = named.length && named.filter((x) => String(x.name) === String(named[0].name)).length === 1 ? named[0] : null;
+          if (b) { try { writeBreakResult(repo, proof.key, b, { state: 'invalid', tree: proof.code, run: remoteRun, ms: null }); } catch { /* not saved: the run may start again */ } }
         }
         if (l.trim() && !/post-quantum|store now|openssh\.com\/pq/.test(l)) say(l);
       };
@@ -1941,6 +1992,7 @@ async function main() {
   const runId = `${Date.now().toString(36)}-${process.pid}`;
   let saveTree = '';
   if (keepsRecord || keepsFacts) { try { saveTree = proof.code || codeFingerprint(repo); } catch { saveTree = ''; } }
+  refuseRepeatInvalid(saveTree);
   const savedState = new Map(), sentNow = new Set();
   function breakState(b, res) {
     if (res.noop) return { state: 'invalid', why: [] };

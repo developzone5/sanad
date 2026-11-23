@@ -76,7 +76,7 @@ import { createRequire } from 'node:module';
 import { isMain } from './is-main.mjs';
 import { fileKind, format as formatSize, sizeTask } from './size-check.mjs';
 import { bashEnv, gitBash } from './git-bash.mjs';
-import { checkKey, claim, lookup, release, remember, runIdentity, runningNow } from './pre-review-cache.mjs';
+import { checkKey, claim, lookup, release, remember, runIdentity, runningNow, rememberBeforeProof, workTree, notesInputs, notesParts, inputsOf, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
 import { changeSet, foreignLine } from './change-set.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -215,8 +215,9 @@ const sshArgs = (remote, line) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=
 
 // `remote`: the test machine (remoteOf); undefined reads it from git config, null means none.
 // `part`: 'lists' or 'code' (--part). `set`: the change set of this run, when it is already read. `breaks`: the
-// break list of the notes folder, `proof`: the proof's own test command and `proofCwd`: its folder (from --notes).
-export function planChecks({ repo, base, was, lines, check, places, siblings, node, remote, beforeProof, part, set, breaks, proof, proofCwd }) {
+// break list of the notes folder, `proofs`: each test folder's proof command [{ name, cmd, cwd }] (from --notes; `proof`
+// and `proofCwd`: one command and its folder, as before).
+export function planChecks({ repo, base, was, lines, check, places, siblings, node, remote, beforeProof, part, set, breaks, proof, proofCwd, proofs }) {
   if (!set) set = changeSet(repo, base);
   const files = changedFiles(repo, base, set);
   const checks = [];
@@ -305,15 +306,20 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
   // 2026-11-19: a break list with a mistake was found only by the proof, after the test machine was in use. With
   // --before-proof and the notes folder's break list, the proof's own checks before any run are one check here
   // (red-proof.mjs --check-plan: local, no test machine, no copy).
-  const planKnown = Array.isArray(proof) && proof.length > 0;
-  if (beforeProof && breaks && planKnown) checks.push({ name: 'break plan', cmd: process.execPath, args: [path.join(here, 'red-proof.mjs'), '--repo', repo, '--breaks', breaks, '--base', base, ...(proofCwd ? ['--cwd', proofCwd] : []), '--check-plan', '--', ...proof], cwd: repo });
+  // One check per test folder of the task (re-check 3, 2026-11-23: with two, only the first was checked, and the
+  // pass counted for both). Every side's proof runs the same break list, so each side checks it with its own command.
+  const sides = (Array.isArray(proofs) && proofs.length ? proofs : [{ cmd: proof, cwd: proofCwd }]).filter((s) => s && Array.isArray(s.cmd) && s.cmd.length);
+  const planKnown = sides.length > 0;
+  if (beforeProof && breaks) for (const s of sides) checks.push({ name: sides.length > 1 ? `break plan (${s.name || s.cwd || 'tests'})` : 'break plan', cmd: process.execPath, args: [path.join(here, 'red-proof.mjs'), '--repo', repo, '--breaks', breaks, '--base', base, ...(s.cwd ? ['--cwd', s.cwd] : []), '--check-plan', '--', ...s.cmd], cwd: repo });
+  // 2026-11-23 (owner): with a break list and no test command the check was only named as skipped, and run 3 of the small
+  // task went to its proofs with the plan unchecked. It is a failed check now: name the command, and it runs.
+  if (beforeProof && breaks && !planKnown) checks.push({ name: 'break plan', notRun: 'the notes folder names no test command (task.json), so the break plan cannot be checked before the proof: start the task with it — node <gate>/sanad.mjs start --repo <repo> --notes <notes> --side <name> [--cwd <dir>] -- <test command> — then run pre-review again.' });
   // 2026-11-12 (audit C14): with no --lines, --check or --was those parts were left out without a word, and
   // the summary still read "N of N checks passed". Each is named as skipped (not a failure).
   const skipped = [
     lines ? (textOnly ? { name: 'ticket lines', why: 'a text-only change' } : null) : { name: 'ticket lines', why: 'no --lines' },
     check ? (textOnly ? { name: 'test labels', why: 'a text-only change' } : null) : { name: 'test labels', why: 'no --check' },
     was ? null : { name: 'size growth', why: 'no --was' },
-    beforeProof && breaks && !planKnown ? { name: 'break plan', why: 'no test command in the notes folder (task.json)' } : null,
   ].filter(Boolean);
   if (part) {
     const lists = part === 'lists';
@@ -540,9 +546,18 @@ export async function preReview(opts) {
     say(block.join('\n')); say(summary);
     return { ok: false, text: [summary, ...block].join('\n') };
   }
+  // The list files as they are before the checks are chosen (re-check 3: a break list that appeared after the plan was
+  // made, but before this read, got a pass with no break plan check). The same for the code (its tree).
+  const startInputs = opts.beforeProof && !opts.part && opts.notes ? notesInputs(BEFORE_PROOF_FILES.filter((n) => n !== 'places.md').map((n) => path.join(opts.notes, n))) : '';
+  const firstTree = opts.beforeProof && !opts.part && opts.notes ? workTree(opts.repo) : '';
+  const firstHead = firstTree ? git(opts.repo, ['rev-parse', 'HEAD']) : '';
+  // The base as a commit, read before the checks (last check, 2026-11-23: a base that moved during the run was saved).
+  const baseAt = () => (opts.base ? git(opts.repo, ['rev-parse', '--verify', '--quiet', String(opts.base) + '^{commit}']) : '');
+  const firstBase = firstTree ? baseAt() : '';
   const { files, checks, remote, skipped, placesOwed, siblingsOwed } = planChecks({ ...opts, set });
   // Checks that passed on this exact code before are read, not run (pre-review-cache.mjs).
   const ident = opts.noCache ? null : runIdentity(opts.repo, opts.base);
+  const startTree = ident ? ident.tree : (opts.beforeProof && !opts.part ? workTree(opts.repo) : '');
   for (const c of checks) {
     c.key = checkKey(c, ident);
     const hit = lookup(c.key);
@@ -665,7 +680,23 @@ export async function preReview(opts) {
   for (const s of skipped) lines.push(`  – ${s.name}: skipped (${s.why})`);
   for (const s of skipped) say(`  – ${s.name}: skipped (${s.why})`);
   say(summary);
-  return { ok: results.every(r => r.code === 0), text: lines.join('\n') };
+  const ok = results.every(r => r.code === 0);
+  // 2026-11-23: a whole before-proof run (no --part) keeps its answer by the tree it began on; a tree that moved during
+  // the run keeps no pass (pre-review-cache.mjs rememberBeforeProof).
+  // Only a run with --notes keeps a pass (re-check, 2026-11-23): without it the break plan is not checked. The list files
+  // must be the same at the end as at the start, but for places.md, which the places check rewrites itself.
+  if (opts.beforeProof && !opts.part && opts.notes) {
+    const began = ident?.tree || startTree;
+    const files = BEFORE_PROOF_FILES.map((n) => path.join(opts.notes, n));
+    // The pass is saved under the list files as they were at the START (re-check 2: an edit between two reads at the end
+    // got the pass). places.md is read once at the end: the places check rewrites it itself.
+    const parts = notesParts(files);
+    const steady = inputsOf(parts.filter(([name]) => name !== 'places.md')) === startInputs;
+    const sameHead = Boolean(firstHead) && firstHead === git(opts.repo, ['rev-parse', 'HEAD']);
+    const sameBase = firstBase === baseAt();
+    rememberBeforeProof(opts.repo, began, ok && steady && sameHead && sameBase && began === firstTree && began === workTree(opts.repo), inputsOf(parts), firstHead, firstBase);
+  }
+  return { ok, text: lines.join('\n') };
 }
 
 // 2026-11-19: which checks are a kept pass for the code as it is now, running nothing (for the printed status).
@@ -714,9 +745,9 @@ async function fromNotes(o) {
     else if (norm(o[k]) !== norm(p[k])) throw new Error(`--${k} ${o[k]} is not the notes folder's file (${p[k]}): give --notes alone, or the same file`);
   }
   if (!o.beforeProof || !fs.existsSync(p.breaks)) return {};
-  let side = null;
-  try { const task = readTask(o.notes); side = task && task.sides.find(s => s && Array.isArray(s.testCommand) && s.testCommand.length); } catch { /* a task file that cannot be read: the break plan is named as skipped */ }
-  return { breaks: p.breaks, proof: side ? side.testCommand : null, proofCwd: side && side.cwd ? side.cwd : '' };
+  let sides = [];
+  try { const task = readTask(o.notes); sides = (task && task.sides || []).filter(s => s && Array.isArray(s.testCommand) && s.testCommand.length); } catch { /* a task file that cannot be read: the break plan fails as unchecked */ }
+  return { breaks: p.breaks, proofs: sides.map((s) => ({ name: String(s.name || ''), cmd: s.testCommand, cwd: s.cwd || '' })) };
 }
 
 if (isMain(import.meta.url)) {
@@ -728,7 +759,7 @@ if (isMain(import.meta.url)) {
     const node = o.node || git(repo, ['config', '--get', 'sanad.node']) || process.execPath;
     const notes = await fromNotes(o);
     // Each check's lines are printed when it ends; the summary comes last.
-    const { ok } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof, noCache: !!o.noCache, part: o.part, ...notes, print: (text) => process.stdout.write(text + '\n') });
+    const { ok } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof, noCache: !!o.noCache, part: o.part, notes: o.notes ? path.resolve(o.notes) : '', ...notes, print: (text) => process.stdout.write(text + '\n') });
     process.exitCode = ok ? 0 : 1;
   } catch (error) {
     process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--notes <dir>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--part lists|code] [--before-proof] [--no-cache]\n');

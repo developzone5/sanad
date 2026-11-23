@@ -12,7 +12,8 @@ function facts(over = {}) {
     git: { head: 'h2', headTree: 't2', tree: 't2', clean: true, changed: false, ahead: 1, untracked: 0, foreign: false },
     pins: [], lastPin: null, pinAtHead: false,
     proof: { done: false, early: false, breaks: 0, entries: 0, progress: [], logs: [] },
-    checks: { code: undefined, all: undefined },
+    // The checks before the proof passed on this code (2026-11-23); a test of that order sets it false.
+    checks: { code: undefined, all: undefined, beforeProof: true },
     suite: { done: false, receipt: null, ci: '', mark: 'full' },
     notes: { known: true, all: [], open: [] }, decisions: [], pushed: false,
     // The author read its own diff at this commit (the self-read step is done); a test of that step sets it.
@@ -133,23 +134,34 @@ test('with sanad.stopRound 2 the round-2 fix prints the ASK THE OWNER list; with
   assert.doesNotMatch(text(facts({ ...round2, stop: 3 })), /ASK THE OWNER/);
   const two = text(facts({ ...round2, stop: 2 }));
   assert.match(two, /ASK THE OWNER \(round 2, stop round 2\)/);
-  assert.match(two, /NOTE 4: a rare case/);
-  assert.doesNotMatch(two, /NOTE 5/);
+  const ownerPart = two.slice(two.indexOf('ASK THE OWNER'));
+  assert.match(ownerPart, /NOTE 4: a rare case/);
+  assert.doesNotMatch(ownerPart, /NOTE 5/);
+  // 2026-11-23: the Blocker is the builder's to fix, so the proof and the re-check wait for it; the owner's note does not hold them.
+  assert.match(two, /the proof and the re-check wait: 1 note\(s\) still to fix and answer \(notes\.mjs answer\): NOTE 5/);
   assert.match(text(facts({ ...round2, round: 3, pins: [pin(1), pin(2), pin(3)], lastPin: pin(3), stop: 3 })), /ASK THE OWNER \(round 3, stop round 3\)/);
 });
 
 test('after a fix commit the fix round prints --before-proof and --changed-since with the last pin ref', () => {
   const pin = { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' };
+  // 2026-11-23 (owner, one proof per round): the checks before the proof run first, in the foreground; the proof and
+  // the re-check wait for their pass on this code.
+  const unchecked = facts({ round: 1, pins: [pin], lastPin: pin, proof: { done: false }, checks: { beforeProof: false } });
+  const first = text(unchecked);
+  assert.match(first, /^ {2}\$ node \/g\/pre-review\.mjs --before-proof /m);
+  assert.doesNotMatch(first, /BACKGROUND \$ node \/g\/pre-review/);
+  assert.match(first, /the proof and the re-check wait: the checks before the proof have not passed on this code/);
+  assert.doesNotMatch(first, /red-proof\.mjs|review-brief\.mjs --recheck/);
   const f = facts({ round: 1, pins: [pin], lastPin: pin, proof: { done: false } });
   assert.deepEqual(ids(f), ['fix-round']);
   const out = text(f);
-  assert.match(out, /BACKGROUND \$ node \/g\/pre-review\.mjs --before-proof /);
+  assert.doesNotMatch(out, /pre-review\.mjs --before-proof/, 'passed on this code: not printed again');
   assert.match(out, /red-proof\.mjs .*--changed-since refs\/sanad\/review\/t\/1 .*\(PARTIAL\)/);
   assert.match(out, /review-brief\.mjs --recheck /);
   assert.doesNotMatch(out, /the last round: the full proof/);
-  // next --last prints the full form beside the re-check.
+  // next --last prints the full form beside the re-check, and not the partial one too (re-check 3, 2026-11-23).
   const last = text(facts({ round: 1, pins: [pin], lastPin: pin, last: true }));
-  assert.match(last, /--changed-since/);
+  assert.doesNotMatch(last, /--changed-since/);
   assert.match(last, /the last round: the full proof/);
   assert.match(last, /the full suite, once/);
 });
@@ -192,8 +204,51 @@ test('the steps printed side by side: the second look with the check lines, the 
   // The owner set sanad.lateCheckLines false: the second look waits for check.md.
   assert.deepEqual(ids(facts({ has: { siblings: false, check: false }, switches: { lateCheckLines: false } })), ['check-lines']);
   assert.deepEqual(ids(facts({ has: { siblings: false, check: true }, switches: { lateCheckLines: false } })), ['second-look']);
-  assert.deepEqual(ids(facts({ has: { breaks: false } })), ['checks-before-proof', 'breaks']);
-  assert.match(text(facts({ has: { breaks: false } })), /BACKGROUND \$ node \/g\/pre-review\.mjs --before-proof --part code/);
+  assert.deepEqual(ids(facts({ has: { breaks: false }, checks: { beforeProof: false } })), ['checks-before-proof', 'breaks']);
+  // 2026-11-23: every part, in the foreground, and the proof waits for its pass (it was `--part code`, in the background).
+  const cheap = text(facts({ has: { breaks: false }, checks: { beforeProof: false } }));
+  assert.match(cheap, /^ {2}\$ node \/g\/pre-review\.mjs --before-proof --was/m);
+  assert.doesNotMatch(cheap, /--part code|BACKGROUND \$ node \/g\/pre-review/);
+  assert.match(cheap, /the proof waits until it passes on this commit/);
+});
+
+// Re-check 3, 2026-11-23: a full review pinned with a Blocker open holds the proof (its fix changes the code); the
+// last round names the command that opens the proof when its checks have not passed.
+test('a pinned full review with a note to fix holds the proof; the last round prints the checks command it waits for', () => {
+  const pin = { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' };
+  const blocker = { n: 1, kind: 'Blocker', text: 'the rows are lost' };
+  const held = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: false }, notes: { known: true, all: [blocker], open: [blocker] } }));
+  assert.doesNotMatch(held, /red-proof\.mjs/);
+  const re = { round: 1, kind: 'recheck', commit: 'h1', ref: 'refs/sanad/review/t/1r' };
+  const last = text(facts({ round: 1, pins: [pin, re], lastPin: re, pinAtHead: true, checks: { beforeProof: false }, proof: { done: false }, notes: { known: true, all: [], open: [] } }));
+  assert.match(last, /the proof waits/);
+  assert.match(last, /^ {2}\$ node \/g\/pre-review\.mjs --before-proof/m);
+});
+
+// Re-check, 2026-11-23: at a pinned commit the checks step is over, so the proof step itself names the command that opens it.
+test('a pinned commit without passing checks: the proof waits and its step prints the checks command', () => {
+  const pin = { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' };
+  const out = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, checks: { beforeProof: false }, proof: { done: false }, notes: { known: true, all: [], open: [] } }));
+  assert.match(out, /the proof waits/);
+  assert.match(out, /^ {2}\$ node \/g\/pre-review\.mjs --before-proof/m);
+});
+
+// 2026-11-23 (owner, one proof per round): the proof is offered only after every code change of the round.
+test('one proof per round: the proof is not offered before the checks pass on this code, nor while a note to fix is open', () => {
+  // Before the first review: the checks before the proof come first, and the proof is not printed beside them.
+  assert.deepEqual(ids(facts({ checks: { beforeProof: false } })), ['checks-before-proof']);
+  assert.deepEqual(ids(facts({ checks: { beforeProof: true } })), ['proof']);
+  // A fix round: a Bug or a Gap still open holds the proof and the re-check; a Question or a note that asks the owner does not.
+  const pin = { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' };
+  const round = (open) => text(facts({ round: 1, pins: [pin], lastPin: pin, notes: { known: true, all: open, open } }));
+  const held = round([{ n: 3, kind: 'Bug', text: 'the list skips a row' }]);
+  assert.match(held, /the proof and the re-check wait: 1 note\(s\) still to fix and answer \(notes\.mjs answer\): NOTE 3/);
+  assert.doesNotMatch(held, /red-proof\.mjs|review-brief\.mjs --recheck/);
+  const free = round([{ n: 4, kind: 'Question', text: 'keep the old order?' }, { n: 5, kind: 'Gap', text: 'you decide: a known limit', asks: true }]);
+  assert.match(free, /red-proof\.mjs .*\(PARTIAL\)/);
+  assert.match(free, /review-brief\.mjs --recheck/);
+  // The builder's own read not recorded for this commit: that step comes first.
+  assert.deepEqual(ids(facts({ round: 1, pins: [pin], lastPin: pin, selfRead: 'h1' })), ['self-read']);
 });
 
 test('the start step adds --no-ticket when the ticket text file holds no ticket ID', async () => {

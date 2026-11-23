@@ -701,6 +701,33 @@ test('15 changed functions: every caller row is read from the size check\'s data
   assert.doesNotMatch(again.text, /not on the places list/);
 });
 
+// Re-check, 2026-11-23: the list files given one by one, without --notes, check no break plan, so a pass there is not
+// kept for the proof; the same pass with --notes is.
+test('--before-proof keeps its pass for the proof only when run with --notes', async () => {
+  const { beforeProofPassed, notesInputs, BEFORE_PROOF_FILES } = await import('../scripts/pre-review-cache.mjs');
+  const { repo, write } = fixture();
+  write('web/src/a.test.ts', "// STORY-1: \"The total shows once\"\nit('x', () => {});\n");
+  write('web/src/a.ts', 'export const a = 4;\n');
+  const places = placesFor(repo), notes = path.dirname(places);
+  siblingsFor(places);
+  fs.writeFileSync(path.join(notes, 'lines.md'), '- The total shows once\n');
+  const inputs = () => notesInputs(BEFORE_PROOF_FILES.map((n) => path.join(notes, n)));
+  const loose = run(repo, ['--before-proof', '--lines', path.join(notes, 'lines.md'), '--was', 'small', '--places', places, '--siblings', path.join(notes, 'siblings.md')]);
+  assert.equal(loose.status, 0, loose.stdout);
+  assert.equal(beforeProofPassed(repo, undefined, inputs(), 'base'), false, 'no --notes: no pass kept');
+  const whole = run(repo, ['--notes', notes, '--before-proof', '--was', 'small']);
+  assert.equal(whole.status, 0, whole.stdout);
+  assert.equal(beforeProofPassed(repo, undefined, inputs(), 'base'), true, 'with --notes: the pass is kept, for the base it ran against');
+  // The base moves while the checks run (last check, 2026-11-23): no pass, for the old base or the new one.
+  const moved = execFileSync('git', ['commit-tree', 'base^{tree}', '-p', 'base', '-m', 'moved'], { cwd: repo, encoding: 'utf8', windowsHide: true }).trim();
+  const mech = path.join(path.dirname(notes), 'move-base.mjs');
+  fs.writeFileSync(mech, `import { execFileSync } from 'node:child_process';\nexecFileSync('git', ['-C', ${JSON.stringify(repo)}, 'update-ref', 'refs/heads/base', ${JSON.stringify(moved)}]);\n`);
+  execFileSync('git', ['config', 'sanad.mechanical', mech], { cwd: repo, windowsHide: true });
+  const during = run(repo, ['--notes', notes, '--before-proof', '--was', 'small']);
+  assert.equal(during.status, 0, during.stdout);
+  assert.equal(beforeProofPassed(repo, undefined, inputs(), 'base'), false, 'the base moved during the run: no pass');
+});
+
 test('--notes fills the list options from the notes folder; an option that names another file is a usage error', async () => {
   const { repo, write } = fixture();
   write('web/src/a.ts', 'export const a = 9;\n');
@@ -724,7 +751,7 @@ test('--notes fills the list options from the notes folder; an option that names
   assert.equal(run(repo, ['--part', 'all']).status, 2, '--part takes lists or code only');
 });
 
-test('--before-proof with the notes folder\'s break list: a bad break fails the break plan check and is named; no test command, and it is named as skipped', async () => {
+test('--before-proof with the notes folder\'s break list: a bad break fails the break plan check and is named; no test command fails it too (2026-11-23: it was only named as skipped)', async () => {
   const { planChecks } = await import('../scripts/pre-review.mjs');
   const { writeTask } = await import('../scripts/notes-dir.mjs');
   const { repo, write } = fixture();
@@ -733,7 +760,10 @@ test('--before-proof with the notes folder\'s break list: a bad break fails the 
   siblingsFor(places);
   fs.writeFileSync(path.join(notes, 'breaks.json'), JSON.stringify([{ name: 'value broken', file: 'web/src/a.ts', find: 'NOT IN THE FILE', put: 'x', mustFail: ['the value'] }]));
   const noCommand = run(repo, ['--notes', notes, '--before-proof']);
-  assert.match(noCommand.stdout, /– break plan: skipped \(no test command in the notes folder \(task\.json\)\)/, noCommand.stdout + noCommand.stderr);
+  assert.equal(noCommand.status, 1, noCommand.stdout + noCommand.stderr);
+  assert.match(noCommand.stdout, /✗ break plan — NOT RUN/, noCommand.stdout + noCommand.stderr);
+  assert.match(noCommand.stdout, /the notes folder names no test command \(task\.json\), so the break plan cannot be checked before the proof/);
+  assert.doesNotMatch(noCommand.stdout, /– break plan: skipped/);
   writeTask(notes, { repo, base: 'base', sides: [{ name: 'web', cwd: '', testCommand: [process.execPath, '-e', '0'] }] });
   const bad = run(repo, ['--notes', notes, '--before-proof']);
   assert.equal(bad.status, 1, bad.stdout + bad.stderr);
@@ -742,6 +772,20 @@ test('--before-proof with the notes folder\'s break list: a bad break fails the 
   assert.doesNotMatch(run(repo, ['--notes', notes]).stdout, /break plan/);
   const plan = planChecks({ repo, base: 'base', node: process.execPath, remote: null, beforeProof: true, breaks: 'b.json', proof: ['npm', 'test'], proofCwd: 'web' }).checks.find(c => c.name === 'break plan');
   assert.deepEqual(plan.args.slice(1), ['--repo', repo, '--breaks', 'b.json', '--base', 'base', '--cwd', 'web', '--check-plan', '--', 'npm', 'test']);
+  // Two test folders: one break plan check each (re-check 3: only the first was checked).
+  const two = planChecks({ repo, base: 'base', node: process.execPath, remote: null, beforeProof: true, breaks: 'b.json',
+    proofs: [{ name: 'page', cmd: ['npm', 'test'], cwd: 'web' }, { name: 'server', cmd: ['dotnet', 'test'], cwd: 'api' }] }).checks.filter(c => /^break plan/.test(c.name));
+  assert.deepEqual(two.map((c) => [c.name, c.args.slice(-2).join(' '), c.args[c.args.indexOf('--cwd') + 1]]), [['break plan (page)', 'npm test', 'web'], ['break plan (server)', 'dotnet test', 'api']]);
+});
+
+test('a before-proof pass is for one commit: an amended commit with the same files reopens it', async () => {
+  const { beforeProofPassed, rememberBeforeProof, workTree } = await import('../scripts/pre-review-cache.mjs');
+  const { repo } = fixture();
+  const tree = workTree(repo);
+  rememberBeforeProof(repo, tree, true, 'in');
+  assert.equal(beforeProofPassed(repo, tree, 'in'), true);
+  execFileSync('git', ['commit', '-q', '--amend', '-m', 'another message'], { cwd: repo, windowsHide: true });
+  assert.equal(beforeProofPassed(repo, workTree(repo), 'in'), false);
 });
 
 test('checkStatus says which checks are a kept pass for the code as it is, and runs nothing; tscInfoFile names the type check\'s build-info file', async () => {

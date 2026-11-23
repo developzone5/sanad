@@ -131,6 +131,48 @@ export function checkKey(check, ident) {
 export function cacheFile() {
   return path.join(process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state'), 'pre-review-cache.json');
 }
+
+// 2026-11-23 (owner, one proof per round): a whole `pre-review --before-proof` run (every part) and its answer, by the
+// work tree it ran on, so the printed steps offer the proof only after those checks passed on this very code. Run 3 of
+// the small task started the proof beside them, and the fixes they asked for voided two proofs. The step printer reads
+// it (sanad.mjs); no guard does.
+function beforeProofFile(repo) {
+  let top = git(repo, ['rev-parse', '--show-toplevel']) || path.resolve(repo);
+  try { top = fs.realpathSync.native(top); } catch { /* keep git's answer */ }
+  return path.join(path.dirname(cacheFile()), 'before-proof', sha(path.resolve(top).replace(/\\/g, '/').toLowerCase()).slice(0, 16) + '.json');
+}
+// The task's list files the checks read, as one id: each file by its name, with its text (attack, 2026-11-23: a break
+// list changed after the pass, in the notes folder outside the repository, and the old pass still matched). A file
+// that is not there counts as empty.
+export const BEFORE_PROOF_FILES = ['lines.md', 'check.md', 'places.md', 'siblings.md', 'breaks.json', 'task.json'];
+// Each file's name and hash, read once (re-check 2: two reads at the end let an edit between them get the pass).
+export function notesParts(paths) {
+  return (paths || []).filter(Boolean).map((p) => {
+    let text = '';
+    try { text = fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n'); } catch { /* not there: empty */ }
+    return [path.basename(p), sha(text)];
+  });
+}
+export function inputsOf(parts) { return sha(JSON.stringify([...parts].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)))); }
+export function notesInputs(paths) { return inputsOf(notesParts(paths)); }
+// The pass is for one commit too (re-check 3, 2026-11-23: the commits check reads the commit message, and an amended
+// message kept the pass of the files alone). `head`: the commit the run began on; HEAD now by default.
+// And for one base (re-check 4, 2026-11-23: checks run against another base were taken for the task's): `base` is the
+// ref the checks compared with, kept as the commit it named then.
+const baseRev = (repo, base) => (base ? git(repo, ['rev-parse', '--verify', '--quiet', String(base) + '^{commit}']) : '');
+export function rememberBeforeProof(repo, tree, ok, inputs = '', head = git(repo, ['rev-parse', 'HEAD']), base = '') {
+  if (!tree) return;
+  const file = beforeProofFile(repo);
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify({ tree, head: String(head || ''), base: baseRev(repo, base), inputs, ok: ok === true, at: new Date().toISOString() })); } catch { /* not kept: the step stays due */ }
+}
+/** True when the last whole before-proof run passed on `tree` (the work tree now, by default), HEAD and `base`, with these list files. */
+export function beforeProofPassed(repo, tree = workTree(repo), inputs = '', base = '') {
+  try {
+    const r = JSON.parse(fs.readFileSync(beforeProofFile(repo), 'utf8'));
+    const head = git(repo, ['rev-parse', 'HEAD']);
+    return Boolean(tree) && Boolean(head) && r.ok === true && r.tree === tree && r.head === head && String(r.base || '') === baseRev(repo, base) && String(r.inputs || '') === String(inputs || '');
+  } catch { return false; }
+}
 function readAll() {
   try { const j = JSON.parse(fs.readFileSync(cacheFile(), 'utf8')); return j && typeof j.entries === 'object' ? j : { entries: {} }; }
   catch { return { entries: {} }; }

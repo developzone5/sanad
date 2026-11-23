@@ -389,7 +389,15 @@ function autoStage(input, now = new Date(), { isCode } = {}) {
   const same = current === stage || (stage === 'code' && /^(?:first code edit|start \(auto\))/.test(current));
   // 2026-11-19: every proof or pre-review start is a "run" side line with the tree id, so the report can tell
   // a retry from overlapping work. The step itself is still added once.
-  if (stage === 'proof' || stage === 'checks before review') append(t.file, 'side', `run ${stage.split(' ')[0]} ${treeId(input.cwd)}`, now);
+  // 2026-11-23 (owner): a proof call that runs no test (--help, --check-plan, --show-remote, --warm) is no proof run: run 3
+  // of the small task counted 10 "runs", 4 of them such calls.
+  // A quoted flag counts too (attack, 2026-11-23: "--warm"); only the proof's own options are read, the part before its
+  // ` -- ` (re-check: a test filter "--warm" after it is the test command's).
+  // From the proof's own name on (re-check 3: a `git diff -- src` before it ended the read too early).
+  const whole = String((input.tool_input || {}).command || '');
+  const own = whole.slice(Math.max(0, whole.indexOf('red-proof.mjs'))).split(/\s["']?--["']?(?=\s)/)[0];
+  const noRun = stage === 'proof' && /(?:^|[\s"'])--(?:help|check-plan|show-remote|warm)(?=["'\s]|$)/.test(own);
+  if ((stage === 'proof' && !noRun) || stage === 'checks before review') append(t.file, 'side', `run ${stage.split(' ')[0]} ${treeId(input.cwd)}`, now);
   if (same && t.last.kind !== 'wait') return '';
   append(t.file, 'step', stage, now);
   return stage;
