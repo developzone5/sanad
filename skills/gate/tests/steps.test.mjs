@@ -159,11 +159,17 @@ test('after a fix commit the fix round prints --before-proof and --changed-since
   assert.match(out, /red-proof\.mjs .*--changed-since refs\/sanad\/review\/t\/1 .*\(PARTIAL\)/);
   assert.match(out, /review-brief\.mjs --recheck /);
   assert.doesNotMatch(out, /the last round: the full proof/);
-  // next --last prints the full form beside the re-check, and not the partial one too (re-check 3, 2026-11-23).
+  // 2026-11-25 (owner, "the check fits the change"): next --last prints the partial proof too; the full proof and the
+  // suite run once, at the end (the last-round step below), never in a fix round.
   const last = text(facts({ round: 1, pins: [pin], lastPin: pin, last: true }));
-  assert.doesNotMatch(last, /--changed-since/);
-  assert.match(last, /the last round: the full proof/);
-  assert.match(last, /the full suite, once/);
+  assert.match(last, /red-proof\.mjs .*--changed-since refs\/sanad\/review\/t\/1 .*\(PARTIAL\)/);
+  assert.doesNotMatch(last, /the last round: the full proof/);
+  assert.doesNotMatch(last, /the full suite, once/);
+  // After the last check, with no note open: the full proof and the suite, once.
+  const re = { round: 2, kind: 'recheck', short: true, commit: 'h2', ref: 'refs/sanad/review/t/2' };
+  const end = text(facts({ round: 1, pins: [pin, re], lastPin: re, pinAtHead: true, proof: { done: false }, notes: { known: true, all: [], open: [] } }));
+  assert.match(end, /red-proof\.mjs (?:(?!--changed-since).)*--then-green/);
+  assert.match(end, /the full suite, once/);
 });
 
 test('after a clean re-check the full proof and the suite are printed; a suite that passed on this tree is not printed again', () => {

@@ -177,7 +177,10 @@ test('each state of a small task prints its due step, with every path filled', a
   fx.notesList = { known: true, all: [{ n: 1, kind: 'Bug', text: 'the date is a day off', state: 'fixed' }] };
   r = await runIn(fx, 'next');
   assert.match(r.out, /--changed-since refs\/sanad\/review\/t\/1 /);
-  assert.match((await runIn(fx, 'next', '--last')).out, /the last round: the full proof/);
+  // 2026-11-25 (owner): a fix round runs the partial proof, also in the last round; the full proof runs once, at the end.
+  const lastRound = (await runIn(fx, 'next', '--last')).out;
+  assert.match(lastRound, /--changed-since refs\/sanad\/review\/t\/1 /);
+  assert.doesNotMatch(lastRound, /the last round: the full proof/);
 
   // A clean re-check of that commit: the full proof (the record is for the older tree), the suite, the checks.
   const fixed = gitIn(fx.repo, 'rev-parse', 'HEAD');
@@ -724,4 +727,16 @@ test('early review: a log of this tree with the passing run and the old-code run
   assert.equal(proofStartedEarly([page], tree, 2), false, 'a page and a server side need two logs');
   assert.equal(proofStartedEarly([page, log('proof-server.log', tree, both)], tree, 2), true);
   assert.equal(proofStartedEarly([page], '', 1), false, 'no tree');
+});
+
+// 2026-11-25 (owner, "the check fits the change"): a short check after the last round is no round.
+test('the round count leaves out the short checks; the evidence names them', () => {
+  const fx = fixture();
+  start(fx);
+  const head = gitIn(fx.repo, 'rev-parse', 'HEAD');
+  pinFile(fx, [{ round: 1, kind: 'full', commit: head }, { round: 2, kind: 'recheck', commit: head }, { round: 3, kind: 'recheck', short: true, commit: head }]);
+  const facts = readFacts({ repo: fx.repo, notes: fx.notes });
+  assert.equal(facts.round, 2);
+  assert.equal(facts.pins.length, 3);
+  assert.match(evidenceBlock(facts).join('\n'), /Review rounds: 2 \(full, recheck, short check\)/);
 });

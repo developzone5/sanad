@@ -235,10 +235,11 @@ export const STEPS = [
         ...(f.git.clean ? [] : [{ text: `git -C ${p(c.repo)} status --short   (commit the fix batch first)`, plain: true }]),
         ...(f.checks.beforeProof ? [] : [{ text: preReview(c, ' --before-proof') }]),
         ...(hold ? [{ text: `the proof and the re-check wait: ${hold}`, plain: true }] : [
-          // The last round runs the full proof only (re-check 3: both were printed for one side).
-          ...(lightLane(f) || f.last ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s, f.lastPin.ref || f.lastPin.commit) + '   (PARTIAL)' }))),
+          // 2026-11-25 (owner, "the check fits the change"): every fix round runs the partial proof of what changed;
+          // the full proof and the suite run once, at the end (the last-round step). The brief tool picks the check:
+          // a re-check round, or past the stop round the short check, which is no round.
+          ...(lightLane(f) ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s, f.lastPin.ref || f.lastPin.commit) + '   (PARTIAL)' }))),
           { text: brief(c, f, '--recheck') },
-          ...(f.last ? [...(lightLane(f) ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s) + '   (the last round: the full proof)' }))), ...suiteLines(c, f)] : []),
         ]),
         ...ownerList(f),
       ];
