@@ -1655,7 +1655,9 @@ function addReport(st, report, key, seq, at, seat, questionsOnly = false, readKe
     if (seen) continue;
     // asks (2026-11-18, audit 3): a Gap or Bug that asks the user to decide is the user's, like a Question.
     // A "none" line keeps its number, closed from the start (outcome 'none'): no answer is asked for it.
-    notes.push({ n: notes.length + 1, kind: note.kind, text: note.text, outcome: found.none ? 'none' : null, ...(note.asks ? { asks: true } : {}) });
+    // A hygiene note keeps its number too, set aside from the start (outcome 'hygiene'): it goes to the owner's end list.
+    const outcome = found.none ? 'none' : !questionsOnly && hygieneNote(note.kind, classes[i], note.text, note.asks) ? 'hygiene' : null;
+    notes.push({ n: notes.length + 1, kind: note.kind, text: note.text, outcome, ...(note.asks ? { asks: true } : {}) });
     st.noteSeqs.push(seq);
     st.noteSeats.push(seat || 'reviewer');
     st.noteClasses.push(classes[i] || '');
@@ -1834,6 +1836,21 @@ function readSameLines(st, text, launch) {
 const NEVER_CARRIED = /\b(?:secur\w+|auth\w*|access|permission\w*|roles?|tenant\w*|secret\w*|token\w*|password\w*|injection|idor|xss|csrf|ticket|data[ \t]+loss|saved[ \t]+data)\b|\b[TC]\d+\b/i;
 // A tag (T3, C2) names a ticket line or a check, in brackets, grouped ([C1, C2]) or bare: the same limit as the word ticket.
 const neverCarried = (note) => note.kind === 'Blocker' || NEVER_CARRIED.test(String(note.text || ''));
+// A hygiene note (2026-11-25, owner): a Gap the reviewer marks HYGIENE (`Gap (HYGIENE) — …`: copied code, naming,
+// structure) holds neither the stop nor the push and is not fixed in the loop; it goes to the owner's end list.
+// A Blocker and a Bug never, whatever mark they carry; nor a Gap that names security, access, a tenant, a token,
+// saved data or a ticket line (the same words an owner's earlier answer never carries), nor one that asks the owner.
+// Review fix (2026-11-25): a word list alone missed "unauthorized", "credentials", "SQL". So a hygiene note must also
+// have the hygiene shape the checklist asks for: a `fix cost:` part and no wrong result (`→` / `->`), and the list
+// of words that keep a note open is wider here than NEVER_CARRIED. A note text of NOTE_CHARS may have been cut, and
+// the cut part may name a risk: it stays open. The fix-cost part also keeps an older `Gap (HYGIENE)` tag (written
+// before this rule, with no cost) an open note on a rescan. Any doubt keeps the note open.
+const HYGIENE_NEVER = /\w*auth\w*|\b(?:credential\w*|keys?|jwt|expir\w*|forg\w+|sql|pii|privilege\w*|log[ \t-]?ins?|sessions?|cookies?|owners?|leak\w*|releas\w*|expos\w+|bypass\w*|unsafe|vulnerab\w*|crash\w*|lost|loses?|wrong|misses|skips?)\b/i;
+function hygieneNote(kind, cls, text, asks) {
+  const s = String(text || '');
+  return kind === 'Gap' && cls === 'HYGIENE' && asks !== true && s.length < NOTE_CHARS && /\bfix cost\s*:/i.test(s) && !/→|->/.test(s) &&
+    !NEVER_CARRIED.test(s) && !HYGIENE_NEVER.test(s);
+}
 // The owner's switch, read only when every other condition of a carried decision holds (a rare line).
 const carrySwitches = new Map();
 function carrySwitch(cwd) {
@@ -1927,7 +1944,26 @@ function openNotesAfter(r, text) {
       same: (r && r.reviewSame) || [], decisions: (r && r.reviewDecisions) || [], closedBy: [...((r && r.reviewClosedBy) || [])], carry: () => carrySwitch(r && r.reviewCwd) });
   return notes.filter((n) => !n.outcome);
 }
-const FIXED_NEEDS_CHANGE = 'a fixed line needs a code change and a passing test after the note; a note that needs no change, or a text-only fix (a doc, a locale or a config file), is refuted by the note check or closed by the words the user typed';
+// The final text holds only note answers the guards accept (2026-11-25, owner): each line that is not blank is one
+// outcome line, of a note of this session that is closed once the text counts. Such a text has no tool call, so
+// it ends the turn; the stop gate sends the author on with the next step (stop-gate.js, SG-GO-ON). What counts
+// as an answer is openNotesAfter's own rule: a line it does not accept leaves its note open, and the text is no
+// such text. A text with any other line (a question, a code block, a verdict) is no such text either.
+const OUTCOME_ONE = new RegExp(OUTCOME_RE.source);
+function noteAnswersOnly(r, text) {
+  const rows = String(text || '').replace(/\r/g, '').split('\n').filter((l) => l.trim());
+  if (!rows.length) return false;
+  const notes = r && Array.isArray(r.reviewNotes) ? r.reviewNotes : [];
+  const named = [];
+  for (const row of rows) {
+    const m = OUTCOME_ONE.exec(row);
+    if (!m) return false;
+    named.push(Number(m[1]));
+  }
+  const open = new Set(openNotesAfter(r, text).map((n) => n.n));
+  return named.every((n) => notes.some((x) => x.n === n) && !open.has(n));
+}
+const FIXED_NEEDS_CHANGE ='a fixed line needs a code change and a passing test after the note; a note that needs no change, or a text-only fix (a doc, a locale or a config file), is refuted by the note check or closed by the words the user typed';
 const REFUTE_NEEDS_CHECK = 'only a note the note check refuted can be closed as refuted (a Blocker or a Question: never)';
 const REFUTE_QUESTION = 'a Question is closed only by the words the user typed: the note check gives its view to the user, it never closes a Question (nor a note that asks the user to decide)';
 const REFUTE_STALE = 'the code or a test changed after the note check started: run the note check again, and refute only on its newest answer';
@@ -2956,4 +2992,5 @@ module.exports = {
   scanTranscript,
   verificationCommand,
   humanWords, reportNotes, claimsReview, openNotesMessage, openNotesAfter, stateFolder, stateAllowed,
+  hygieneNote, noteAnswersOnly,
 };
