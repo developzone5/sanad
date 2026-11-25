@@ -1,0 +1,561 @@
+diff --git a/eduquest-frontend/src/components/layout/Topbar.role-label.test.tsx b/eduquest-frontend/src/components/layout/Topbar.role-label.test.tsx
+new file mode 100644
+index 00000000000..ddc2623f2d7
+--- /dev/null
++++ b/eduquest-frontend/src/components/layout/Topbar.role-label.test.tsx
+@@ -0,0 +1,180 @@
++// Topbar — the role line under the user's name.
++// It printed the raw role name ("Teacher", "Admin", ...) in every language, so an Arabic page showed
++// one English line in an Arabic top bar. It now shows the role word in the page's language.
++// Real query client and real EN/AR bundles; the API modules are mocked.
++import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
++import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { MemoryRouter } from 'react-router-dom';
++
++vi.mock('@/api/auth', () => ({ authApi: { logout: vi.fn() } }));
++vi.mock('@/api/communications', () => ({
++  communicationsApi: { getUnreadCount: vi.fn().mockResolvedValue({ unreadCount: 0 }), getFeed: vi.fn().mockResolvedValue({ items: [] }) },
++}));
++vi.mock('@/api/notifications', () => ({
++  notificationsApi: { getUnreadCount: vi.fn().mockResolvedValue({ unreadCount: 0 }), getAll: vi.fn().mockResolvedValue({ items: [] }), markRead: vi.fn() },
++}));
++vi.mock('@/lib/unsaved-changes', () => ({ confirmDiscardUnsavedChanges: vi.fn().mockResolvedValue(true) }));
++
++const { i18nReady, switchLanguage } = await import('@/i18n');
++const { default: useAuthStore } = await import('@/stores/auth-store');
++const { default: useUIStore } = await import('@/stores/ui-store');
++const { default: Topbar } = await import('./Topbar');
++
++// The words each bundle holds for the roles (users.enums.roles), written out so a test fails
++// if the top bar shows the raw role name instead.
++const ARABIC: Record<string, string> = {
++  Teacher: 'معلم',
++  Student: 'طالب',
++  Parent: 'ولي أمر',
++  Manager: 'مدير',
++  Admin: 'مسؤول النظام',
++  Applicant: 'متقدم',
++};
++const ENGLISH: Record<string, string> = {
++  Teacher: 'Teacher',
++  Student: 'Student',
++  Parent: 'Parent',
++  Manager: 'Manager',
++  Admin: 'Admin',
++  Applicant: 'Applicant',
++};
++
++function renderTopbar() {
++  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  return render(
++    <QueryClientProvider client={client}>
++      <MemoryRouter>
++        <Topbar />
++      </MemoryRouter>
++    </QueryClientProvider>,
++  );
++}
++
++async function setPageLanguage(lang: 'en' | 'ar') {
++  await act(async () => {
++    useUIStore.setState({ language: lang });
++    await switchLanguage(lang);
++  });
++}
++
++function signInAs(roles: string[], fullName = 'Demo Person') {
++  useAuthStore.setState({ user: { id: 3, fullName, email: 'person@example.test', roles } as never });
++}
++
++/** The role line: the paragraph under the name inside the profile block. */
++function roleLine(): string {
++  const block = screen.getByRole('button', { name: /Demo Person/ });
++  return (block.querySelector('p')?.textContent ?? '').trim();
++}
++
++beforeAll(async () => {
++  await i18nReady;
++});
++afterEach(async () => {
++  await setPageLanguage('en');
++});
++
++describe('Topbar — role line in the page language', () => {
++  // T1: "When I use the site in Arabic, the role under my name in the top bar shows in English:
++  // "Teacher", "Student", "Parent", "Manager" or "Admin"."
++  it.each(['Teacher', 'Student', 'Parent', 'Manager', 'Admin'])('[C1] shows the Arabic word for %s on an Arabic page', async (role) => {
++    await setPageLanguage('ar');
++    signInAs([role]);
++    renderTopbar();
++    expect(roleLine()).toBe(ARABIC[role]);
++    expect(roleLine()).not.toContain(role);
++  });
++
++  // T3: "The role must show in the page's language, for every role, and stay right when the language is switched."
++  it.each(Object.keys(ENGLISH))('[C2] shows %s in the page language, Arabic and English', async (role) => {
++    await setPageLanguage('ar');
++    signInAs([role]);
++    const { unmount } = renderTopbar();
++    expect(roleLine()).toBe(ARABIC[role]);
++    unmount();
++
++    await setPageLanguage('en');
++    renderTopbar();
++    expect(roleLine()).toBe(ENGLISH[role]);
++  });
++
++  // T3: "The role must show in the page's language, for every role, and stay right when the language is switched."
++  it('[C3] changes the role line at once when the language is switched, both ways', async () => {
++    await setPageLanguage('en');
++    signInAs(['Teacher']);
++    renderTopbar();
++    expect(roleLine()).toBe('Teacher');
++
++    // The real switcher in the top bar: the "ع" button, then "EN".
++    fireEvent.click(screen.getByRole('button', { name: 'ع' }));
++    await waitFor(() => expect(roleLine()).toBe('معلم'), { timeout: 2000 });
++
++    fireEvent.click(screen.getByRole('button', { name: 'EN' }));
++    await waitFor(() => expect(roleLine()).toBe('Teacher'), { timeout: 2000 });
++  });
++
++  // Change: a user can come with an empty role list, or with a role the bundles do not know.
++  it('[C4] shows a word in the page language when the user has no role, and the raw name for an unknown role', async () => {
++    await setPageLanguage('ar');
++    signInAs([]);
++    const second = renderTopbar();
++    expect(roleLine()).toBe('مستخدم');
++    second.unmount();
++
++    signInAs(['Auditor']);
++    const third = renderTopbar();
++    expect(roleLine()).toBe('Auditor');
++    third.unmount();
++
++    await setPageLanguage('en');
++    signInAs([]);
++    renderTopbar();
++    expect(roleLine()).toBe('User');
++  });
++
++  // Change: the same "User" word is the name when a saved session has no name; the avatar letter
++  // comes from that name, so it must not stay a hard-coded English "U" on an Arabic page.
++  it('[C5] uses the page-language word for the name and the avatar letter when there is no name', async () => {
++    await setPageLanguage('ar');
++    signInAs(['Teacher'], '');
++    const arabic = renderTopbar();
++    const arBlock = screen.getByRole('button', { name: /معلم/ });
++    expect(arBlock.querySelector('.flex-grow-1 > span')?.textContent).toBe('مستخدم');
++    expect(arBlock.querySelector('.b-r-10')?.textContent).toBe('م');
++    arabic.unmount();
++
++    await setPageLanguage('en');
++    renderTopbar();
++    const enBlock = screen.getByRole('button', { name: /Teacher/ });
++    expect(enBlock.querySelector('.flex-grow-1 > span')?.textContent).toBe('User');
++    expect(enBlock.querySelector('.b-r-10')?.textContent).toBe('U');
++  });
++
++  // Review note 5: a name of only spaces is no name; it must get the generic word, not a blank.
++  it('[C5] treats a name of only spaces as no name, in Arabic and English', async () => {
++    await setPageLanguage('ar');
++    signInAs(['Teacher'], '   ');
++    const arabic = renderTopbar();
++    const arBlock = screen.getByRole('button', { name: /معلم/ });
++    expect(arBlock.querySelector('.flex-grow-1 > span')?.textContent).toBe('مستخدم');
++    expect(arBlock.querySelector('.b-r-10')?.textContent).toBe('م');
++    arabic.unmount();
++
++    await setPageLanguage('en');
++    renderTopbar();
++    const enBlock = screen.getByRole('button', { name: /Teacher/ });
++    expect(enBlock.querySelector('.flex-grow-1 > span')?.textContent).toBe('User');
++  });
++
++  // T2: "Every other word of the top bar is in Arabic, so this line looks broken to our users."
++  it.each(Object.keys(ARABIC))('[C6] leaves no English word in the Arabic profile block for %s', async (role) => {
++    await setPageLanguage('ar');
++    signInAs([role], 'أحمد علي');
++    renderTopbar();
++    const block = screen.getByRole('button', { name: /أحمد علي/ });
++    const profile = block.closest('li') as HTMLElement;
++    expect(profile.textContent).not.toMatch(/[A-Za-z]/);
++    expect(profile.textContent).toContain(ARABIC[role]);
++  });
++});
+diff --git a/eduquest-frontend/src/components/layout/Topbar.tsx b/eduquest-frontend/src/components/layout/Topbar.tsx
+index c38007bf5ca..8ecf4314927 100644
+--- a/eduquest-frontend/src/components/layout/Topbar.tsx
++++ b/eduquest-frontend/src/components/layout/Topbar.tsx
+@@ -32,6 +32,7 @@ import useUserViewStore from '@/stores/user-view-store';
+ import { endUserView } from '@/lib/user-view';
+ import { confirmDiscardUnsavedChanges } from '@/lib/unsaved-changes';
+ import { getAccessScopeKey } from '@/utils/access-scope-key';
++import { getRoleLabel } from '@/utils/role-helpers';
+ import { authApi } from '@/api/auth';
+ 
+ import topbarLogo from '@/assets/images/logo/logo.png';
+@@ -191,7 +192,12 @@ function Topbar() {
+     navigate('/login', { replace: true });
+   };
+ 
+-  const displayRole = user?.roles[0] || 'User';
++  // The role line shows the role in the page's language (getRoleLabel, shared with the view-as strip
++  // and the Users page). No role, or a name that is empty or only spaces, shows the generic word.
++  const primaryRole = user?.roles[0];
++  const genericUserLabel = t('topbar.genericUser');
++  const displayRole = primaryRole ? getRoleLabel(t, primaryRole) : genericUserLabel;
++  const displayName = user?.fullName?.trim() || genericUserLabel;
+   const tourActive = tourRunning || tourStarting;
+   const tourControlLabel = t(
+     tourActive ? 'tourControls.stopPageTour' : 'tourControls.startPageTour',
+@@ -372,11 +378,11 @@ function Topbar() {
+                     flexShrink: 0,
+                   }}
+                 >
+-                  {user?.fullName?.charAt(0).toUpperCase() || 'U'}
++                  {displayName.charAt(0).toUpperCase()}
+                 </div>
+               )}
+               <div className="flex-grow-1 ms-2">
+-                <span>{user?.fullName || 'User'}</span>
++                <span>{displayName}</span>
+                 <p className="mb-0">
+                   {displayRole} <ChevronDown size={14} className="middle" />
+                 </p>
+diff --git a/eduquest-frontend/src/components/layout/UserViewBar.role-label.test.tsx b/eduquest-frontend/src/components/layout/UserViewBar.role-label.test.tsx
+new file mode 100644
+index 00000000000..8cbfbb4d3c2
+--- /dev/null
++++ b/eduquest-frontend/src/components/layout/UserViewBar.role-label.test.tsx
+@@ -0,0 +1,73 @@
++// UserViewBar — the role chip in an admin's view-as strip.
++// The strip and the top bar show the same person's role on one screen. The strip used a second word
++// list (tickets.role*) with no Applicant word, so the two could disagree. Both now use getRoleLabel.
++// Real EN/AR bundles; the view-as lib is mocked.
++import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
++import { act, render, screen } from '@testing-library/react';
++
++vi.mock('@/lib/user-view', () => ({ endUserView: vi.fn() }));
++
++const { i18nReady, switchLanguage } = await import('@/i18n');
++const { default: useAuthStore } = await import('@/stores/auth-store');
++const { default: useUserViewStore } = await import('@/stores/user-view-store');
++const { default: UserViewBar } = await import('./UserViewBar');
++
++const ARABIC: Record<string, string> = {
++  Teacher: 'معلم',
++  Student: 'طالب',
++  Parent: 'ولي أمر',
++  Manager: 'مدير',
++  Applicant: 'متقدم',
++};
++
++async function setPageLanguage(lang: 'en' | 'ar') {
++  await act(async () => {
++    await switchLanguage(lang);
++  });
++}
++
++function viewAs(role: string) {
++  useAuthStore.setState({ user: { id: 9, fullName: 'Viewed Member', email: 'member@example.test', roles: [role] } as never });
++  useUserViewStore.setState({
++    session: {
++      sessionId: 1,
++      handle: 'h',
++      expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
++      target: { id: 9, fullName: 'Viewed Member', roles: [role] },
++      ticket: { id: 5, number: 'TKT-1-1' },
++    },
++  });
++}
++
++beforeAll(async () => {
++  await i18nReady;
++});
++afterEach(async () => {
++  useUserViewStore.setState({ session: null });
++  await setPageLanguage('en');
++});
++
++describe('UserViewBar — role chip uses the same words as the top bar', () => {
++  // Review note 3 (owner: "Yes, same words"): the strip shows the role with the top bar's words.
++  it.each(Object.keys(ARABIC))('[C7] shows the top bar word for %s on an Arabic page', async (role) => {
++    await setPageLanguage('ar');
++    viewAs(role);
++    const { container } = render(<UserViewBar />);
++    expect(container.querySelector('.uv-bar-role')?.textContent).toBe(ARABIC[role]);
++  });
++
++  // The old strip words (tickets.role*) have no Applicant word, so this is the case where the two lists differ.
++  it('[C7] shows the Applicant word, which the old strip words lack, on an Arabic page', async () => {
++    await setPageLanguage('ar');
++    viewAs('Applicant');
++    const { container } = render(<UserViewBar />);
++    expect(container.querySelector('.uv-bar-role')?.textContent).toBe('متقدم');
++  });
++
++  it('[C7] shows the English word on an English page', async () => {
++    await setPageLanguage('en');
++    viewAs('Applicant');
++    render(<UserViewBar />);
++    expect(screen.getByText('Applicant').className).toContain('uv-bar-role');
++  });
++});
+diff --git a/eduquest-frontend/src/components/layout/UserViewBar.tsx b/eduquest-frontend/src/components/layout/UserViewBar.tsx
+index bec66301d81..7e7c4b8be4e 100644
+--- a/eduquest-frontend/src/components/layout/UserViewBar.tsx
++++ b/eduquest-frontend/src/components/layout/UserViewBar.tsx
+@@ -13,6 +13,7 @@ import { Eye } from 'react-feather';
+ import { endUserView } from '@/lib/user-view';
+ import useAuthStore from '@/stores/auth-store';
+ import useUserViewStore from '@/stores/user-view-store';
++import { getRoleLabel } from '@/utils/role-helpers';
+ 
+ function roleChipClass(role: string | undefined): string {
+   switch (role) {
+@@ -47,7 +48,7 @@ function UserViewBar() {
+       <strong className="uv-bar-name" dir="auto">{name}</strong>
+       {role && (
+         <span className={`uv-bar-role ${roleChipClass(role)}`}>
+-          {t(`tickets.role${role}`, { defaultValue: role })}
++          {getRoleLabel(t, role)}
+         </span>
+       )}
+       <span className="uv-bar-meta">{t('tickets.userViewTicket', { num: ticketNumber })}</span>
+diff --git a/eduquest-frontend/src/i18n/locales/ar/index.ts b/eduquest-frontend/src/i18n/locales/ar/index.ts
+index beddd655d06..e6f37f549ff 100644
+--- a/eduquest-frontend/src/i18n/locales/ar/index.ts
++++ b/eduquest-frontend/src/i18n/locales/ar/index.ts
+@@ -1,6 +1,7 @@
+ import campusOption from './campusOption';
+ import landing from './landing';
+ import tourControls from './tourControls';
++import topbar from './topbar';
+ import surveys from './surveys';
+ import appName from './appName';
+ import save from './save';
+@@ -87,6 +88,7 @@ export default {
+   campusOption,
+   landing,
+   tourControls,
++  topbar,
+   surveys,
+   appName,
+   save,
+diff --git a/eduquest-frontend/src/i18n/locales/ar/topbar.ts b/eduquest-frontend/src/i18n/locales/ar/topbar.ts
+new file mode 100644
+index 00000000000..5296ee6121d
+--- /dev/null
++++ b/eduquest-frontend/src/i18n/locales/ar/topbar.ts
+@@ -0,0 +1,5 @@
++// Top bar words that have no other home.
++export default {
++  // The name and role fallback when the signed-in user has no name or no role.
++  genericUser: 'مستخدم',
++};
+diff --git a/eduquest-frontend/src/i18n/locales/ar/users.ts b/eduquest-frontend/src/i18n/locales/ar/users.ts
+index 409d0665df7..9156c280639 100644
+--- a/eduquest-frontend/src/i18n/locales/ar/users.ts
++++ b/eduquest-frontend/src/i18n/locales/ar/users.ts
+@@ -108,6 +108,7 @@ export default {
+       parent: 'ولي أمر',
+       manager: 'مدير',
+       admin: 'مسؤول النظام',
++      applicant: 'متقدم',
+     },
+     statuses: {
+       active: 'نشط',
+diff --git a/eduquest-frontend/src/i18n/locales/en/index.ts b/eduquest-frontend/src/i18n/locales/en/index.ts
+index beddd655d06..e6f37f549ff 100644
+--- a/eduquest-frontend/src/i18n/locales/en/index.ts
++++ b/eduquest-frontend/src/i18n/locales/en/index.ts
+@@ -1,6 +1,7 @@
+ import campusOption from './campusOption';
+ import landing from './landing';
+ import tourControls from './tourControls';
++import topbar from './topbar';
+ import surveys from './surveys';
+ import appName from './appName';
+ import save from './save';
+@@ -87,6 +88,7 @@ export default {
+   campusOption,
+   landing,
+   tourControls,
++  topbar,
+   surveys,
+   appName,
+   save,
+diff --git a/eduquest-frontend/src/i18n/locales/en/topbar.ts b/eduquest-frontend/src/i18n/locales/en/topbar.ts
+new file mode 100644
+index 00000000000..91a835281c5
+--- /dev/null
++++ b/eduquest-frontend/src/i18n/locales/en/topbar.ts
+@@ -0,0 +1,5 @@
++// Top bar words that have no other home.
++export default {
++  // The name and role fallback when the signed-in user has no name or no role.
++  genericUser: 'User',
++};
+diff --git a/eduquest-frontend/src/i18n/locales/en/users.ts b/eduquest-frontend/src/i18n/locales/en/users.ts
+index c9402b3a958..cd2ba3969fa 100644
+--- a/eduquest-frontend/src/i18n/locales/en/users.ts
++++ b/eduquest-frontend/src/i18n/locales/en/users.ts
+@@ -108,6 +108,7 @@ export default {
+       parent: 'Parent',
+       manager: 'Manager',
+       admin: 'Admin',
++      applicant: 'Applicant',
+     },
+     statuses: {
+       active: 'Active',
+diff --git a/eduquest-frontend/src/pages/settings/SettingsPage.role-label.test.tsx b/eduquest-frontend/src/pages/settings/SettingsPage.role-label.test.tsx
+new file mode 100644
+index 00000000000..05fa48042cf
+--- /dev/null
++++ b/eduquest-frontend/src/pages/settings/SettingsPage.role-label.test.tsx
+@@ -0,0 +1,77 @@
++// SettingsPage — the role badges in the identity card.
++// They printed the raw role name ("Teacher", ...) in every language, the same fault the top bar had.
++// They now use the top bar's words (getRoleLabel). Real query client and real EN/AR bundles; the API is mocked.
++import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
++import { act, render, waitFor } from '@testing-library/react';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { createMemoryRouter, RouterProvider } from 'react-router-dom';
++
++// An implementation, not mockResolvedValue: vitest.config.ts sets mockReset, which clears a
++// resolved value before each test but keeps the function given to vi.fn().
++vi.mock('@/api/account', () => ({
++  accountApi: {
++    getProfile: vi.fn(async () => ({
++      fullName: 'Demo Person',
++      email: 'person@example.test',
++      phone: null,
++      dateOfBirth: null,
++      gender: null,
++      preferredLanguage: 'ar',
++      timeZone: 'Asia/Riyadh',
++      emailTicketAlerts: true,
++      profilePictureUrl: null,
++      createdAt: '2026-01-01T00:00:00Z',
++      lastLoginAt: null,
++      updatedAt: null,
++    })),
++    updateProfile: vi.fn(),
++    uploadProfilePicture: vi.fn(),
++    deleteProfilePicture: vi.fn(),
++  },
++}));
++
++const { i18nReady, switchLanguage } = await import('@/i18n');
++const { default: useAuthStore } = await import('@/stores/auth-store');
++const { default: useUIStore } = await import('@/stores/ui-store');
++const { default: SettingsPage } = await import('./SettingsPage');
++
++async function setPageLanguage(lang: 'en' | 'ar') {
++  await act(async () => {
++    useUIStore.setState({ language: lang });
++    await switchLanguage(lang);
++  });
++}
++
++function renderSettings(roles: string[]) {
++  useAuthStore.setState({ user: { id: 3, fullName: 'Demo Person', email: 'person@example.test', roles } as never });
++  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  // useBlocker needs a data router.
++  const router = createMemoryRouter([{ path: '/settings', element: <SettingsPage /> }], { initialEntries: ['/settings'] });
++  return render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
++}
++
++function badges(container: HTMLElement): string[] {
++  return Array.from(container.querySelectorAll('.settings-role-badge')).map((el) => el.textContent ?? '');
++}
++
++beforeAll(async () => {
++  await i18nReady;
++});
++afterEach(async () => {
++  await setPageLanguage('en');
++});
++
++describe('SettingsPage — role badges in the page language', () => {
++  // Review round 2, note 1 (owner: "fix now, with a test"): same rule as the top bar.
++  it('[C8] shows the Arabic role words on an Arabic page', async () => {
++    await setPageLanguage('ar');
++    const { container } = renderSettings(['Teacher', 'Parent']);
++    await waitFor(() => expect(badges(container)).toEqual(['معلم', 'ولي أمر']));
++  });
++
++  it('[C8] shows the Arabic words for the other roles, and the raw name for an unknown role', async () => {
++    await setPageLanguage('ar');
++    const { container } = renderSettings(['Admin', 'Manager', 'Student', 'Applicant', 'Auditor']);
++    await waitFor(() => expect(badges(container)).toEqual(['مسؤول النظام', 'مدير', 'طالب', 'متقدم', 'Auditor']));
++  });
++});
+diff --git a/eduquest-frontend/src/pages/settings/SettingsPage.tsx b/eduquest-frontend/src/pages/settings/SettingsPage.tsx
+index 284165155cb..acdd5af939f 100644
+--- a/eduquest-frontend/src/pages/settings/SettingsPage.tsx
++++ b/eduquest-frontend/src/pages/settings/SettingsPage.tsx
+@@ -28,7 +28,7 @@ import useAuthStore from '@/stores/auth-store';
+ import type { AccountProfileDto } from '@/types/account';
+ import { getAccessScopeKey } from '@/utils/access-scope-key';
+ import { getApiErrorMessage } from '@/utils/api-error';
+-import { hasAnyRole } from '@/utils/role-helpers';
++import { getRoleLabel, hasAnyRole } from '@/utils/role-helpers';
+ import useUnsavedChangesGuard from '@/hooks/use-unsaved-changes-guard';
+ 
+ import '@/styles/users-management.css';
+@@ -455,7 +455,7 @@ function SettingsPage() {
+               {roles.length > 0 && (
+                 <div className="settings-identity-roles">
+                   {roles.map(role => (
+-                    <span key={role} className="settings-role-badge">{role}</span>
++                    <span key={role} className="settings-role-badge">{getRoleLabel(t, role)}</span>
+                   ))}
+                 </div>
+               )}
+diff --git a/eduquest-frontend/src/pages/users/UsersListPage.tsx b/eduquest-frontend/src/pages/users/UsersListPage.tsx
+index ab57672be4d..b467bf9f60a 100644
+--- a/eduquest-frontend/src/pages/users/UsersListPage.tsx
++++ b/eduquest-frontend/src/pages/users/UsersListPage.tsx
+@@ -55,6 +55,7 @@ import usePagination from '@/hooks/use-pagination';
+ import useAuthStore from '@/stores/auth-store';
+ import useProductTourStore from '@/stores/product-tour-store';
+ import { getAccessScopeKey } from '@/utils/access-scope-key';
++import { getRoleLabel } from '@/utils/role-helpers';
+ import { campusOptionLabel } from '@/utils/campus-option-label';
+ import { translateApiError } from '@/utils/api-error';
+ import { buildUsersWorkbook, riyadhDateString } from '@/utils/users-export';
+@@ -1607,7 +1608,7 @@ function UsersListPage() {
+   }
+ 
+   function translateRole(role: string): string {
+-    return t(`users.enums.roles.${role.toLowerCase()}`, { defaultValue: role });
++    return getRoleLabel(t, role);
+   }
+ 
+   function translateStatus(status: string): string {
+diff --git a/eduquest-frontend/src/utils/role-helpers.ts b/eduquest-frontend/src/utils/role-helpers.ts
+index c09780339e3..92f43e57dcb 100644
+--- a/eduquest-frontend/src/utils/role-helpers.ts
++++ b/eduquest-frontend/src/utils/role-helpers.ts
+@@ -7,6 +7,7 @@
+ // - Does the user have a specific role?
+ // ===================================================
+ 
++import type { TFunction } from 'i18next';
+ import type { UserRole } from '@/types/auth';
+ 
+ // getDashboardPath() — where to redirect after login
+@@ -43,3 +44,10 @@ export function hasAnyRole(roles: string[], allowedRoles: UserRole[]): boolean {
+   // .some() = returns true if at least one element matches
+   // Like: allowedRoles.Any(r => roles.Contains(r)) in LINQ
+ }
++
++// getRoleLabel() — the role's word in the page's language (users.enums.roles), one rule for every
++// screen that shows a role: the top bar, the admin view-as strip, the Users page and the Settings
++// identity card. A role with no word there shows its name as sent.
++export function getRoleLabel(t: TFunction, role: string): string {
++  return t(`users.enums.roles.${role.toLowerCase()}`, { defaultValue: role });
++}

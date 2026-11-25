@@ -1,0 +1,14 @@
+{
+  "family": "query-loop",
+  "source": "planted: no real escaped case of a query in a loop in bench4 or the owner lists; round 1 (pin.patch) is clean, the fix round adds the loop",
+  "step": "review",
+  "checklist": "DATABASE",
+  "faults": [
+    { "id": "F1", "family": "query-loop", "file": "src/Application/Reports/ClassReportService.cs", "lines": [21, 27], "grade": "bug",
+      "wrong": "The teacher name is read with one query per class inside the loop, so a school of 400 classes sends 401 queries and the report is slow." }
+  ],
+  "notes": [
+    { "kind": "Bug", "true": true, "text": "src/Application/Reports/ClassReportService.cs:23 — a school with 400 classes → 401 queries, one per class for the teacher name — read the teacher name in the same Select" },
+    { "kind": "Bug", "true": false, "text": "src/Application/Reports/ClassReportService.cs:18 — a class with a withdrawn student → the withdrawn student is counted — count only active enrollments" }
+  ]
+}

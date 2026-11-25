@@ -1,0 +1,14 @@
+{
+  "family": "access",
+  "source": "planted: no real escaped case of a missing access check in bench4 or the owner lists",
+  "step": "review",
+  "checklist": "ENTRY POINTS",
+  "faults": [
+    { "id": "F1", "family": "access", "file": "src/Api/Controllers/ClassesController.cs", "lines": [36, 43], "grade": "blocker",
+      "wrong": "The new archive endpoint has no role check, so any signed-in teacher, student or parent of the school can archive a class." }
+  ],
+  "notes": [
+    { "kind": "Blocker", "true": true, "text": "src/Api/Controllers/ClassesController.cs:37 — a signed-in student posts /api/classes/5/archive → the class is archived — add [Authorize(Roles = \"Admin,Manager\")] as on Create and Update" },
+    { "kind": "Bug", "true": false, "text": "src/Application/Classes/ClassService.cs:44 — a manager archives a class of another school → it is archived — filter by the caller's schools" }
+  ]
+}

@@ -1,0 +1,68 @@
+diff --git a/web/src/components/HomeworkCard.test.tsx b/web/src/components/HomeworkCard.test.tsx
+new file mode 100644
+index 0000000..03abe57
+--- /dev/null
++++ b/web/src/components/HomeworkCard.test.tsx
+@@ -0,0 +1,22 @@
++import { act, render, screen } from '@testing-library/react';
++import { describe, expect, it } from 'vitest';
++import i18n from '@/i18n';
++import { HomeworkCard } from './HomeworkCard';
++
++describe('HomeworkCard due label', () => {
++  // SCH-466: "It must show the word in the page's language, and change at once when the language is switched."
++  it('shows the due word in Arabic on an Arabic page and in English after a switch', async () => {
++    await act(() => i18n.changeLanguage('ar'));
++    render(<HomeworkCard title="مقال" dueAt="2026-12-01T09:00:00Z" />);
++    expect(screen.getByText(/موعد التسليم:/)).toBeInTheDocument();
++    expect(screen.queryByText(/Due:/)).toBeNull();
++    await act(() => i18n.changeLanguage('en'));
++    expect(screen.getByText(/Due:/)).toBeInTheDocument();
++  });
++
++  it('shows no due line when the homework has no due date', async () => {
++    await act(() => i18n.changeLanguage('en'));
++    render(<HomeworkCard title="Essay" dueAt={null} />);
++    expect(screen.queryByText(/Due:/)).toBeNull();
++  });
++});
+diff --git a/web/src/components/HomeworkCard.tsx b/web/src/components/HomeworkCard.tsx
+index 52ebf11..869ec0a 100644
+--- a/web/src/components/HomeworkCard.tsx
++++ b/web/src/components/HomeworkCard.tsx
+@@ -7,13 +7,13 @@ export interface HomeworkCardProps {
+ }
+ 
+ export function HomeworkCard({ title, dueAt }: HomeworkCardProps) {
+-  const { i18n } = useTranslation();
++  const { t, i18n } = useTranslation();
+   return (
+     <article className="hw-card">
+       <h3 dir="auto">{title}</h3>
+       {dueAt && (
+         <p className="hw-card-due">
+-          Due: {formatDate(dueAt, i18n.language)}
++          {t('homework.due', { date: formatDate(dueAt, i18n.language) })}
+         </p>
+       )}
+     </article>
+diff --git a/web/src/i18n/locales/ar/homework.ts b/web/src/i18n/locales/ar/homework.ts
+index 46093ca..ddc714b 100644
+--- a/web/src/i18n/locales/ar/homework.ts
++++ b/web/src/i18n/locales/ar/homework.ts
+@@ -1,4 +1,5 @@
+ export default {
+   title: 'الواجبات',
+   empty: 'لا توجد واجبات بعد',
++  due: 'موعد التسليم: {{date}}',
+ };
+diff --git a/web/src/i18n/locales/en/homework.ts b/web/src/i18n/locales/en/homework.ts
+index 395c7bd..e1e13ac 100644
+--- a/web/src/i18n/locales/en/homework.ts
++++ b/web/src/i18n/locales/en/homework.ts
+@@ -1,4 +1,5 @@
+ export default {
+   title: 'Homework',
+   empty: 'No homework yet',
++  due: 'Due: {{date}}',
+ };

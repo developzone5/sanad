@@ -1,0 +1,44 @@
+diff --git a/src/Api/Controllers/ClassesController.cs b/src/Api/Controllers/ClassesController.cs
+index 55b9583..fe63dfd 100644
+--- a/src/Api/Controllers/ClassesController.cs
++++ b/src/Api/Controllers/ClassesController.cs
+@@ -32,4 +32,12 @@ public class ClassesController : ControllerBase
+         await _classes.UpdateAsync(id, dto, User.SchoolIds(), ct);
+         return NoContent();
+     }
++
++    // SCH-410: archive a class; it leaves the classes list.
++    [HttpPost("{id:int}/archive")]
++    public async Task<IActionResult> Archive(int id, CancellationToken ct)
++    {
++        await _classes.ArchiveAsync(id, User.SchoolIds(), ct);
++        return NoContent();
++    }
+ }
+diff --git a/src/Application/Classes/ClassService.cs b/src/Application/Classes/ClassService.cs
+index 9339cbb..bb65edb 100644
+--- a/src/Application/Classes/ClassService.cs
++++ b/src/Application/Classes/ClassService.cs
+@@ -38,4 +38,12 @@ public class ClassService : IClassService
+         entity.Name = dto.Name.Trim();
+         await _db.SaveChangesAsync(ct);
+     }
++
++    public async Task ArchiveAsync(int id, IReadOnlyCollection<int> schoolIds, CancellationToken ct)
++    {
++        var entity = await _db.Classes.FirstOrDefaultAsync(c => c.Id == id && schoolIds.Contains(c.SchoolId), ct)
++            ?? throw new NotFoundException("class.notFound");
++        entity.IsArchived = true;
++        await _db.SaveChangesAsync(ct);
++    }
+ }
+diff --git a/src/Application/Classes/IClassService.cs b/src/Application/Classes/IClassService.cs
+index 04cea55..a2b0153 100644
+--- a/src/Application/Classes/IClassService.cs
++++ b/src/Application/Classes/IClassService.cs
+@@ -5,4 +5,5 @@ public interface IClassService
+     Task<PagedResult<ClassDto>> ListAsync(IReadOnlyCollection<int> schoolIds, int page, CancellationToken ct);
+     Task<ClassDto> CreateAsync(CreateClassDto dto, IReadOnlyCollection<int> schoolIds, CancellationToken ct);
+     Task UpdateAsync(int id, UpdateClassDto dto, IReadOnlyCollection<int> schoolIds, CancellationToken ct);
++    Task ArchiveAsync(int id, IReadOnlyCollection<int> schoolIds, CancellationToken ct);
+ }

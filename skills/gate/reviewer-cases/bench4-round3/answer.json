@@ -1,0 +1,32 @@
+{
+  "family": "test-cannot-fail",
+  "source": "real: bench4 run 2 (Sanad), round 2 fix 725d154fda on c33e1cbe13f (round 2 = 59d3f45c334, pin.patch); the round 3 re-check found F1 and F2 (bench4-sanad-notes/RESULT.md, round 3), and F3-F9 stayed after the round 3 and 4 PASS",
+  "step": "review",
+  "checklist": "TESTS CAN FAIL",
+  "faults": [
+    { "id": "F1", "family": "test-cannot-fail", "file": "eduquest-frontend/src/pages/settings/SettingsPage.role-label.test.tsx", "lines": [63, 74], "grade": "gap",
+      "wrong": "Every Settings test runs on an Arabic page with a profile saved as Arabic, so it passes when the badge follows the profile language instead of the page language." },
+    { "id": "F2", "family": "other", "file": "eduquest-frontend/src/components/layout/UserViewBar.role-label.test.tsx", "lines": [52, 66], "grade": "gap",
+      "wrong": "The Applicant strip case runs twice: once in the it.each list and once in its own test." },
+    { "id": "F3", "family": "language", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [213, 214], "grade": "bug", "words": ["logo", "aria-label", "alt=", "alt text", "Tuwaiq", "Go to dashboard"],
+      "wrong": "The logo link's aria-label and alt stay English on an Arabic page." },
+    { "id": "F4", "family": "crash", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [197, 197], "grade": "bug", "words": ["undefined", "crash", "iterable", "no roles", "throw", "TypeError", "missing roles", "without roles", "roles field", "null"],
+      "wrong": "A saved session with no roles field crashes the top bar: user?.roles[0] reads a field that is undefined." },
+    { "id": "F5", "family": "crash", "file": "eduquest-frontend/src/components/layout/UserViewBar.tsx", "lines": [38, 38], "grade": "bug",
+      "wrong": "The view-as strip crashes the same way on a user with no roles field." },
+    { "id": "F6", "family": "old-data", "file": "eduquest-frontend/src/utils/access-scope-key.ts", "lines": [15, 15], "grade": "bug",
+      "wrong": "A session saved before roles was stored throws 'user.roles is not iterable' when the scope key spreads it." },
+    { "id": "F7", "family": "shared-value", "file": "eduquest-frontend/src/pages/tickets/TicketsPage.tsx", "lines": [318, 322], "grade": "gap",
+      "wrong": "The ticket pages keep the tickets.role words, whose Arabic Admin word differs from the shared helper's and which have no Applicant word." },
+    { "id": "F8", "family": "language", "file": "eduquest-frontend/src/pages/users/UsersListPage.tsx", "lines": [471, 474], "grade": "bug",
+      "wrong": "The Users export builds role words from a fixed list of five, so an Applicant row is exported with the raw English role in Arabic." },
+    { "id": "F9", "family": "other", "file": "eduquest-frontend/src/utils/role-helpers.ts", "lines": [51, 53], "grade": "gap", "words": ["space", "blank", "trim", "whitespace", "empty"],
+      "wrong": "A role name of only spaces is returned as it is, so the strip shows a blank role." },
+    { "id": "F10", "family": "other", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [387, 387], "grade": "gap",
+      "wrong": "The top bar shows only roles[0], so a user with combined roles sees one role." }
+  ],
+  "notes": [
+    { "kind": "Gap", "true": true, "text": "eduquest-frontend/src/pages/settings/SettingsPage.role-label.test.tsx:65 — every case runs on an Arabic page with preferredLanguage 'ar' → a badge that follows the profile language passes too — add an English page case with an Arabic profile" },
+    { "kind": "Bug", "true": false, "text": "eduquest-frontend/src/pages/settings/SettingsPage.tsx:458 — an Arabic page → the badge still prints the raw English role — call getRoleLabel" }
+  ]
+}

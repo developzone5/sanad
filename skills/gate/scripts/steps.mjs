@@ -94,6 +94,8 @@ function proofLine(c, side, since) {
 // The owner's tests-only path: the switch is on and the change is tests only. It has no breaks and no proof step.
 const lightLane = (f) => Boolean(f.testsOnly && f.switches && f.switches.testsOnlyLane);
 const sidesOf =(c) => (c.sides && c.sides.length ? c.sides : [{ name: 'tests', cwd: '', test: 'TEST-COMMAND', fixFiles: [] }]);
+// A side that holds pages (2026-11-25, the browser check): named like a page side, or tested by a page test runner.
+export const pageSide = (c) => (c.sides || []).some((s) => s && (/\b(?:page|pages|web|front(?:end)?|ui|client)\b/i.test(String(s.name || '')) || /\b(?:vitest|jest|playwright|cypress)\b/i.test(String(s.test || ''))));
 const listFlags = (c) => `--lines ${note(c, 'lines.md')} --check ${note(c, 'check.md')} --places ${note(c, 'places.md')} --siblings ${note(c, 'siblings.md')}`;
 // --notes too (attack, 2026-11-23): only with it does --before-proof read the folder's break list and the task's test
 // command, so the break plan check runs (or fails when no command is named).
@@ -287,7 +289,13 @@ export const STEPS = [
     lines: (c, f) => [{ text: '/gate   (the Definition of Done and the security list, each claim with its output)', plain: true }, ...suiteLines(c, f), { text: `${tool(c, 'notes.mjs')} verdict --gate --repo ${p(c.repo)} --notes ${p(c.notes)} --tests <passed>/<run> --build "<real result>" --attack "<real result>" --security "<real result>" --ran "<real result>"` }, { text: 'Each flag carries the real result of that check; without them the line is GATE: INCOMPLETE.', plain: true }] },
   { id: 'ready', loop: 'Step 5', lanes: ALL,
     done: (f) => f.pushed === true,
-    lines: (c) => [
+    lines: (c, f) => [
+      // 2026-11-25 (owner, batch x task 2): a change to a page is opened in a real browser before the owner's check.
+      // It only prints; no done test or guard reads its result.
+      ...(pageSide(c) ? [
+        { text: `the change touches a page: write ${note(c, 'browser-plan.json')} from the ticket (pages, roles, languages, the lines that name something visible) and start the app${f && f.switches && f.switches.remoteHost ? ' (bash ~/.claude/scripts/remote/remote-web.sh start prints its address)' : ''}`, plain: true },
+        { text: `${tool(c, 'browser-check.mjs')} run --notes ${p(c.notes)} --repo ${p(c.repo)}   (its table and screenshot paths go in the final report; a failed row is fixed or noted with its reason; a NOT DONE line goes there too)` },
+      ] : []),
       { text: `${tool(c, 'sanad.mjs')} ready --repo ${p(c.repo)}` },
       { text: `${tool(c, 'sanad.mjs')} pr-body --repo ${p(c.repo)}` },
       { text: `${tool(c, 'check-pr-body.mjs')} ${note(c, 'pr-body.md')} --notes ${p(c.notes)}` },

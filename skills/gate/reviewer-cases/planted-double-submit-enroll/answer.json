@@ -1,0 +1,16 @@
+{
+  "family": "double-submit",
+  "source": "planted: no real escaped case of a double submit in bench4 or the owner lists",
+  "step": "review",
+  "checklist": "DATABASE",
+  "faults": [
+    { "id": "F1", "family": "double-submit", "file": "web/src/pages/EnrollPage.tsx", "lines": [24, 26], "grade": "bug",
+      "wrong": "The Enroll button stays active while the request runs, so a double click sends two enrollments." },
+    { "id": "F2", "family": "double-submit", "file": "src/Application/Courses/EnrollmentService.cs", "lines": [22, 28], "grade": "bug",
+      "wrong": "The already-enrolled and seats-left checks are read before the insert with no unique key or lock, so two requests at once give the student two seats or take the last seat twice." }
+  ],
+  "notes": [
+    { "kind": "Bug", "true": true, "text": "src/Application/Courses/EnrollmentService.cs:24 — two Enroll requests from one student at the same moment → both pass the AnyAsync check and two rows are saved — add a unique index on (CourseId, StudentId) and catch the duplicate" },
+    { "kind": "Bug", "true": false, "text": "web/src/pages/EnrollPage.tsx:16 — the server refuses with course.full → the page shows the success toast — show the error" }
+  ]
+}

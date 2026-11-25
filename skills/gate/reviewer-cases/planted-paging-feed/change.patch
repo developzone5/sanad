@@ -1,0 +1,86 @@
+diff --git a/src/Api/Controllers/AnnouncementsController.cs b/src/Api/Controllers/AnnouncementsController.cs
+index 3d17f7c..85e4dc1 100644
+--- a/src/Api/Controllers/AnnouncementsController.cs
++++ b/src/Api/Controllers/AnnouncementsController.cs
+@@ -16,4 +16,8 @@ public class AnnouncementsController : ControllerBase
+     [HttpGet("latest")]
+     public async Task<IActionResult> Latest(CancellationToken ct)
+         => Ok(await _announcements.LatestAsync(User.SchoolId(), ct));
++
++    [HttpGet]
++    public async Task<IActionResult> Page([FromQuery] int page = 1, CancellationToken ct = default)
++        => Ok(await _announcements.PageAsync(User.SchoolId(), page, ct));
+ }
+diff --git a/src/Application/Announcements/AnnouncementService.cs b/src/Application/Announcements/AnnouncementService.cs
+index 847d41f..4d50574 100644
+--- a/src/Application/Announcements/AnnouncementService.cs
++++ b/src/Application/Announcements/AnnouncementService.cs
+@@ -11,9 +11,14 @@ public class AnnouncementService
+ 
+     // The newest 20 announcements of the student's school.
+     public async Task<IReadOnlyList<AnnouncementDto>> LatestAsync(int schoolId, CancellationToken ct)
++        => await PageAsync(schoolId, 1, ct);
++
++    // One page of 20 announcements of the student's school, newest first. page starts at 1.
++    public async Task<IReadOnlyList<AnnouncementDto>> PageAsync(int schoolId, int page, CancellationToken ct)
+         => await _db.Announcements.AsNoTracking()
+             .Where(a => a.SchoolId == schoolId && a.PublishedAt != null)
+             .OrderByDescending(a => a.PublishedAt).ThenByDescending(a => a.Id)
++            .Skip((Math.Max(page, 1) - 1) * 20)
+             .Take(20)
+             .Select(a => new AnnouncementDto(a.Id, a.Title, a.PublishedAt!.Value))
+             .ToListAsync(ct);
+diff --git a/web/src/api/announcements.ts b/web/src/api/announcements.ts
+index 2aa8c91..eabc5cb 100644
+--- a/web/src/api/announcements.ts
++++ b/web/src/api/announcements.ts
+@@ -8,4 +8,5 @@ export interface AnnouncementDto {
+ 
+ export const announcementsApi = {
+   latest: () => api.get<AnnouncementDto[]>('/announcements/latest').then((r) => r.data),
++  page: (page: number) => api.get<AnnouncementDto[]>('/announcements', { params: { page } }).then((r) => r.data),
+ };
+diff --git a/web/src/pages/AnnouncementsPage.tsx b/web/src/pages/AnnouncementsPage.tsx
+index 6a0d810..b48bff4 100644
+--- a/web/src/pages/AnnouncementsPage.tsx
++++ b/web/src/pages/AnnouncementsPage.tsx
+@@ -1,20 +1,30 @@
+-import { useQuery } from '@tanstack/react-query';
++import { useInfiniteQuery } from '@tanstack/react-query';
+ import { useTranslation } from 'react-i18next';
+ import { announcementsApi } from '@/api/announcements';
+ 
+ export default function AnnouncementsPage() {
+   const { t } = useTranslation();
+-  const { data = [], isLoading } = useQuery({
+-    queryKey: ['announcements', 'latest'],
+-    queryFn: () => announcementsApi.latest(),
++  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
++    queryKey: ['announcements', 'pages'],
++    initialPageParam: 1,
++    queryFn: ({ pageParam }) => announcementsApi.page(pageParam),
++    getNextPageParam: (last, all) => (last.length === 20 ? all.length + 1 : undefined),
+   });
+ 
+   if (isLoading) return <p>{t('loading')}</p>;
++  const items = data?.pages.flat() ?? [];
+   return (
+-    <ul className="announcements">
+-      {data.map((a) => (
+-        <li key={a.id}>{a.title}</li>
+-      ))}
+-    </ul>
++    <>
++      <ul className="announcements">
++        {items.map((a) => (
++          <li key={a.id}>{a.title}</li>
++        ))}
++      </ul>
++      {hasNextPage && (
++        <button type="button" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
++          {t('announcements.showMore')}
++        </button>
++      )}
++    </>
+   );
+ }

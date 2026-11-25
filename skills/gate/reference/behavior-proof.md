@@ -76,7 +76,13 @@ plus phone width when the UI changed. The same file is the text the user pastes
 into the tracker and the list they test from; record their result per case number.
 
 Do not create or run browser automation solely for this acceptance unless asked.
-For a browser-only navigation/layout/wiring fix, this manual before/after evidence
+One exception (owner, 2026-11-25): Sanad's own browser check
+(`gate/scripts/browser-check.mjs`) runs before the user's check whenever the
+change touches a page: each page, once per role and language the ticket names,
+in the installed Edge or Chrome. Its table and screenshot paths go in the final
+report; a failed row is fixed or written as a note with its reason, never left
+out. It adds nothing to the project, and it does not replace the user's own
+browser check, which stays as written above. For a browser-only navigation/layout/wiring fix, this manual before/after evidence
 can satisfy UI reproduction and acceptance without a new executable browser test.
 State that no automated browser regression was added. Existing applicable tests
 stay in place; changed non-UI logic, API/auth/tenant boundaries, data writes and

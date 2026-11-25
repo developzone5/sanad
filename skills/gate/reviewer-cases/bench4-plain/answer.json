@@ -1,0 +1,32 @@
+{
+  "family": "shared-value",
+  "source": "real: bench4 run 1 (plain session), commit 78668b86205 on c33e1cbe13f; it fixed the top bar only (bench4/PAUSE-STATE.txt, bench4-sanad-notes/RESULT.md)",
+  "step": "places",
+  "checklist": "USERS FOUND BY SEARCH",
+  "faults": [
+    { "id": "F1", "family": "shared-value", "file": "eduquest-frontend/src/components/layout/UserViewBar.tsx", "lines": [48, 51], "grade": "bug", "place": true,
+      "wrong": "The admin view-as strip keeps its own tickets.role words, so it differs from the top bar and Applicant shows in English." },
+    { "id": "F2", "family": "shared-value", "file": "eduquest-frontend/src/pages/settings/SettingsPage.tsx", "lines": [455, 459], "grade": "bug", "place": true,
+      "wrong": "The Settings identity badges print the raw English role name on an Arabic page." },
+    { "id": "F3", "family": "shared-value", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [194, 200], "grade": "gap", "words": ["copy", "copies", "copied", "by hand", "duplicat", "shared", "helper", "translateRole", "drift", "one rule"],
+      "wrong": "The top bar copies the Users page's role-word rule by hand instead of sharing one helper." },
+    { "id": "F4", "family": "language", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [198, 201], "grade": "gap", "words": ["users.table.user", "generic", "column", "header"],
+      "wrong": "The generic word for a user with no role reuses the Users table column key users.table.user." },
+    { "id": "F5", "family": "language", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [213, 214], "grade": "bug", "words": ["logo", "aria-label", "alt=", "alt text", "Tuwaiq", "Go to dashboard"],
+      "wrong": "The logo link's aria-label and alt stay English on an Arabic page." },
+    { "id": "F6", "family": "crash", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [197, 197], "grade": "bug", "words": ["undefined", "crash", "iterable", "no roles", "throw", "TypeError", "missing roles", "without roles", "roles field", "null"],
+      "wrong": "A saved session with no roles field crashes the top bar: user?.roles[0] reads a field that is undefined." },
+    { "id": "F7", "family": "old-data", "file": "eduquest-frontend/src/utils/access-scope-key.ts", "lines": [15, 15], "grade": "bug",
+      "wrong": "A session saved before roles was stored throws 'user.roles is not iterable' when the scope key spreads it." },
+    { "id": "F8", "family": "language", "file": "eduquest-frontend/src/pages/users/UsersListPage.tsx", "lines": [470, 473], "grade": "bug",
+      "wrong": "The Users export builds role words from a fixed list of five, so an Applicant row is exported with the raw English role in Arabic." },
+    { "id": "F9", "family": "shared-value", "file": "eduquest-frontend/src/pages/tickets/TicketsPage.tsx", "lines": [318, 322], "grade": "gap",
+      "wrong": "The ticket pages use the tickets.role words, whose Arabic Admin word differs from the top bar's." },
+    { "id": "F10", "family": "other", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [387, 387], "grade": "gap",
+      "wrong": "The top bar shows only roles[0], so a user with combined roles sees one role." }
+  ],
+  "notes": [
+    { "kind": "Bug", "true": false, "text": "eduquest-frontend/src/components/layout/Topbar.tsx:199 — role 'Teacher' → t() gets the key users.enums.roles.Teacher with a capital letter and finds no word — lower-case the role first" },
+    { "kind": "Bug", "true": true, "text": "eduquest-frontend/src/components/layout/UserViewBar.tsx:50 — an Arabic page with the view-as strip open → the strip shows the tickets.role words, not the top bar's, and Applicant in English — use the same role words as the top bar" }
+  ]
+}

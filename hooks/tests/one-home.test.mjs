@@ -30,12 +30,13 @@ function ruleFiles() {
   if (fs.existsSync(agents)) for (const f of fs.readdirSync(agents)) if (f.endsWith('.md')) add('claude/agents/' + f, path.join(agents, f));
   const roles = path.join(codexRoot, 'agents');
   if (fs.existsSync(roles)) for (const f of fs.readdirSync(roles)) if (f.endsWith('.toml')) add('codex/agents/' + f, path.join(roles, f));
-  // Only the workflow's own skills: another skill's pages are not Sanad rule text.
+  // Only the workflow's own skills: another skill's pages are not Sanad rule text. The reviewer cases
+  // (skills/gate/reviewer-cases, 2026-11-25) hold old copies of code and pages as data, not rules.
   for (const skill of ['sanad', 'sanad-implementation', 'gate', 'ship', 'braintrust']) {
     const walk = (dir, name) => {
       if (!fs.existsSync(dir)) return;
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (e.isDirectory()) { if (!['scripts', 'tests', 'node_modules'].includes(e.name)) walk(path.join(dir, e.name), name + '/' + e.name); }
+        if (e.isDirectory()) { if (!['scripts', 'tests', 'node_modules', 'reviewer-cases'].includes(e.name)) walk(path.join(dir, e.name), name + '/' + e.name); }
         else if (e.name.endsWith('.md')) add(name + '/' + e.name, path.join(dir, e.name));
       }
     };
