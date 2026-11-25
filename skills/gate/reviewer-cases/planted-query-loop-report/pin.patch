@@ -1,0 +1,19 @@
+diff --git a/src/Application/Reports/ClassReportService.cs b/src/Application/Reports/ClassReportService.cs
+index dc11774..61dd353 100644
+--- a/src/Application/Reports/ClassReportService.cs
++++ b/src/Application/Reports/ClassReportService.cs
+@@ -9,12 +9,12 @@ public class ClassReportService
+ 
+     public ClassReportService(SchoolDbContext db) => _db = db;
+ 
+-    // One row per class of the school: its name.
++    // One row per class of the school: its name and the number of enrolled students.
+     public async Task<IReadOnlyList<ClassReportRow>> BuildAsync(int schoolId, CancellationToken ct)
+         => await _db.Classes.AsNoTracking()
+             .Where(c => c.SchoolId == schoolId && !c.IsArchived)
+             .OrderBy(c => c.Name).ThenBy(c => c.Id)
+-            .Select(c => new ClassReportRow(c.Id, c.Name, 0, ""))
++            .Select(c => new ClassReportRow(c.Id, c.Name, c.Enrollments.Count(e => e.IsActive), ""))
+             .ToListAsync(ct);
+ }
+ 

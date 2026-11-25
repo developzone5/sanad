@@ -1,0 +1,2 @@
+# The reviewer cases keep their bytes: each patch applies to before/ exactly as it was written (no line-ending change).
+* -text

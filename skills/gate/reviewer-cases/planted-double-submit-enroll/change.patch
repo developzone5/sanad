@@ -1,0 +1,82 @@
+diff --git a/src/Api/Controllers/CoursesController.cs b/src/Api/Controllers/CoursesController.cs
+index 2037abc..4df3e0d 100644
+--- a/src/Api/Controllers/CoursesController.cs
++++ b/src/Api/Controllers/CoursesController.cs
+@@ -21,4 +21,13 @@ public class CoursesController : ControllerBase
+     [HttpGet("{id:int}")]
+     public async Task<IActionResult> Get(int id, CancellationToken ct)
+         => Ok(await _courses.GetAsync(id, User.SchoolId(), ct));
++
++    [HttpPost("{id:int}/enroll")]
++    [Authorize(Roles = "Student")]
++    public async Task<IActionResult> Enroll(int id, CancellationToken ct)
++    {
++        await _courses.GetAsync(id, User.SchoolId(), ct);
++        await _enrollments.EnrollAsync(id, User.UserId(), ct);
++        return NoContent();
++    }
+ }
+diff --git a/src/Application/Courses/EnrollmentService.cs b/src/Application/Courses/EnrollmentService.cs
+index ad5ea78..67856d2 100644
+--- a/src/Application/Courses/EnrollmentService.cs
++++ b/src/Application/Courses/EnrollmentService.cs
+@@ -17,4 +17,14 @@ public class EnrollmentService
+         var taken = await _db.Enrollments.CountAsync(e => e.CourseId == courseId, ct);
+         return Math.Max(course.Capacity - taken, 0);
+     }
++
++    // SCH-445: one seat for the student, refused when the course is full.
++    public async Task EnrollAsync(int courseId, int studentId, CancellationToken ct)
++    {
++        var already = await _db.Enrollments.AnyAsync(e => e.CourseId == courseId && e.StudentId == studentId, ct);
++        if (already) return;
++        if (await SeatsLeftAsync(courseId, ct) == 0) throw new ConflictException("course.full");
++        _db.Enrollments.Add(new Enrollment { CourseId = courseId, StudentId = studentId, EnrolledAt = DateTime.UtcNow });
++        await _db.SaveChangesAsync(ct);
++    }
+ }
+diff --git a/web/src/api/courses.ts b/web/src/api/courses.ts
+index b67edf3..f499952 100644
+--- a/web/src/api/courses.ts
++++ b/web/src/api/courses.ts
+@@ -8,4 +8,5 @@ export interface CourseDto {
+ 
+ export const coursesApi = {
+   get: (id: number) => api.get<CourseDto>(`/courses/${id}`).then((r) => r.data),
++  enroll: (id: number) => api.post<void>(`/courses/${id}/enroll`).then(() => undefined),
+ };
+diff --git a/web/src/pages/EnrollPage.tsx b/web/src/pages/EnrollPage.tsx
+index 2cebc20..c7e57a3 100644
+--- a/web/src/pages/EnrollPage.tsx
++++ b/web/src/pages/EnrollPage.tsx
+@@ -1,16 +1,29 @@
+ import { useTranslation } from 'react-i18next';
+-import { useQuery } from '@tanstack/react-query';
++import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+ import { coursesApi } from '@/api/courses';
++import { showError, showSuccess } from '@/utils/toast';
+ 
+ export default function EnrollPage({ courseId }: { courseId: number }) {
+   const { t } = useTranslation();
++  const queryClient = useQueryClient();
+   const { data: course } = useQuery({ queryKey: ['course', courseId], queryFn: () => coursesApi.get(courseId) });
++  const enroll = useMutation({
++    mutationFn: () => coursesApi.enroll(courseId),
++    onSuccess: () => {
++      showSuccess(t('courses.enrolled'));
++      queryClient.invalidateQueries({ queryKey: ['course', courseId] });
++    },
++    onError: (error) => showError(error, 'courses.enrollFailed'),
++  });
+ 
+   if (!course) return null;
+   return (
+     <section>
+       <h1>{course.title}</h1>
+       <p>{t('courses.seatsLeft', { count: course.seatsLeft })}</p>
++      <button type="button" onClick={() => enroll.mutate()}>
++        {t('courses.enroll')}
++      </button>
+     </section>
+   );
+ }

@@ -1,0 +1,33 @@
+diff --git a/src/Application/Reports/ClassReportService.cs b/src/Application/Reports/ClassReportService.cs
+index dc11774..82bbbc3 100644
+--- a/src/Application/Reports/ClassReportService.cs
++++ b/src/Application/Reports/ClassReportService.cs
+@@ -9,13 +9,25 @@ public class ClassReportService
+ 
+     public ClassReportService(SchoolDbContext db) => _db = db;
+ 
+-    // One row per class of the school: its name.
++    // One row per class of the school: its name, the number of enrolled students and the class teacher.
+     public async Task<IReadOnlyList<ClassReportRow>> BuildAsync(int schoolId, CancellationToken ct)
+-        => await _db.Classes.AsNoTracking()
++    {
++        var classes = await _db.Classes.AsNoTracking()
+             .Where(c => c.SchoolId == schoolId && !c.IsArchived)
+             .OrderBy(c => c.Name).ThenBy(c => c.Id)
+-            .Select(c => new ClassReportRow(c.Id, c.Name, 0, ""))
++            .Select(c => new { c.Id, c.Name, c.TeacherId, Students = c.Enrollments.Count(e => e.IsActive) })
+             .ToListAsync(ct);
++        var rows = new List<ClassReportRow>(classes.Count);
++        foreach (var c in classes)
++        {
++            var teacher = await _db.Users.AsNoTracking()
++                .Where(u => u.Id == c.TeacherId)
++                .Select(u => u.FullName)
++                .FirstOrDefaultAsync(ct);
++            rows.Add(new ClassReportRow(c.Id, c.Name, c.Students, teacher ?? ""));
++        }
++        return rows;
++    }
+ }
+ 
+ public record ClassReportRow(int ClassId, string Name, int Students, string Teacher);

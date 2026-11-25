@@ -1,0 +1,26 @@
+{
+  "family": "old-data",
+  "source": "real: Sanad PR #67 (the checks pass the first time), 8311d43 on 255703a; its reviews passed it and the owner list _handoff/sanad-pr3-checks-2026-11-25/OWNER-LIST.md names these faults (items 1, 5, 9, 10, 11, 12, 13)",
+  "step": "review",
+  "checklist": "OLD DATA",
+  "faults": [
+    { "id": "F1", "family": "old-data", "file": "skills/gate/scripts/red-proof.mjs", "lines": [1344, 1352], "grade": "bug",
+      "wrong": "A proof refused before any run (a break name that names no test) writes no record, so an older PROVED entry on the same code still counts in ready after the break list changed." },
+    { "id": "F2", "family": "test-cannot-fail", "file": "skills/gate/scripts/red-proof.mjs", "lines": [1338, 1342], "grade": "gap",
+      "wrong": "A test title of only a placeholder ('%s', '$name') matches every part, so the name check accepts a break that names no test." },
+    { "id": "F3", "family": "other", "file": "skills/gate/scripts/pre-review.mjs", "lines": [714, 717], "grade": "gap",
+      "wrong": "An owed places or siblings check (no list given) is not counted as a cheap failure, so lint and the type check still start." },
+    { "id": "F4", "family": "other", "file": "skills/gate/scripts/pre-review.mjs", "lines": [503, 503], "grade": "gap",
+      "wrong": "The commits FIX line always says squash, also for a bad subject or a missing ticket ID, and its template has no ticket ID." },
+    { "id": "F5", "family": "other", "file": "skills/gate/scripts/steps.mjs", "lines": [119, 123], "grade": "gap",
+      "wrong": "The text lane and the tests-only lane print a places refresh where no places list exists, which is a usage error." },
+    { "id": "F6", "family": "other", "file": "skills/gate/scripts/steps.mjs", "lines": [100, 100], "grade": "gap",
+      "wrong": "The printed pre-review has no --base, so a task whose base is not origin/<integration> keeps its pass under another base and the proof waits." },
+    { "id": "F7", "family": "other", "file": "skills/gate/scripts/steps.mjs", "lines": [113, 115], "grade": "gap",
+      "wrong": "A task started with --receipts <dir> is told its suite receipt goes in <notes>/evidence." }
+  ],
+  "notes": [
+    { "kind": "Bug", "true": true, "text": "skills/gate/scripts/red-proof.mjs:1350 — a break whose name names no test → the proof stops before any run and writes no record, so an older PROVED entry still counts in ready — record the refusal" },
+    { "kind": "Bug", "true": false, "text": "skills/gate/scripts/pre-review.mjs:490 — a check named 'types' → isHeavyCheck says no, so the type check runs before the cheap checks — match the name types too" }
+  ]
+}

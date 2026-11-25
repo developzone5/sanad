@@ -1,0 +1,14 @@
+{
+  "family": "swallowed-error",
+  "source": "planted: no real escaped case of an error swallowed while the user sees success in bench4 or the owner lists; round 1 (pin.patch) rethrows, the fix round catches and logs only",
+  "step": "review",
+  "checklist": "FAILURES / LOCALES",
+  "faults": [
+    { "id": "F1", "family": "swallowed-error", "file": "src/Application/Grades/GradeService.cs", "lines": [33, 40], "grade": "bug",
+      "wrong": "A failed save is caught and only logged, so the endpoint returns 204 and the page shows Grade saved while nothing was stored." }
+  ],
+  "notes": [
+    { "kind": "Bug", "true": true, "text": "src/Application/Grades/GradeService.cs:37 — SaveChangesAsync throws a DbUpdateException → the catch only logs, Save returns 204 and the page shows Grade saved — rethrow (or map to a 409/500 the page shows) after logging" },
+    { "kind": "Bug", "true": false, "text": "src/Application/Grades/GradeService.cs:28 — a grade of 101 → it is stored — refuse grades above 100" }
+  ]
+}

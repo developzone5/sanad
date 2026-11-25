@@ -1,0 +1,14 @@
+{
+  "family": "owner",
+  "source": "planted: no real escaped case of a row read by id without its owner in bench4 or the owner lists",
+  "step": "review",
+  "checklist": "ACCESS PAIRS",
+  "faults": [
+    { "id": "F1", "family": "owner", "file": "src/Application/Submissions/SubmissionService.cs", "lines": [19, 23], "grade": "blocker",
+      "wrong": "GetAsync reads the submission by id alone, so any student can read another student's file name, grade and feedback by changing the id." }
+  ],
+  "notes": [
+    { "kind": "Blocker", "true": true, "text": "src/Application/Submissions/SubmissionService.cs:21 — student A asks GET /api/submissions/<B's id> → B's grade and feedback are returned — filter by s.StudentId == the caller, as ListMineAsync does" },
+    { "kind": "Bug", "true": false, "text": "src/Api/Controllers/SubmissionsController.cs:27 — a submission that does not exist → the endpoint returns 200 with an empty body — return 404" }
+  ]
+}

@@ -1,0 +1,1127 @@
+diff --git a/hooks/lib/timer-idle.cjs b/hooks/lib/timer-idle.cjs
+index ca5596e..6695b01 100644
+--- a/hooks/lib/timer-idle.cjs
++++ b/hooks/lib/timer-idle.cjs
+@@ -389,7 +389,15 @@ function autoStage(input, now = new Date(), { isCode } = {}) {
+   const same = current === stage || (stage === 'code' && /^(?:first code edit|start \(auto\))/.test(current));
+   // 2026-11-19: every proof or pre-review start is a "run" side line with the tree id, so the report can tell
+   // a retry from overlapping work. The step itself is still added once.
+-  if (stage === 'proof' || stage === 'checks before review') append(t.file, 'side', `run ${stage.split(' ')[0]} ${treeId(input.cwd)}`, now);
++  // 2026-11-23 (owner): a proof call that runs no test (--help, --check-plan, --show-remote, --warm) is no proof run: run 3
++  // of the small task counted 10 "runs", 4 of them such calls.
++  // A quoted flag counts too (attack, 2026-11-23: "--warm"); only the proof's own options are read, the part before its
++  // ` -- ` (re-check: a test filter "--warm" after it is the test command's).
++  // From the proof's own name on (re-check 3: a `git diff -- src` before it ended the read too early).
++  const whole = String((input.tool_input || {}).command || '');
++  const own = whole.slice(Math.max(0, whole.indexOf('red-proof.mjs'))).split(/\s["']?--["']?(?=\s)/)[0];
++  const noRun = stage === 'proof' && /(?:^|[\s"'])--(?:help|check-plan|show-remote|warm)(?=["'\s]|$)/.test(own);
++  if ((stage === 'proof' && !noRun) || stage === 'checks before review') append(t.file, 'side', `run ${stage.split(' ')[0]} ${treeId(input.cwd)}`, now);
+   if (same && t.last.kind !== 'wait') return '';
+   append(t.file, 'step', stage, now);
+   return stage;
+diff --git a/hooks/tests/timer-orca-session.test.mjs b/hooks/tests/timer-orca-session.test.mjs
+index 2771ef9..cb64547 100644
+--- a/hooks/tests/timer-orca-session.test.mjs
++++ b/hooks/tests/timer-orca-session.test.mjs
+@@ -60,6 +60,26 @@ test('a session in the projects folder of CLAUDE_CONFIG_DIR marks its stages', (
+   } finally { delete process.env.CLAUDE_CONFIG_DIR; }
+ });
+ 
++// 2026-11-23 (owner, item 4): only a proof call that runs tests counts as a proof run. Run 3 of the small task counted
++// 10 runs; 4 were a --help call and plan checks that ran nothing.
++test('a proof call that runs no test (--help, --check-plan, --show-remote, --warm) is no proof run; a real proof is one', () => {
++  const s = session(path.join(process.env.APPDATA, 'orca', 'claude-profiles', 'p4', 'home', 'projects', 'C--repo'));
++  for (const flag of ['--help', '--check-plan', '--show-remote', '--warm', '"--warm"', "'--check-plan'"]) s.run(`node /x/gate/scripts/red-proof.mjs --repo . ${flag} -- npx vitest run`);
++  assert.deepEqual(s.marks().filter((m) => m.startsWith('side run proof')), [], 'no run counted');
++  assert.ok(s.marks().includes('step proof'), 'the time still shows as the proof stage');
++  s.run('node /x/gate/scripts/red-proof.mjs --repo . --breaks b.json --then-green -- npx vitest run');
++  assert.equal(s.marks().filter((m) => m.startsWith('side run proof')).length, 1);
++  // Re-check: a test filter "--warm" after ` -- ` belongs to the test command; the proof runs and is counted.
++  s.run('node /x/gate/scripts/red-proof.mjs --repo . --breaks b.json -- npx vitest run -t "--warm"');
++  assert.equal(s.marks().filter((m) => m.startsWith('side run proof')).length, 2);
++  // A quoted "--" ends the proof's own options too.
++  s.run('node /x/gate/scripts/red-proof.mjs --repo . --breaks b.json "--" npx vitest run -t "--warm"');
++  assert.equal(s.marks().filter((m) => m.startsWith('side run proof')).length, 3);
++  // Another command's ` -- ` before the proof does not end the proof's options (re-check 3).
++  s.run('git diff -- src && node /x/gate/scripts/red-proof.mjs --help');
++  assert.equal(s.marks().filter((m) => m.startsWith('side run proof')).length, 3);
++});
++
+ test('a log in a folder of the same names outside the trusted roots is no session: nothing is marked', () => {
+   const s = session(path.join(scratch, 'elsewhere', 'claude-profiles', 'p3', 'home', 'projects', 'C--repo'));
+   assert.equal(s.run('node /x/gate/scripts/red-proof.mjs --test a.test.ts -- npx vitest run'), '');
+diff --git a/skills/gate/scripts/pre-review-cache.mjs b/skills/gate/scripts/pre-review-cache.mjs
+index 4b8db0a..221eb7c 100644
+--- a/skills/gate/scripts/pre-review-cache.mjs
++++ b/skills/gate/scripts/pre-review-cache.mjs
+@@ -131,6 +131,48 @@ export function checkKey(check, ident) {
+ export function cacheFile() {
+   return path.join(process.env.SANAD_STATE_DIR || path.join(os.homedir(), '.claude', 'state'), 'pre-review-cache.json');
+ }
++
++// 2026-11-23 (owner, one proof per round): a whole `pre-review --before-proof` run (every part) and its answer, by the
++// work tree it ran on, so the printed steps offer the proof only after those checks passed on this very code. Run 3 of
++// the small task started the proof beside them, and the fixes they asked for voided two proofs. The step printer reads
++// it (sanad.mjs); no guard does.
++function beforeProofFile(repo) {
++  let top = git(repo, ['rev-parse', '--show-toplevel']) || path.resolve(repo);
++  try { top = fs.realpathSync.native(top); } catch { /* keep git's answer */ }
++  return path.join(path.dirname(cacheFile()), 'before-proof', sha(path.resolve(top).replace(/\\/g, '/').toLowerCase()).slice(0, 16) + '.json');
++}
++// The task's list files the checks read, as one id: each file by its name, with its text (attack, 2026-11-23: a break
++// list changed after the pass, in the notes folder outside the repository, and the old pass still matched). A file
++// that is not there counts as empty.
++export const BEFORE_PROOF_FILES = ['lines.md', 'check.md', 'places.md', 'siblings.md', 'breaks.json', 'task.json'];
++// Each file's name and hash, read once (re-check 2: two reads at the end let an edit between them get the pass).
++export function notesParts(paths) {
++  return (paths || []).filter(Boolean).map((p) => {
++    let text = '';
++    try { text = fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n'); } catch { /* not there: empty */ }
++    return [path.basename(p), sha(text)];
++  });
++}
++export function inputsOf(parts) { return sha(JSON.stringify([...parts].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)))); }
++export function notesInputs(paths) { return inputsOf(notesParts(paths)); }
++// The pass is for one commit too (re-check 3, 2026-11-23: the commits check reads the commit message, and an amended
++// message kept the pass of the files alone). `head`: the commit the run began on; HEAD now by default.
++// And for one base (re-check 4, 2026-11-23: checks run against another base were taken for the task's): `base` is the
++// ref the checks compared with, kept as the commit it named then.
++const baseRev = (repo, base) => (base ? git(repo, ['rev-parse', '--verify', '--quiet', String(base) + '^{commit}']) : '');
++export function rememberBeforeProof(repo, tree, ok, inputs = '', head = git(repo, ['rev-parse', 'HEAD']), base = '') {
++  if (!tree) return;
++  const file = beforeProofFile(repo);
++  try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify({ tree, head: String(head || ''), base: baseRev(repo, base), inputs, ok: ok === true, at: new Date().toISOString() })); } catch { /* not kept: the step stays due */ }
++}
++/** True when the last whole before-proof run passed on `tree` (the work tree now, by default), HEAD and `base`, with these list files. */
++export function beforeProofPassed(repo, tree = workTree(repo), inputs = '', base = '') {
++  try {
++    const r = JSON.parse(fs.readFileSync(beforeProofFile(repo), 'utf8'));
++    const head = git(repo, ['rev-parse', 'HEAD']);
++    return Boolean(tree) && Boolean(head) && r.ok === true && r.tree === tree && r.head === head && String(r.base || '') === baseRev(repo, base) && String(r.inputs || '') === String(inputs || '');
++  } catch { return false; }
++}
+ function readAll() {
+   try { const j = JSON.parse(fs.readFileSync(cacheFile(), 'utf8')); return j && typeof j.entries === 'object' ? j : { entries: {} }; }
+   catch { return { entries: {} }; }
+diff --git a/skills/gate/scripts/pre-review.mjs b/skills/gate/scripts/pre-review.mjs
+index 06668e3..24462a3 100644
+--- a/skills/gate/scripts/pre-review.mjs
++++ b/skills/gate/scripts/pre-review.mjs
+@@ -76,7 +76,7 @@ import { createRequire } from 'node:module';
+ import { isMain } from './is-main.mjs';
+ import { fileKind, format as formatSize, sizeTask } from './size-check.mjs';
+ import { bashEnv, gitBash } from './git-bash.mjs';
+-import { checkKey, claim, lookup, release, remember, runIdentity, runningNow } from './pre-review-cache.mjs';
++import { checkKey, claim, lookup, release, remember, runIdentity, runningNow, rememberBeforeProof, workTree, notesInputs, notesParts, inputsOf, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
+ import { changeSet, foreignLine } from './change-set.mjs';
+ 
+ const here = path.dirname(fileURLToPath(import.meta.url));
+@@ -215,8 +215,9 @@ const sshArgs = (remote, line) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=
+ 
+ // `remote`: the test machine (remoteOf); undefined reads it from git config, null means none.
+ // `part`: 'lists' or 'code' (--part). `set`: the change set of this run, when it is already read. `breaks`: the
+-// break list of the notes folder, `proof`: the proof's own test command and `proofCwd`: its folder (from --notes).
+-export function planChecks({ repo, base, was, lines, check, places, siblings, node, remote, beforeProof, part, set, breaks, proof, proofCwd }) {
++// break list of the notes folder, `proofs`: each test folder's proof command [{ name, cmd, cwd }] (from --notes; `proof`
++// and `proofCwd`: one command and its folder, as before).
++export function planChecks({ repo, base, was, lines, check, places, siblings, node, remote, beforeProof, part, set, breaks, proof, proofCwd, proofs }) {
+   if (!set) set = changeSet(repo, base);
+   const files = changedFiles(repo, base, set);
+   const checks = [];
+@@ -305,15 +306,20 @@ export function planChecks({ repo, base, was, lines, check, places, siblings, no
+   // 2026-11-19: a break list with a mistake was found only by the proof, after the test machine was in use. With
+   // --before-proof and the notes folder's break list, the proof's own checks before any run are one check here
+   // (red-proof.mjs --check-plan: local, no test machine, no copy).
+-  const planKnown = Array.isArray(proof) && proof.length > 0;
+-  if (beforeProof && breaks && planKnown) checks.push({ name: 'break plan', cmd: process.execPath, args: [path.join(here, 'red-proof.mjs'), '--repo', repo, '--breaks', breaks, '--base', base, ...(proofCwd ? ['--cwd', proofCwd] : []), '--check-plan', '--', ...proof], cwd: repo });
++  // One check per test folder of the task (re-check 3, 2026-11-23: with two, only the first was checked, and the
++  // pass counted for both). Every side's proof runs the same break list, so each side checks it with its own command.
++  const sides = (Array.isArray(proofs) && proofs.length ? proofs : [{ cmd: proof, cwd: proofCwd }]).filter((s) => s && Array.isArray(s.cmd) && s.cmd.length);
++  const planKnown = sides.length > 0;
++  if (beforeProof && breaks) for (const s of sides) checks.push({ name: sides.length > 1 ? `break plan (${s.name || s.cwd || 'tests'})` : 'break plan', cmd: process.execPath, args: [path.join(here, 'red-proof.mjs'), '--repo', repo, '--breaks', breaks, '--base', base, ...(s.cwd ? ['--cwd', s.cwd] : []), '--check-plan', '--', ...s.cmd], cwd: repo });
++  // 2026-11-23 (owner): with a break list and no test command the check was only named as skipped, and run 3 of the small
++  // task went to its proofs with the plan unchecked. It is a failed check now: name the command, and it runs.
++  if (beforeProof && breaks && !planKnown) checks.push({ name: 'break plan', notRun: 'the notes folder names no test command (task.json), so the break plan cannot be checked before the proof: start the task with it — node <gate>/sanad.mjs start --repo <repo> --notes <notes> --side <name> [--cwd <dir>] -- <test command> — then run pre-review again.' });
+   // 2026-11-12 (audit C14): with no --lines, --check or --was those parts were left out without a word, and
+   // the summary still read "N of N checks passed". Each is named as skipped (not a failure).
+   const skipped = [
+     lines ? (textOnly ? { name: 'ticket lines', why: 'a text-only change' } : null) : { name: 'ticket lines', why: 'no --lines' },
+     check ? (textOnly ? { name: 'test labels', why: 'a text-only change' } : null) : { name: 'test labels', why: 'no --check' },
+     was ? null : { name: 'size growth', why: 'no --was' },
+-    beforeProof && breaks && !planKnown ? { name: 'break plan', why: 'no test command in the notes folder (task.json)' } : null,
+   ].filter(Boolean);
+   if (part) {
+     const lists = part === 'lists';
+@@ -540,9 +546,18 @@ export async function preReview(opts) {
+     say(block.join('\n')); say(summary);
+     return { ok: false, text: [summary, ...block].join('\n') };
+   }
++  // The list files as they are before the checks are chosen (re-check 3: a break list that appeared after the plan was
++  // made, but before this read, got a pass with no break plan check). The same for the code (its tree).
++  const startInputs = opts.beforeProof && !opts.part && opts.notes ? notesInputs(BEFORE_PROOF_FILES.filter((n) => n !== 'places.md').map((n) => path.join(opts.notes, n))) : '';
++  const firstTree = opts.beforeProof && !opts.part && opts.notes ? workTree(opts.repo) : '';
++  const firstHead = firstTree ? git(opts.repo, ['rev-parse', 'HEAD']) : '';
++  // The base as a commit, read before the checks (last check, 2026-11-23: a base that moved during the run was saved).
++  const baseAt = () => (opts.base ? git(opts.repo, ['rev-parse', '--verify', '--quiet', String(opts.base) + '^{commit}']) : '');
++  const firstBase = firstTree ? baseAt() : '';
+   const { files, checks, remote, skipped, placesOwed, siblingsOwed } = planChecks({ ...opts, set });
+   // Checks that passed on this exact code before are read, not run (pre-review-cache.mjs).
+   const ident = opts.noCache ? null : runIdentity(opts.repo, opts.base);
++  const startTree = ident ? ident.tree : (opts.beforeProof && !opts.part ? workTree(opts.repo) : '');
+   for (const c of checks) {
+     c.key = checkKey(c, ident);
+     const hit = lookup(c.key);
+@@ -665,7 +680,23 @@ export async function preReview(opts) {
+   for (const s of skipped) lines.push(`  – ${s.name}: skipped (${s.why})`);
+   for (const s of skipped) say(`  – ${s.name}: skipped (${s.why})`);
+   say(summary);
+-  return { ok: results.every(r => r.code === 0), text: lines.join('\n') };
++  const ok = results.every(r => r.code === 0);
++  // 2026-11-23: a whole before-proof run (no --part) keeps its answer by the tree it began on; a tree that moved during
++  // the run keeps no pass (pre-review-cache.mjs rememberBeforeProof).
++  // Only a run with --notes keeps a pass (re-check, 2026-11-23): without it the break plan is not checked. The list files
++  // must be the same at the end as at the start, but for places.md, which the places check rewrites itself.
++  if (opts.beforeProof && !opts.part && opts.notes) {
++    const began = ident?.tree || startTree;
++    const files = BEFORE_PROOF_FILES.map((n) => path.join(opts.notes, n));
++    // The pass is saved under the list files as they were at the START (re-check 2: an edit between two reads at the end
++    // got the pass). places.md is read once at the end: the places check rewrites it itself.
++    const parts = notesParts(files);
++    const steady = inputsOf(parts.filter(([name]) => name !== 'places.md')) === startInputs;
++    const sameHead = Boolean(firstHead) && firstHead === git(opts.repo, ['rev-parse', 'HEAD']);
++    const sameBase = firstBase === baseAt();
++    rememberBeforeProof(opts.repo, began, ok && steady && sameHead && sameBase && began === firstTree && began === workTree(opts.repo), inputsOf(parts), firstHead, firstBase);
++  }
++  return { ok, text: lines.join('\n') };
+ }
+ 
+ // 2026-11-19: which checks are a kept pass for the code as it is now, running nothing (for the printed status).
+@@ -714,9 +745,9 @@ async function fromNotes(o) {
+     else if (norm(o[k]) !== norm(p[k])) throw new Error(`--${k} ${o[k]} is not the notes folder's file (${p[k]}): give --notes alone, or the same file`);
+   }
+   if (!o.beforeProof || !fs.existsSync(p.breaks)) return {};
+-  let side = null;
+-  try { const task = readTask(o.notes); side = task && task.sides.find(s => s && Array.isArray(s.testCommand) && s.testCommand.length); } catch { /* a task file that cannot be read: the break plan is named as skipped */ }
+-  return { breaks: p.breaks, proof: side ? side.testCommand : null, proofCwd: side && side.cwd ? side.cwd : '' };
++  let sides = [];
++  try { const task = readTask(o.notes); sides = (task && task.sides || []).filter(s => s && Array.isArray(s.testCommand) && s.testCommand.length); } catch { /* a task file that cannot be read: the break plan fails as unchecked */ }
++  return { breaks: p.breaks, proofs: sides.map((s) => ({ name: String(s.name || ''), cmd: s.testCommand, cwd: s.cwd || '' })) };
+ }
+ 
+ if (isMain(import.meta.url)) {
+@@ -728,7 +759,7 @@ if (isMain(import.meta.url)) {
+     const node = o.node || git(repo, ['config', '--get', 'sanad.node']) || process.execPath;
+     const notes = await fromNotes(o);
+     // Each check's lines are printed when it ends; the summary comes last.
+-    const { ok } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof, noCache: !!o.noCache, part: o.part, ...notes, print: (text) => process.stdout.write(text + '\n') });
++    const { ok } = await preReview({ repo: path.resolve(repo), base: o.base || 'origin/' + integration, was: o.was, lines: o.lines && path.resolve(o.lines), check: o.check && path.resolve(o.check), places: o.places && path.resolve(o.places), siblings: o.siblings && path.resolve(o.siblings), node, beforeProof: !!o.beforeProof, noCache: !!o.noCache, part: o.part, notes: o.notes ? path.resolve(o.notes) : '', ...notes, print: (text) => process.stdout.write(text + '\n') });
+     process.exitCode = ok ? 0 : 1;
+   } catch (error) {
+     process.stderr.write('PRE-REVIEW: ' + error.message + '\nUsage: node pre-review.mjs [--repo <path>] [--base <ref>] [--was <size>] [--notes <dir>] [--lines <file>] [--check <file>] [--places <file>] [--siblings <file>] [--node <path>] [--part lists|code] [--before-proof] [--no-cache]\n');
+diff --git a/skills/gate/scripts/red-proof.mjs b/skills/gate/scripts/red-proof.mjs
+index 6824e6c..d437b89 100644
+--- a/skills/gate/scripts/red-proof.mjs
++++ b/skills/gate/scripts/red-proof.mjs
+@@ -171,6 +171,7 @@ import { bashEnv, gitBash } from './git-bash.mjs';
+ import { selectCommand } from './proof-select.mjs';
+ import { changeSet, foreignLine } from './change-set.mjs';
+ import { holdTestMachine } from './test-machine-lock.mjs';
++import { syntaxProblem } from './ts-parser.mjs';
+ 
+ // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
+ // missing element, a type, reference or build error, or a timeout means the test itself (or the
+@@ -1304,6 +1305,31 @@ async function main() {
+       process.exit(2);
+     }
+   }
++  // 2026-11-23 (owner): each break's file, with the break put in, must parse, before any run (run 3 of the small task: two
++  // breaks with an unbalanced `.catch(` ended BREAK INVALID after a full run, twice). Syntax only: a missing name or a
++  // type error parses, and the run finds those. Here only, on this machine: the test machine's copy (--plan) skips it.
++  let syntaxNote = '';
++  if (!plan && repo && Array.isArray(breaks)) {
++    const broken = [], unparsed = new Set();
++    let parsed = 0;
++    for (const b of breaks) {
++      let text;
++      try { text = textAt(b.file); } catch { continue; }
++      const next = applyBreak(text, b.find, b.put);
++      if (next === null) continue;   // the find check above names it
++      // Only a break that makes a parsable file unparsable is refused: a file that did not parse before the break (a
++      // fixture of plain text, a language this reader does not know) is left to the run, as before.
++      const before = syntaxProblem(repo, b.file, text);
++      if (before !== '') { unparsed.add(b.file); continue; }
++      const problem = syntaxProblem(repo, b.file, next);
++      if (problem === null) { unparsed.add(b.file); continue; }
++      parsed++;
++      if (problem) broken.push({ b, problem });
++    }
++    for (const x of broken) say(`  BREAK INVALID ✗ ${x.b.name}: with the break put in, ${x.b.file} does not parse (${x.problem}); write a break that keeps the file valid code`);
++    if (broken.length) { say(`RED-PROOF: NOT PROVED ✗ — ${broken.length} break(s) leave their file unparsable. Nothing ran; files untouched.`); process.exit(2); }
++    syntaxNote = ` Each break's file was parsed with the break put in (${parsed} parsed${unparsed.size ? `, ${unparsed.size} file(s) not parsed: ${[...unparsed].slice(0, 3).join(', ')}` : ''}): syntax only — a missing name or a type error is not caught here; the run finds those.`;
++  }
+   // --check-plan ends here (2026-11-19): every check above ran, and nothing else does. One more check is its own:
+   // every mustFail part must name a test. A part in no title of the changed test files may still name an older
+   // test, so it is refused only when no file of the repository holds its words (the breaks file itself left out).
+@@ -1326,7 +1352,7 @@ async function main() {
+       process.exit(2);
+     }
+     const count = breaks.filter(x => !x.single).length;
+-    say(`RED-PROOF: plan checked — ${count} break(s): each is filled in and its find matches once, no mustFail part is ambiguous or names no test, and no new "nothing happens" check is left unproven. No run started, no test machine contacted, no copy taken.`);
++    say(`RED-PROOF: plan checked — ${count} break(s): each is filled in and its find matches once, no mustFail part is ambiguous or names no test, and no new "nothing happens" check is left unproven.${syntaxNote} No run started, no test machine contacted, no copy taken.`);
+     say('PLAN OK');
+     process.exit(0);
+   }
+@@ -1424,6 +1450,19 @@ async function main() {
+   // old-code run (2026-11-19): else an honest --old proof left nothing for the checks before review to read.
+   const keepsFacts = !plan && !partial && (keepsRecord || hasOld);
+   const proof = { key: recordKey(command, recordCwd), proved: false, code: '', why: '' };
++  // 2026-11-23 (owner): after BREAK INVALID the same proof does not run again until a break or a file changed (run 3 of
++  // the small task ran the same invalid breaks twice). A break saved as invalid on this exact code (its result, by break
++  // id: name, file, find, put and mustFail; by code id: codeFingerprint) stops the run before any copy or sync.
++  function refuseRepeatInvalid(tree) {
++    // --fresh too (re-check 3): it reruns saved results, but a break that does not compile on this code stays invalid.
++    if (!keepsRecord || !tree) return;
++    let bad = [];
++    try { bad = breakStates(repo, proof.key, breaks, tree, readRecord(repo)).filter((s) => s.saved === 'invalid'); } catch { return; }
++    if (!bad.length) return;
++    for (const s of bad) say(`  BREAK INVALID ✗ ${s.name}: it was invalid on this exact code the last time, and neither the break nor the code changed since`);
++    say(`RED-PROOF: NOT RUN ✗ — ${bad.length} break(s) already ended BREAK INVALID on this code. Change the break (breaks.mjs) or the code first. Nothing ran; files untouched.`);
++    process.exit(2);
++  }
+   function takeBack(reason) {
+     try { writeEntry(repo, proof.key, { ok: false, reason: String(reason).slice(0, 300), base, command, cwd: recordCwd, ...(partial ? { partial: true } : {}) }); }
+     catch { /* not written: an entry's code id still voids it after any edit */ }
+@@ -1532,6 +1571,7 @@ async function main() {
+     // folder moved between them, or the sync sent another tree, the code id is of other code than the one sent.
+     let treeBefore = '';
+     if (keepsFacts || keepsRecord) { treeBefore = treeId(repo); proof.code = codeFingerprint(repo); if (treeId(repo) !== treeBefore) treeBefore = ''; }
++    refuseRepeatInvalid(proof.code);
+     const sync = spawnSync(gitBash().exe, [path.join(os.homedir(), '.claude', 'scripts', 'remote', 'remote-sync.sh')], { cwd: repo, env: bashEnv(), encoding: 'utf8', windowsHide: true, timeout: 10 * 60 * 1000 });
+     const syncOut = (sync.stdout || '') + (sync.stderr || '');
+     const remoteDown = 'RED-PROOF: REMOTE-DOWN — the test machine does not answer. Ask the user before running here (--local).';
+@@ -1661,6 +1701,17 @@ async function main() {
+           const at = order[reportedCaught++];
+           if (at !== undefined && breaks[at] && !breaks[at].single && String(breaks[at].name) === caughtRow[2]) l += caughtTail(breakId(breaks[at]), proof.code);
+         }
++        // 2026-11-23: an invalid break the test machine names is saved here too, so the same proof does not run again on
++        // the same code with the same break (refuseRepeatInvalid).
++        // The break is found by its whole name (attack, 2026-11-23: a name that holds ": " was cut at it): the longest
++        // name of the list that the line names, followed by ": ".
++        const invalidRow = /^\s*BREAK INVALID ✗ (.*)$/.exec(l);
++        if (invalidRow && keepsRecord && proof.code && !proof.why) {
++          const named = breaks.filter((x) => !x.single && invalidRow[1].startsWith(String(x.name) + ': ')).sort((x, y) => String(y.name).length - String(x.name).length);
++          // Two breaks of that same name: the line cannot tell which one, so neither is saved (re-check 3).
++          const b = named.length && named.filter((x) => String(x.name) === String(named[0].name)).length === 1 ? named[0] : null;
++          if (b) { try { writeBreakResult(repo, proof.key, b, { state: 'invalid', tree: proof.code, run: remoteRun, ms: null }); } catch { /* not saved: the run may start again */ } }
++        }
+         if (l.trim() && !/post-quantum|store now|openssh\.com\/pq/.test(l)) say(l);
+       };
+       const rest = { stdout: '', stderr: '' };
+@@ -1941,6 +1992,7 @@ async function main() {
+   const runId = `${Date.now().toString(36)}-${process.pid}`;
+   let saveTree = '';
+   if (keepsRecord || keepsFacts) { try { saveTree = proof.code || codeFingerprint(repo); } catch { saveTree = ''; } }
++  refuseRepeatInvalid(saveTree);
+   const savedState = new Map(), sentNow = new Set();
+   function breakState(b, res) {
+     if (res.noop) return { state: 'invalid', why: [] };
+diff --git a/skills/gate/scripts/sanad.mjs b/skills/gate/scripts/sanad.mjs
+index db23285..4943caa 100644
+--- a/skills/gate/scripts/sanad.mjs
++++ b/skills/gate/scripts/sanad.mjs
+@@ -32,6 +32,7 @@ import { parseSiblings, jobOpenReason } from './siblings.mjs';
+ import { requestStart, report as timerReport } from './sanad-timer.mjs';
+ import { readRecord, codeFingerprint, recordKey } from './proof-record.mjs';
+ import { foreignLine as foreignText } from './change-set.mjs';
++import { beforeProofPassed, notesInputs, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
+ import { due, render, switchLines, stopRound, askOwner, pathFor, GATE_DIR, q } from './steps.mjs';
+ 
+ export const EVIDENCE_OPEN = (tree) => `<!-- sanad-evidence tree=${tree} -->`;
+@@ -336,7 +337,8 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
+     // 2026-11-20 (timed task): every proof log of the folder (proof*.log), so the review step names them all.
+     proofLogs: dir ? (() => { try { return fs.readdirSync(dir).filter((n) => /^proof.*\.log$/i.test(n)).sort().map((n) => at(n)); } catch { return []; } })() : [],
+     proof: { done: proofDone, missingSides, entries: ents.length, breaks: proved.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
+-    checks: { code: undefined, all: undefined },
++    // beforeProof (2026-11-23): the last whole `pre-review --before-proof` run passed on the work tree as it is now.
++    checks: { code: undefined, all: undefined, beforeProof: !foreign && ahead > 0 && dir ? beforeProofPassed(top, undefined, notesInputs(BEFORE_PROOF_FILES.map((n) => at(n))), base) : false },
+     suite: { done: Boolean(receipt || ci), receipt, ci, mark: task.suite || '' },
+     notes: { known: read.known, all, open: read.known ? all.filter(isOpen) : [] },
+     decisions, pushed,
+diff --git a/skills/gate/scripts/steps.mjs b/skills/gate/scripts/steps.mjs
+index 4fd21a7..c293bfb 100644
+--- a/skills/gate/scripts/steps.mjs
++++ b/skills/gate/scripts/steps.mjs
+@@ -54,6 +54,29 @@ export function askOwner(notes, round, stop = DEFAULT_STOP_ROUND) {
+   return (notes || []).filter((n) => n && n.open !== false && (n.round ?? round) === round && !reopensRound(n));
+ }
+ 
++/**
++ * Why the proof is not offered yet, or '' (2026-11-23, owner: one proof per round). The proof comes after every code
++ * change of the round: the builder's own read is recorded for this commit, the checks before the proof passed on this
++ * code, and (`notes`) no note of the round that the builder can fix is open. A Question, a note that asks the owner,
++ * and a note on the owner's list past the stop round wait for the owner, not for a fix, so they hold nothing.
++ */
++export function proofHold(f, { notes = true } = {}) {
++  // Uncommitted work is not in the builder's read of the commit (re-check 4, 2026-11-23: edits after a pin got the proof).
++  if (f.git.clean === false) return 'there is uncommitted work: commit it, then record the builder\'s own read (sanad.mjs self-read)';
++  if (f.git.head && f.selfRead !== f.git.head) return "the builder's own read is not recorded for this commit (sanad.mjs self-read)";
++  // Also at a pinned commit (attack, 2026-11-23): a pin made without a pass of the checks does not open the proof.
++  if (f.checks && f.checks.beforeProof === false) return 'the checks before the proof have not passed on this code (pre-review --before-proof)';
++  // After a review whose notes this session cannot read, a Blocker there is not known to be fixed (re-check 4: a note in
++  // a report file only opened the proof). `sanad.mjs status` reads them from the session log.
++  if (notes && f.pins.length && !f.notes.known) return "the review's notes could not be read here: fix and answer them first (sanad.mjs status reads them)";
++  if (notes && f.pins.length && f.notes.known) {
++    const owner = new Set(askOwner(f.notes.open, f.round, f.stop).map((n) => n.n));
++    const fixable = f.notes.open.filter((n) => n && !/^question$/i.test(String(n.kind || '')) && !n.asks && !owner.has(n.n));
++    if (fixable.length) return `${fixable.length} note(s) still to fix and answer (notes.mjs answer): ${fixable.slice(0, 8).map((n) => 'NOTE ' + n.n).join(', ')}`;
++  }
++  return '';
++}
++
+ /** A note that still opens a review round past the stop round: a Blocker, a security note or a ticket-line note. */
+ export function reopensRound(n) {
+   if (!n) return false;
+@@ -72,7 +95,9 @@ function proofLine(c, side, since) {
+ const lightLane = (f) => Boolean(f.testsOnly && f.switches && f.switches.testsOnlyLane);
+ const sidesOf =(c) => (c.sides && c.sides.length ? c.sides : [{ name: 'tests', cwd: '', test: 'TEST-COMMAND', fixFiles: [] }]);
+ const listFlags = (c) => `--lines ${note(c, 'lines.md')} --check ${note(c, 'check.md')} --places ${note(c, 'places.md')} --siblings ${note(c, 'siblings.md')}`;
+-const preReview = (c, extra = '') => `${tool(c, 'pre-review.mjs')}${extra} --was ${q(c.size || 'SIZE')} ${listFlags(c)}`;
++// --notes too (attack, 2026-11-23): only with it does --before-proof read the folder's break list and the task's test
++// command, so the break plan check runs (or fails when no command is named).
++const preReview = (c, extra = '') => `${tool(c, 'pre-review.mjs')}${extra} --was ${q(c.size || 'SIZE')} ${listFlags(c)} --notes ${p(c.notes)}`;
+ // A text-path change that adds or changes a test file has the proof steps too (f.textProof). The brief tool
+ // rejects a --proof-log file that is not there: the text path and the tests-only lane have no proof log.
+ const noProofStep = (f) => lightLane(f) || (f.lane === 'text' && !f.textProof);
+@@ -156,9 +181,16 @@ export const STEPS = [
+       { text: `read it as a hostile reviewer against the "Every change" lines of ${p(CHECKLIST)}; fix what you find (test first) and commit`, plain: true },
+       { text: `${tool(c, 'sanad.mjs')} self-read --repo ${p(c.repo)} --notes ${p(c.notes)} --found FOUND   (FOUND: what you found and fixed, or none)` },
+     ] },
+-  { id: 'checks-before-proof', loop: 'Step 3, item 3', lanes: ALL, beside: 'breaks', unknown: (f) => f.checks.code === undefined,
+-    done: (f) => f.checks.code === true || f.proof.done || f.pinAtHead,
+-    lines: (c) => [{ text: preReview(c, ' --before-proof --part code'), background: true }] },
++  // 2026-11-23 (owner, one proof per round): every check that needs no proof runs before it, all parts, and the proof
++  // waits for its pass on this very code (pre-review-cache.mjs rememberBeforeProof). Run 3 of the small task ran only
++  // `--part code` here, started the proof beside it, and the test-assert, ticket-quote and places fixes the later run
++  // asked for voided two proofs.
++  { id: 'checks-before-proof', loop: 'Step 3, item 3', lanes: ALL, beside: 'breaks',
++    done: (f) => f.checks.beforeProof === true || f.proof.done || f.pinAtHead,
++    lines: (c) => [
++      { text: preReview(c, ' --before-proof') },
++      { text: 'fix what it finds and commit, then run it again: the proof waits until it passes on this commit', plain: true },
++    ] },
+   { id: 'breaks', loop: 'Step 3, item 4', lanes: CODE, light: true,
+     done: (f) => f.has.breaks,
+     lines: (c) => [
+@@ -167,7 +199,14 @@ export const STEPS = [
+     ] },
+   { id: 'proof', loop: 'Step 3, item 5', lanes: CODE, light: true,
+     done: (f) => f.proof.done,
+-    lines: (c) => sidesOf(c).map((s) => ({ text: proofLine(c, s) })) },
++    lines: (c, f) => {
++      // One proof per round (re-check 3): after a review, an open note to fix holds the proof too, since its fix changes the code.
++      const hold = proofHold(f, { notes: true });
++      if (!hold) return sidesOf(c).map((s) => ({ text: proofLine(c, s) }));
++      // The way on is printed too (re-check, 2026-11-23: at a pinned commit the checks step is over, so only this step
++      // can name the command that opens the proof).
++      return [{ text: `the proof waits: ${hold}`, plain: true }, ...(f.checks && f.checks.beforeProof === false ? [{ text: preReview(c, ' --before-proof') }] : [])];
++    } },
+   { id: 'review', loop: 'Step 3.5, items 1-3', lanes: ALL, early: true,
+     done: (f) => f.pinAtHead,
+     lines: (c, f) => [
+@@ -188,23 +227,34 @@ export const STEPS = [
+     // Due when the last pinned commit is not HEAD: a fix was made after the reviewers read.
+     when: (f) => f.pins.length > 0 && !f.pinAtHead,
+     done: () => false,
+-    lines: (c, f) => [
+-      ...(f.git.clean ? [] : [{ text: `git -C ${p(c.repo)} status --short   (commit the fix batch first)`, plain: true }]),
+-      { text: preReview(c, ' --before-proof'), background: true },
+-      ...(lightLane(f) ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s, f.lastPin.ref || f.lastPin.commit) + '   (PARTIAL)' }))),
+-      { text: brief(c, f, '--recheck') },
+-      ...(f.last ? [...(lightLane(f) ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s) + '   (the last round: the full proof)' }))), ...suiteLines(c, f)] : []),
+-      ...ownerList(f),
+-    ] },
++    lines: (c, f) => {
++      // 2026-11-23 (owner, one proof per round): every code change of the round comes first (each note's fix, the own
++      // read, the checks before the proof); then the proof and the re-check, once.
++      const hold = proofHold(f, { notes: true });
++      return [
++        ...(f.git.clean ? [] : [{ text: `git -C ${p(c.repo)} status --short   (commit the fix batch first)`, plain: true }]),
++        ...(f.checks.beforeProof ? [] : [{ text: preReview(c, ' --before-proof') }]),
++        ...(hold ? [{ text: `the proof and the re-check wait: ${hold}`, plain: true }] : [
++          // The last round runs the full proof only (re-check 3: both were printed for one side).
++          ...(lightLane(f) || f.last ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s, f.lastPin.ref || f.lastPin.commit) + '   (PARTIAL)' }))),
++          { text: brief(c, f, '--recheck') },
++          ...(f.last ? [...(lightLane(f) ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s) + '   (the last round: the full proof)' }))), ...suiteLines(c, f)] : []),
++        ]),
++        ...ownerList(f),
++      ];
++    } },
+   { id: 'last-round', loop: 'Step 3.5, item 6', lanes: ALL,
+     // After a re-check with no open note: the full proof, the suite once, the full checks.
+     when: (f) => f.pinAtHead && f.lastPin.kind === 'recheck',
+     done: (f) => (noProofStep(f) || f.proof.done) && f.suite.done && f.checks.all !== false,
+-    lines: (c, f) => [
+-      ...(noProofStep(f) || f.proof.done ? [] : sidesOf(c).map((s) => ({ text: proofLine(c, s) }))),
+-      ...(f.suite.done ? [] : suiteLines(c, f)),
+-      { text: preReview(c) },
+-    ] },
++    lines: (c, f) => {
++      const hold = noProofStep(f) || f.proof.done ? '' : proofHold(f, { notes: true });
++      return [
++        ...(noProofStep(f) || f.proof.done ? [] : hold ? [{ text: `the proof waits: ${hold}`, plain: true }, ...(f.checks && f.checks.beforeProof === false ? [{ text: preReview(c, ' --before-proof') }] : [])] : sidesOf(c).map((s) => ({ text: proofLine(c, s) }))),
++        ...(f.suite.done ? [] : suiteLines(c, f)),
++        { text: preReview(c) },
++      ];
++    } },
+   { id: 'verdict', loop: 'Step 3.5, item 7', lanes: ALL, unknown: () => true,
+     done: (f) => f.pushed === true,
+     lines: (c) => [{ text: `${tool(c, 'notes.mjs')} verdict --review --repo ${p(c.repo)}` }] },
+diff --git a/skills/gate/scripts/ts-parser.mjs b/skills/gate/scripts/ts-parser.mjs
+new file mode 100644
+index 0000000..6aaa784
+--- /dev/null
++++ b/skills/gate/scripts/ts-parser.mjs
+@@ -0,0 +1,125 @@
++// ts-parser.mjs — the cheap, run-free syntax check of JavaScript and TypeScript source the proof needs (2026-11-23, owner).
++//
++// syntaxProblem: does a file parse? A break whose text does not parse is refused before any test runs (run 3 of the
++// small task: two breaks with an unbalanced `.catch(` cost two full proof runs). Syntax only: a missing name or a type
++// error is NOT caught; the caller says so in its output.
++//
++// Plain JavaScript (.js, .cjs, .mjs) is checked by Node itself (`node --check`, as the run reads it). TypeScript files
++// are parsed by TypeScript, loaded from the repository: the file's own package (node_modules/typescript), else the same
++// package folder in another work tree of the repository (a task's own work tree usually has no node_modules). With no
++// TypeScript found, Node's own TypeScript stripper parses .ts/.mts/.cts; .tsx and .jsx are left unparsed.
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { createRequire } from 'node:module';
++import { execFileSync, spawnSync } from 'node:child_process';
++
++export const SCRIPT_FILE = /\.(?:[cm]?[jt]sx?)$/i;
++const loaded = new Map();
++
++function git(cwd, args) {
++  try { return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return ''; }
++}
++
++// The folder of the nearest package.json at or above `dir`, inside `top`; '' when there is none.
++function packageDirOf(top, dir) {
++  let at = path.resolve(dir);
++  const root = path.resolve(top);
++  for (;;) {
++    if (fs.existsSync(path.join(at, 'package.json'))) return at;
++    if (at === root) return '';
++    const up = path.dirname(at);
++    if (up === at || !up.toLowerCase().startsWith(root.toLowerCase())) return '';
++    at = up;
++  }
++}
++
++/** TypeScript for a file of the repository `top`, or null. Cached per package folder. */
++export function loadTypeScript(top, file) {
++  const pkg = packageDirOf(top, path.dirname(path.resolve(top, file)));
++  const rel = pkg ? path.relative(path.resolve(top), pkg) : '';
++  if (loaded.has(rel + '|' + top)) return loaded.get(rel + '|' + top);
++  const tries = [pkg || path.resolve(top)];
++  for (const line of git(top, ['worktree', 'list', '--porcelain']).split(/\r?\n/)) {
++    const m = /^worktree (.+)$/.exec(line);
++    if (m) tries.push(path.join(m[1], rel));
++  }
++  let ts = null;
++  for (const dir of tries) {
++    const entry = path.join(dir, 'node_modules', 'typescript', 'package.json');
++    if (!fs.existsSync(entry)) continue;
++    try { ts = createRequire(entry)('typescript'); if (ts && typeof ts.createSourceFile === 'function') break; ts = null; } catch { ts = null; }
++  }
++  loaded.set(rel + '|' + top, ts);
++  return ts;
++}
++
++const kindOf = (ts, file) => {
++  const ext = path.extname(file).toLowerCase();
++  return ext === '.tsx' ? ts.ScriptKind.TSX : ext === '.jsx' ? ts.ScriptKind.JSX : /\.[cm]?js$/.test(ext) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
++};
++
++/**
++ * '' when `text` parses as the file `file` would; the first syntax error ("line N: message") when it does not; null
++ * when no parser fits (the caller names the file as not parsed). Syntax only.
++ */
++export function syntaxProblem(top, file, text) {
++  if (!SCRIPT_FILE.test(file)) return null;
++  // Plain JavaScript is parsed by Node itself, as the run reads it (re-check, 2026-11-23: `const x;` parsed for
++  // TypeScript and failed in Node).
++  if (/\.[cm]?js$/i.test(file)) return nodeCheck(top, file, text);
++  const ts = loadTypeScript(top, file);
++  if (ts) {
++    // The syntactic diagnostics of a one-file program: the parse errors and the syntax a file of this kind cannot hold.
++    // No lib, no imports read: syntax only.
++    const name = '/sanad-break/' + path.basename(file);
++    const sf = ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true, kindOf(ts, file));
++    const host = { getSourceFile: (n) => (n === name ? sf : undefined), getDefaultLibFileName: () => '/lib.d.ts', writeFile: () => {}, getCurrentDirectory: () => '/',
++      getDirectories: () => [], fileExists: (n) => n === name, readFile: (n) => (n === name ? text : undefined), getCanonicalFileName: (n) => n,
++      useCaseSensitiveFileNames: () => true, getNewLine: () => '\n' };
++    const program = ts.createProgram([name], { allowJs: true, checkJs: false, noLib: true, noResolve: true, types: [], jsx: ts.JsxEmit.Preserve }, host);
++    const d = [...(sf.parseDiagnostics || []), ...program.getSyntacticDiagnostics(sf)][0];
++    if (!d) return '';
++    const { line } = sf.getLineAndCharacterOfPosition(d.start || 0);
++    return `line ${line + 1}: ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`;
++  }
++  // No TypeScript: Node's own stripper parses .ts (no JSX); JSX files are left unparsed.
++  if (/\.[cm]?tsx$|\.jsx$/i.test(file)) return null;
++  try {
++    const strip = createRequire(import.meta.url)('node:module').stripTypeScriptTypes;
++    if (typeof strip !== 'function') return null;
++    const quiet = process.emitWarning;
++    // An enum or a namespace is not plain type syntax: the strip mode refuses it, the transform mode reads it (re-check 3).
++    const read = (mode) => { process.emitWarning = () => {}; try { strip(text, { mode }); } finally { process.emitWarning = quiet; } };
++    try { read('strip'); } catch (e) { if (e && e.code === 'ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX') read('transform'); else throw e; }
++    return '';
++  } catch (e) {
++    return e && e.code === 'ERR_INVALID_TYPESCRIPT_SYNTAX' ? String(e.message || 'invalid syntax').split(/\r?\n/)[0] : null;
++  }
++}
++
++// `node --check` of a JavaScript text, in a temporary folder whose package.json gives the file's own module type.
++function nodeCheck(top, file, text) {
++  let dir = '';
++  try {
++    const pkg = packageDirOf(top, path.dirname(path.resolve(top, file)));
++    let type = 'commonjs';
++    try { type = JSON.parse(fs.readFileSync(path.join(pkg, 'package.json'), 'utf8')).type === 'module' ? 'module' : 'commonjs'; } catch { /* commonjs */ }
++    // A plain .js file may be read either way (a bundler reads `export` in a package with no type): it parses if
++    // either form parses. .cjs and .mjs have one form each.
++    const forms = /\.cjs$/i.test(file) ? ['commonjs'] : /\.mjs$/i.test(file) ? ['module'] : [type, type === 'module' ? 'commonjs' : 'module'];
++    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sanad-break-check-'));
++    const temp = path.join(dir, path.basename(file));
++    fs.writeFileSync(temp, text);
++    let r = null;
++    for (const form of forms) {
++      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ type: form }));
++      const run = spawnSync(process.execPath, ['--check', temp], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
++      if (run.status === 0) return '';
++      if (!r) r = run;
++    }
++    const m = /:(\d+)\r?\n[\s\S]*?(SyntaxError: [^\r\n]+)/.exec(r.stderr || '');
++    return m ? `line ${m[1]}: ${m[2]}` : (String(r.stderr || '').split(/\r?\n/).find((l) => /Error/.test(l)) || 'node --check failed').trim();
++  } catch { return null; }
++  finally { if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* temp */ } } }
++}
+diff --git a/skills/gate/tests/pre-review.test.mjs b/skills/gate/tests/pre-review.test.mjs
+index 83665b5..c995f88 100644
+--- a/skills/gate/tests/pre-review.test.mjs
++++ b/skills/gate/tests/pre-review.test.mjs
+@@ -701,6 +701,33 @@ test('15 changed functions: every caller row is read from the size check\'s data
+   assert.doesNotMatch(again.text, /not on the places list/);
+ });
+ 
++// Re-check, 2026-11-23: the list files given one by one, without --notes, check no break plan, so a pass there is not
++// kept for the proof; the same pass with --notes is.
++test('--before-proof keeps its pass for the proof only when run with --notes', async () => {
++  const { beforeProofPassed, notesInputs, BEFORE_PROOF_FILES } = await import('../scripts/pre-review-cache.mjs');
++  const { repo, write } = fixture();
++  write('web/src/a.test.ts', "// STORY-1: \"The total shows once\"\nit('x', () => {});\n");
++  write('web/src/a.ts', 'export const a = 4;\n');
++  const places = placesFor(repo), notes = path.dirname(places);
++  siblingsFor(places);
++  fs.writeFileSync(path.join(notes, 'lines.md'), '- The total shows once\n');
++  const inputs = () => notesInputs(BEFORE_PROOF_FILES.map((n) => path.join(notes, n)));
++  const loose = run(repo, ['--before-proof', '--lines', path.join(notes, 'lines.md'), '--was', 'small', '--places', places, '--siblings', path.join(notes, 'siblings.md')]);
++  assert.equal(loose.status, 0, loose.stdout);
++  assert.equal(beforeProofPassed(repo, undefined, inputs(), 'base'), false, 'no --notes: no pass kept');
++  const whole = run(repo, ['--notes', notes, '--before-proof', '--was', 'small']);
++  assert.equal(whole.status, 0, whole.stdout);
++  assert.equal(beforeProofPassed(repo, undefined, inputs(), 'base'), true, 'with --notes: the pass is kept, for the base it ran against');
++  // The base moves while the checks run (last check, 2026-11-23): no pass, for the old base or the new one.
++  const moved = execFileSync('git', ['commit-tree', 'base^{tree}', '-p', 'base', '-m', 'moved'], { cwd: repo, encoding: 'utf8', windowsHide: true }).trim();
++  const mech = path.join(path.dirname(notes), 'move-base.mjs');
++  fs.writeFileSync(mech, `import { execFileSync } from 'node:child_process';\nexecFileSync('git', ['-C', ${JSON.stringify(repo)}, 'update-ref', 'refs/heads/base', ${JSON.stringify(moved)}]);\n`);
++  execFileSync('git', ['config', 'sanad.mechanical', mech], { cwd: repo, windowsHide: true });
++  const during = run(repo, ['--notes', notes, '--before-proof', '--was', 'small']);
++  assert.equal(during.status, 0, during.stdout);
++  assert.equal(beforeProofPassed(repo, undefined, inputs(), 'base'), false, 'the base moved during the run: no pass');
++});
++
+ test('--notes fills the list options from the notes folder; an option that names another file is a usage error', async () => {
+   const { repo, write } = fixture();
+   write('web/src/a.ts', 'export const a = 9;\n');
+@@ -724,7 +751,7 @@ test('--notes fills the list options from the notes folder; an option that names
+   assert.equal(run(repo, ['--part', 'all']).status, 2, '--part takes lists or code only');
+ });
+ 
+-test('--before-proof with the notes folder\'s break list: a bad break fails the break plan check and is named; no test command, and it is named as skipped', async () => {
++test('--before-proof with the notes folder\'s break list: a bad break fails the break plan check and is named; no test command fails it too (2026-11-23: it was only named as skipped)', async () => {
+   const { planChecks } = await import('../scripts/pre-review.mjs');
+   const { writeTask } = await import('../scripts/notes-dir.mjs');
+   const { repo, write } = fixture();
+@@ -733,7 +760,10 @@ test('--before-proof with the notes folder\'s break list: a bad break fails the
+   siblingsFor(places);
+   fs.writeFileSync(path.join(notes, 'breaks.json'), JSON.stringify([{ name: 'value broken', file: 'web/src/a.ts', find: 'NOT IN THE FILE', put: 'x', mustFail: ['the value'] }]));
+   const noCommand = run(repo, ['--notes', notes, '--before-proof']);
+-  assert.match(noCommand.stdout, /– break plan: skipped \(no test command in the notes folder \(task\.json\)\)/, noCommand.stdout + noCommand.stderr);
++  assert.equal(noCommand.status, 1, noCommand.stdout + noCommand.stderr);
++  assert.match(noCommand.stdout, /✗ break plan — NOT RUN/, noCommand.stdout + noCommand.stderr);
++  assert.match(noCommand.stdout, /the notes folder names no test command \(task\.json\), so the break plan cannot be checked before the proof/);
++  assert.doesNotMatch(noCommand.stdout, /– break plan: skipped/);
+   writeTask(notes, { repo, base: 'base', sides: [{ name: 'web', cwd: '', testCommand: [process.execPath, '-e', '0'] }] });
+   const bad = run(repo, ['--notes', notes, '--before-proof']);
+   assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+@@ -742,6 +772,20 @@ test('--before-proof with the notes folder\'s break list: a bad break fails the
+   assert.doesNotMatch(run(repo, ['--notes', notes]).stdout, /break plan/);
+   const plan = planChecks({ repo, base: 'base', node: process.execPath, remote: null, beforeProof: true, breaks: 'b.json', proof: ['npm', 'test'], proofCwd: 'web' }).checks.find(c => c.name === 'break plan');
+   assert.deepEqual(plan.args.slice(1), ['--repo', repo, '--breaks', 'b.json', '--base', 'base', '--cwd', 'web', '--check-plan', '--', 'npm', 'test']);
++  // Two test folders: one break plan check each (re-check 3: only the first was checked).
++  const two = planChecks({ repo, base: 'base', node: process.execPath, remote: null, beforeProof: true, breaks: 'b.json',
++    proofs: [{ name: 'page', cmd: ['npm', 'test'], cwd: 'web' }, { name: 'server', cmd: ['dotnet', 'test'], cwd: 'api' }] }).checks.filter(c => /^break plan/.test(c.name));
++  assert.deepEqual(two.map((c) => [c.name, c.args.slice(-2).join(' '), c.args[c.args.indexOf('--cwd') + 1]]), [['break plan (page)', 'npm test', 'web'], ['break plan (server)', 'dotnet test', 'api']]);
++});
++
++test('a before-proof pass is for one commit: an amended commit with the same files reopens it', async () => {
++  const { beforeProofPassed, rememberBeforeProof, workTree } = await import('../scripts/pre-review-cache.mjs');
++  const { repo } = fixture();
++  const tree = workTree(repo);
++  rememberBeforeProof(repo, tree, true, 'in');
++  assert.equal(beforeProofPassed(repo, tree, 'in'), true);
++  execFileSync('git', ['commit', '-q', '--amend', '-m', 'another message'], { cwd: repo, windowsHide: true });
++  assert.equal(beforeProofPassed(repo, workTree(repo), 'in'), false);
+ });
+ 
+ test('checkStatus says which checks are a kept pass for the code as it is, and runs nothing; tscInfoFile names the type check\'s build-info file', async () => {
+diff --git a/skills/gate/tests/proof-attack-fixes.test.mjs b/skills/gate/tests/proof-attack-fixes.test.mjs
+new file mode 100644
+index 0000000..6231c38
+--- /dev/null
++++ b/skills/gate/tests/proof-attack-fixes.test.mjs
+@@ -0,0 +1,93 @@
++// The attack on the one-proof-per-round release (2026-11-23): one test per finding that a unit can hold.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { execFileSync } from 'node:child_process';
++import { due, STEPS, render } from '../scripts/steps.mjs';
++import { rememberBeforeProof, beforeProofPassed, notesInputs, BEFORE_PROOF_FILES, workTree } from '../scripts/pre-review-cache.mjs';
++
++const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'proof-attack-')));
++process.env.SANAD_STATE_DIR = path.join(root, 'state');
++test.after(() => fs.rmSync(root, { recursive: true, force: true }));
++function repo() {
++  const top = fs.mkdtempSync(path.join(root, 'repo-'));
++  const git = (...a) => execFileSync('git', a, { cwd: top, encoding: 'utf8', windowsHide: true }).trim();
++  git('init', '-q'); git('config', 'user.email', 'f@example.invalid'); git('config', 'user.name', 'F'); git('config', 'core.autocrlf', 'false');
++  fs.mkdirSync(path.join(top, 'web'), { recursive: true });
++  return { top, git, write: (f, t) => fs.writeFileSync(path.join(top, f), t) };
++}
++
++// Re-check 4, 2026-11-23 (owner: fix Blockers 4, 5 and 6).
++test('Blocker 4: a pass of the checks before the proof is for its base; against another base it does not count', () => {
++  const r = repo();
++  r.write('web/a.ts', 'export const a = 1;\n');
++  r.git('add', '-A'); r.git('commit', '-qm', 'base');
++  r.git('branch', 'main');
++  r.write('web/b.ts', 'export const b = 1;\n');
++  r.git('add', '-A'); r.git('commit', '-qm', 'work');
++  r.git('branch', 'other');
++  const tree = workTree(r.top);
++  rememberBeforeProof(r.top, tree, true, 'in', undefined, 'main');
++  assert.equal(beforeProofPassed(r.top, tree, 'in', 'main'), true);
++  assert.equal(beforeProofPassed(r.top, tree, 'in', 'other'), false, 'checks run against main are not the checks against other');
++});
++
++const pinned = (over) => {
++  const pin = { round: 1, kind: 'full', commit: 'h2', ref: 'refs/sanad/review/t/1' };
++  return { lane: 'small', size: 'small', testsOnly: false, last: false, round: 1, stop: 3, base: 'b', switches: {}, has: { lines: true, places: true, siblings: true, check: true, size: true, breaks: true },
++    open: { places: 0, siblings: 0 }, git: { head: 'h2', headTree: 't', tree: 't', clean: true, changed: false, ahead: 1, untracked: 0, foreign: false }, pins: [pin], lastPin: pin, pinAtHead: true,
++    proof: { done: false, early: false, breaks: 0, entries: 0, progress: [], logs: [] }, checks: { beforeProof: true }, suite: { done: false, receipt: null, ci: '', mark: 'full' },
++    notes: { known: true, all: [], open: [] }, decisions: [], pushed: false, selfRead: 'h2', ...over };
++};
++const printed = (f) => render(due(f), { gate: '/g', repo: '/r', notes: '/n', base: 'b', engine: 'claude', size: 'small', lane: 'small', sides: [{ name: 'page', cwd: '', test: 'npx vitest run', fixFiles: ['a.ts'] }] }, f).join('\n');
++
++test('Blocker 5: after a review whose notes cannot be read here, the proof is not offered', () => {
++  assert.match(printed(pinned({})), /red-proof\.mjs/, 'notes read, none open: the proof is offered');
++  const unread = printed(pinned({ notes: { known: false, all: [], open: [] } }));
++  assert.doesNotMatch(unread, /red-proof\.mjs/);
++  assert.match(unread, /the review's notes could not be read here/);
++});
++
++test('Blocker 6: uncommitted work holds the proof, after a review too', () => {
++  const dirty = printed(pinned({ git: { head: 'h2', headTree: 't', tree: '', clean: false, changed: true, ahead: 1, untracked: 0, foreign: false } }));
++  assert.doesNotMatch(dirty, /red-proof\.mjs/);
++  assert.match(dirty, /there is uncommitted work: commit it/);
++});
++
++test('a break invalid on the test machine is saved only when its name is one break\'s alone', () => {
++  const src = fs.readFileSync(new URL('../scripts/red-proof.mjs', import.meta.url), 'utf8');
++  assert.match(src, /named\.filter\(\(x\) => String\(x\.name\) === String\(named\[0\]\.name\)\)\.length === 1/);
++});
++
++test('the proof is not offered at a pinned commit whose checks before the proof have not passed', () => {
++  const pin = { round: 1, kind: 'full', commit: 'h2', ref: 'refs/sanad/review/t/1' };
++  const f = { lane: 'small', size: 'small', testsOnly: false, last: false, round: 1, stop: 3, base: 'b', switches: {}, has: { lines: true, places: true, siblings: true, check: true, size: true, breaks: true },
++    open: { places: 0, siblings: 0 }, git: { head: 'h2', headTree: 't', tree: 't', clean: true, changed: false, ahead: 1, untracked: 0, foreign: false }, pins: [pin], lastPin: pin, pinAtHead: true,
++    proof: { done: false, early: false, breaks: 0, entries: 0, progress: [], logs: [] }, checks: { beforeProof: false }, suite: { done: false, receipt: null, ci: '', mark: 'full' },
++    notes: { known: true, all: [], open: [] }, decisions: [], pushed: false, selfRead: 'h2' };
++  const text = render(due(f), { gate: '/g', repo: '/r', notes: '/n', base: 'b', engine: 'claude', size: 'small', lane: 'small', sides: [{ name: 'page', cwd: '', test: 'npx vitest run', fixFiles: ['a.ts'] }] }, f).join('\n');
++  assert.doesNotMatch(text, /red-proof\.mjs/);
++  assert.ok(STEPS.some((s) => s.id === 'proof'));
++});
++
++test('the printed pre-review command names the notes folder, so its break plan check runs', () => {
++  const step = STEPS.find((s) => s.id === 'checks-before-proof');
++  const line = step.lines({ gate: '/g', repo: '/r', notes: '/n', size: 'small' }, {})[0].text;
++  assert.match(line, /pre-review\.mjs --before-proof .* --notes \/n$/);
++});
++
++test('a pass of the checks before the proof is for these list files too: a break list changed after it reopens the checks', () => {
++  const r = repo();
++  r.write('web/a.ts', 'export const a = 1;\n');
++  r.git('add', '-A'); r.git('commit', '-qm', 'base');
++  const notes = fs.mkdtempSync(path.join(root, 'notes-'));
++  const files = BEFORE_PROOF_FILES.map((n) => path.join(notes, n));
++  fs.writeFileSync(path.join(notes, 'breaks.json'), '[]');
++  const tree = workTree(r.top);
++  rememberBeforeProof(r.top, tree, true, notesInputs(files));
++  assert.equal(beforeProofPassed(r.top, tree, notesInputs(files)), true);
++  fs.writeFileSync(path.join(notes, 'breaks.json'), '[{"name":"b"}]');
++  assert.equal(beforeProofPassed(r.top, tree, notesInputs(files)), false);
++});
+diff --git a/skills/gate/tests/red-proof-check-plan.test.mjs b/skills/gate/tests/red-proof-check-plan.test.mjs
+index 30a03fe..b208386 100644
+--- a/skills/gate/tests/red-proof-check-plan.test.mjs
++++ b/skills/gate/tests/red-proof-check-plan.test.mjs
+@@ -213,3 +213,57 @@ test('the FOREIGN? guard runs before any run: a folder of 201 untracked files is
+   assert.equal(lastLine(r), REFUSED);
+   nothingRan(f);
+ });
++
++// 2026-11-23 (owner, item 2): run 3 of the small task ran two full proofs whose two breaks did not parse (an unbalanced
++// `.catch(`). A break whose file does not parse with the break put in is refused before any run; PLAN OK says the
++// parse is syntax only.
++test('a break that leaves its file unparsable is refused before any run, by --check-plan and by a real run', () => {
++  const f = fixture();
++  const broken = { ...cleans, name: 'cleans broken badly', put: 'cleans: (false' };
++  for (const extra of [['--check-plan'], ['--then-green', '--parallel', '1']]) {
++    const r = f.proof([broken], extra);
++    assert.equal(r.status, 2, r.stdout);
++    assert.match(r.stdout, /BREAK INVALID ✗ cleans broken badly: with the break put in, rule\.cjs does not parse \(.+\)/);
++    assert.match(r.stdout, /RED-PROOF: NOT PROVED ✗ — 1 break\(s\) leave their file unparsable\. Nothing ran; files untouched\./);
++    nothingRan(f);
++  }
++  assert.equal(fs.readFileSync(path.join(f.repo, 'rule.cjs'), 'utf8'), RULE, 'the file is untouched');
++});
++
++test('PLAN OK says the parse is syntax only: a break with a missing name parses and passes the plan', () => {
++  const f = fixture();
++  const r = f.proof([{ ...cleans, put: 'cleans: missingName' }], ['--check-plan']);
++  assert.equal(r.status, 0, r.stdout);
++  assert.match(r.stdout, /Each break's file was parsed with the break put in \(1 parsed\): syntax only — a missing name or a type error is not caught here; the run finds those\./);
++  assert.equal(lastLine(r), 'PLAN OK');
++});
++
++// 2026-11-23 (owner): after BREAK INVALID the same proof does not run again until a break or a file changed (run 9).
++test('a break saved as invalid on this exact code stops the same proof before any run; a changed break or code runs', async () => {
++  const f = fixture();
++  const rec = await import('../scripts/proof-record.mjs');
++  const keep = process.env.SANAD_STATE_DIR;
++  process.env.SANAD_STATE_DIR = f.env.SANAD_STATE_DIR;
++  try {
++    const key = rec.recordKey([process.execPath, 'check.cjs'], '');
++    rec.writeBreakResult(f.repo, key, cleans, { state: 'invalid', tree: rec.codeFingerprint(f.repo), run: 'earlier', ms: null });
++  } finally { if (keep === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = keep; }
++  const again = f.proof([cleans], ['--then-green', '--parallel', '1']);
++  assert.equal(again.status, 2, again.stdout);
++  assert.match(again.stdout, /BREAK INVALID ✗ cleans broken: it was invalid on this exact code the last time, and neither the break nor the code changed since/);
++  assert.match(again.stdout, /RED-PROOF: NOT RUN ✗ — 1 break\(s\) already ended BREAK INVALID on this code\. Change the break \(breaks\.mjs\) or the code first\. Nothing ran; files untouched\./);
++  nothingRan(f);
++  // --fresh does not open it either (re-check 3).
++  const fresh = f.proof([cleans], ['--then-green', '--parallel', '1', '--fresh']);
++  assert.equal(fresh.status, 2, fresh.stdout);
++  assert.match(fresh.stdout, /RED-PROOF: NOT RUN ✗/);
++  nothingRan(f);
++  // The break changed: it runs (and is caught).
++  const changed = f.proof([{ ...cleans, put: 'cleans: 0' }], ['--then-green', '--parallel', '1']);
++  assert.doesNotMatch(changed.stdout, /NOT RUN ✗/);
++  assert.ok(f.ran() > 0, 'the changed break ran');
++  // The same break on changed code runs too.
++  f.write({ 'src/extra.test.cjs': CLEAN_JS.replace("'clean'", "'clean twice'") });
++  const code = f.proof([cleans], ['--then-green', '--parallel', '1']);
++  assert.doesNotMatch(code.stdout, /NOT RUN ✗/);
++});
+diff --git a/skills/gate/tests/sanad.test.mjs b/skills/gate/tests/sanad.test.mjs
+index 92510d5..0e7c3ad 100644
+--- a/skills/gate/tests/sanad.test.mjs
++++ b/skills/gate/tests/sanad.test.mjs
+@@ -49,6 +49,17 @@ async function runIn(fx, cmd, ...args) {
+ }
+ const start = (fx) => run(fx, 'start', '--repo', fx.repo, '--notes', fx.notes, '--base', 'base', '--suite', 'node run full-suite', '--side', 'page', '--fix-files', 'a.js', '--', 'node', '--test', 'a.test.mjs');
+ const note = (fx, name, text) => fs.writeFileSync(path.join(fx.notes, name), text);
++// A whole `pre-review --before-proof` run that passed on the work tree as it is now (pre-review-cache.mjs).
++async function beforeProofPassedHere(fx) {
++  const cache = await import('../scripts/pre-review-cache.mjs');
++  const keep = process.env.SANAD_STATE_DIR;
++  process.env.SANAD_STATE_DIR = fx.state;
++  // For the task's base, as sanad.mjs reads it (re-check 4: a pass is for one base).
++  let base = '';
++  try { base = JSON.parse(fs.readFileSync(path.join(fx.notes, 'task.json'), 'utf8')).base || ''; } catch { /* none */ }
++  if (!base) { let i = ''; try { i = cp.execFileSync('git', ['-C', fx.repo, 'config', '--get', 'sanad.integration'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* unset */ } base = 'origin/' + (i || 'staging'); }
++  try { cache.rememberBeforeProof(fx.repo, cache.workTree(fx.repo), true, cache.notesInputs(cache.BEFORE_PROOF_FILES.map((n) => path.join(fx.notes, n))), undefined, base); } finally { if (keep === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = keep; }
++}
+ // The author's own read of its diff (the self-read step), recorded for the commit at HEAD.
+ const selfRead = (fx, found = 'none') => run(fx, 'self-read', '--repo', fx.repo, '--notes', fx.notes, '--found', found);
+ // A commit the author has read (the steps after the self-read step); `read: false` leaves the step due.
+@@ -129,10 +140,16 @@ test('each state of a small task prints its due step, with every path filled', a
+   assert.equal(selfRead(fx, 'fixed the empty-list case; test a.test.mjs').status, 0);
+   r = run(fx, 'next');
+   assert.deepEqual(stepsOf(r.out), ['checks-before-proof', 'breaks']);
+-  assert.match(r.out, /BACKGROUND \$ node \S*pre-review\.mjs --before-proof --part code --was small/);
++  // 2026-11-23 (owner, one proof per round): every part, in the foreground; the proof waits for its pass on this code.
++  assert.match(r.out, /^ {2}\$ node \S*pre-review\.mjs --before-proof --was small/m);
++  assert.doesNotMatch(r.out, /--part code/);
+   note(fx, 'breaks.json', JSON.stringify([{ name: 'b1', file: 'a.js', find: 'a = 2', put: 'a = 1', mustFail: ['x'] }]));
+   r = run(fx, 'next');
+-  assert.deepEqual(stepsOf(r.out), ['checks-before-proof', 'proof']);
++  assert.deepEqual(stepsOf(r.out), ['checks-before-proof'], 'the proof is not printed beside checks that have not passed');
++  // The checks passed on this code (what a passing `pre-review --before-proof` keeps): the proof is due.
++  await beforeProofPassedHere(fx);
++  r = run(fx, 'next');
++  assert.deepEqual(stepsOf(r.out), ['proof']);
+   assert.ok(r.out.includes(`--old base --files a.js --breaks ${n}/breaks.json --then-green --log ${n}/proof-page.log -- node --test a.test.mjs`), r.out);
+   // No printed command keeps a path to fill in.
+   for (const line of r.out.split(/\r?\n/).filter((l) => l.includes('$ '))) assert.doesNotMatch(line, /<[a-z ]+>/i, line);
+@@ -151,8 +168,16 @@ test('each state of a small task prints its due step, with every path filled', a
+   r = run(fx, 'next');
+   assert.deepEqual(stepsOf(r.out), ['fix-round']);
+   assert.match(r.out, /pre-review\.mjs --before-proof /);
++  // 2026-11-23 (owner, one proof per round): the proof and the re-check wait for the checks to pass on the fix's code,
++  // and for every note the builder can fix to be answered.
++  assert.match(r.out, /the proof and the re-check wait: the checks before the proof have not passed on this code/);
++  assert.doesNotMatch(r.out, /--changed-since/);
++  await beforeProofPassedHere(fx);
++  assert.match((await runIn(fx, 'next')).out, /the proof and the re-check wait: 1 note\(s\) still to fix and answer \(notes\.mjs answer\): NOTE 1/);
++  fx.notesList = { known: true, all: [{ n: 1, kind: 'Bug', text: 'the date is a day off', state: 'fixed' }] };
++  r = await runIn(fx, 'next');
+   assert.match(r.out, /--changed-since refs\/sanad\/review\/t\/1 /);
+-  assert.match(run(fx, 'next', '--last').out, /the last round: the full proof/);
++  assert.match((await runIn(fx, 'next', '--last')).out, /the last round: the full proof/);
+ 
+   // A clean re-check of that commit: the full proof (the record is for the older tree), the suite, the checks.
+   const fixed = gitIn(fx.repo, 'rev-parse', 'HEAD');
+diff --git a/skills/gate/tests/steps.test.mjs b/skills/gate/tests/steps.test.mjs
+index 605735d..6ac4082 100644
+--- a/skills/gate/tests/steps.test.mjs
++++ b/skills/gate/tests/steps.test.mjs
+@@ -12,7 +12,8 @@ function facts(over = {}) {
+     git: { head: 'h2', headTree: 't2', tree: 't2', clean: true, changed: false, ahead: 1, untracked: 0, foreign: false },
+     pins: [], lastPin: null, pinAtHead: false,
+     proof: { done: false, early: false, breaks: 0, entries: 0, progress: [], logs: [] },
+-    checks: { code: undefined, all: undefined },
++    // The checks before the proof passed on this code (2026-11-23); a test of that order sets it false.
++    checks: { code: undefined, all: undefined, beforeProof: true },
+     suite: { done: false, receipt: null, ci: '', mark: 'full' },
+     notes: { known: true, all: [], open: [] }, decisions: [], pushed: false,
+     // The author read its own diff at this commit (the self-read step is done); a test of that step sets it.
+@@ -133,23 +134,34 @@ test('with sanad.stopRound 2 the round-2 fix prints the ASK THE OWNER list; with
+   assert.doesNotMatch(text(facts({ ...round2, stop: 3 })), /ASK THE OWNER/);
+   const two = text(facts({ ...round2, stop: 2 }));
+   assert.match(two, /ASK THE OWNER \(round 2, stop round 2\)/);
+-  assert.match(two, /NOTE 4: a rare case/);
+-  assert.doesNotMatch(two, /NOTE 5/);
++  const ownerPart = two.slice(two.indexOf('ASK THE OWNER'));
++  assert.match(ownerPart, /NOTE 4: a rare case/);
++  assert.doesNotMatch(ownerPart, /NOTE 5/);
++  // 2026-11-23: the Blocker is the builder's to fix, so the proof and the re-check wait for it; the owner's note does not hold them.
++  assert.match(two, /the proof and the re-check wait: 1 note\(s\) still to fix and answer \(notes\.mjs answer\): NOTE 5/);
+   assert.match(text(facts({ ...round2, round: 3, pins: [pin(1), pin(2), pin(3)], lastPin: pin(3), stop: 3 })), /ASK THE OWNER \(round 3, stop round 3\)/);
+ });
+ 
+ test('after a fix commit the fix round prints --before-proof and --changed-since with the last pin ref', () => {
+   const pin = { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' };
++  // 2026-11-23 (owner, one proof per round): the checks before the proof run first, in the foreground; the proof and
++  // the re-check wait for their pass on this code.
++  const unchecked = facts({ round: 1, pins: [pin], lastPin: pin, proof: { done: false }, checks: { beforeProof: false } });
++  const first = text(unchecked);
++  assert.match(first, /^ {2}\$ node \/g\/pre-review\.mjs --before-proof /m);
++  assert.doesNotMatch(first, /BACKGROUND \$ node \/g\/pre-review/);
++  assert.match(first, /the proof and the re-check wait: the checks before the proof have not passed on this code/);
++  assert.doesNotMatch(first, /red-proof\.mjs|review-brief\.mjs --recheck/);
+   const f = facts({ round: 1, pins: [pin], lastPin: pin, proof: { done: false } });
+   assert.deepEqual(ids(f), ['fix-round']);
+   const out = text(f);
+-  assert.match(out, /BACKGROUND \$ node \/g\/pre-review\.mjs --before-proof /);
++  assert.doesNotMatch(out, /pre-review\.mjs --before-proof/, 'passed on this code: not printed again');
+   assert.match(out, /red-proof\.mjs .*--changed-since refs\/sanad\/review\/t\/1 .*\(PARTIAL\)/);
+   assert.match(out, /review-brief\.mjs --recheck /);
+   assert.doesNotMatch(out, /the last round: the full proof/);
+-  // next --last prints the full form beside the re-check.
++  // next --last prints the full form beside the re-check, and not the partial one too (re-check 3, 2026-11-23).
+   const last = text(facts({ round: 1, pins: [pin], lastPin: pin, last: true }));
+-  assert.match(last, /--changed-since/);
++  assert.doesNotMatch(last, /--changed-since/);
+   assert.match(last, /the last round: the full proof/);
+   assert.match(last, /the full suite, once/);
+ });
+@@ -192,8 +204,51 @@ test('the steps printed side by side: the second look with the check lines, the
+   // The owner set sanad.lateCheckLines false: the second look waits for check.md.
+   assert.deepEqual(ids(facts({ has: { siblings: false, check: false }, switches: { lateCheckLines: false } })), ['check-lines']);
+   assert.deepEqual(ids(facts({ has: { siblings: false, check: true }, switches: { lateCheckLines: false } })), ['second-look']);
+-  assert.deepEqual(ids(facts({ has: { breaks: false } })), ['checks-before-proof', 'breaks']);
+-  assert.match(text(facts({ has: { breaks: false } })), /BACKGROUND \$ node \/g\/pre-review\.mjs --before-proof --part code/);
++  assert.deepEqual(ids(facts({ has: { breaks: false }, checks: { beforeProof: false } })), ['checks-before-proof', 'breaks']);
++  // 2026-11-23: every part, in the foreground, and the proof waits for its pass (it was `--part code`, in the background).
++  const cheap = text(facts({ has: { breaks: false }, checks: { beforeProof: false } }));
++  assert.match(cheap, /^ {2}\$ node \/g\/pre-review\.mjs --before-proof --was/m);
++  assert.doesNotMatch(cheap, /--part code|BACKGROUND \$ node \/g\/pre-review/);
++  assert.match(cheap, /the proof waits until it passes on this commit/);
++});
++
++// Re-check 3, 2026-11-23: a full review pinned with a Blocker open holds the proof (its fix changes the code); the
++// last round names the command that opens the proof when its checks have not passed.
++test('a pinned full review with a note to fix holds the proof; the last round prints the checks command it waits for', () => {
++  const pin = { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' };
++  const blocker = { n: 1, kind: 'Blocker', text: 'the rows are lost' };
++  const held = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: false }, notes: { known: true, all: [blocker], open: [blocker] } }));
++  assert.doesNotMatch(held, /red-proof\.mjs/);
++  const re = { round: 1, kind: 'recheck', commit: 'h1', ref: 'refs/sanad/review/t/1r' };
++  const last = text(facts({ round: 1, pins: [pin, re], lastPin: re, pinAtHead: true, checks: { beforeProof: false }, proof: { done: false }, notes: { known: true, all: [], open: [] } }));
++  assert.match(last, /the proof waits/);
++  assert.match(last, /^ {2}\$ node \/g\/pre-review\.mjs --before-proof/m);
++});
++
++// Re-check, 2026-11-23: at a pinned commit the checks step is over, so the proof step itself names the command that opens it.
++test('a pinned commit without passing checks: the proof waits and its step prints the checks command', () => {
++  const pin = { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' };
++  const out = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, checks: { beforeProof: false }, proof: { done: false }, notes: { known: true, all: [], open: [] } }));
++  assert.match(out, /the proof waits/);
++  assert.match(out, /^ {2}\$ node \/g\/pre-review\.mjs --before-proof/m);
++});
++
++// 2026-11-23 (owner, one proof per round): the proof is offered only after every code change of the round.
++test('one proof per round: the proof is not offered before the checks pass on this code, nor while a note to fix is open', () => {
++  // Before the first review: the checks before the proof come first, and the proof is not printed beside them.
++  assert.deepEqual(ids(facts({ checks: { beforeProof: false } })), ['checks-before-proof']);
++  assert.deepEqual(ids(facts({ checks: { beforeProof: true } })), ['proof']);
++  // A fix round: a Bug or a Gap still open holds the proof and the re-check; a Question or a note that asks the owner does not.
++  const pin = { round: 1, kind: 'full', commit: 'h1', ref: 'refs/sanad/review/t/1' };
++  const round = (open) => text(facts({ round: 1, pins: [pin], lastPin: pin, notes: { known: true, all: open, open } }));
++  const held = round([{ n: 3, kind: 'Bug', text: 'the list skips a row' }]);
++  assert.match(held, /the proof and the re-check wait: 1 note\(s\) still to fix and answer \(notes\.mjs answer\): NOTE 3/);
++  assert.doesNotMatch(held, /red-proof\.mjs|review-brief\.mjs --recheck/);
++  const free = round([{ n: 4, kind: 'Question', text: 'keep the old order?' }, { n: 5, kind: 'Gap', text: 'you decide: a known limit', asks: true }]);
++  assert.match(free, /red-proof\.mjs .*\(PARTIAL\)/);
++  assert.match(free, /review-brief\.mjs --recheck/);
++  // The builder's own read not recorded for this commit: that step comes first.
++  assert.deepEqual(ids(facts({ round: 1, pins: [pin], lastPin: pin, selfRead: 'h1' })), ['self-read']);
+ });
+ 
+ test('the start step adds --no-ticket when the ticket text file holds no ticket ID', async () => {
+diff --git a/skills/gate/tests/ts-parser.test.mjs b/skills/gate/tests/ts-parser.test.mjs
+new file mode 100644
+index 0000000..f226af7
+--- /dev/null
++++ b/skills/gate/tests/ts-parser.test.mjs
+@@ -0,0 +1,82 @@
++// ts-parser.mjs (2026-11-23, owner): a break whose text does not parse is refused before any run (syntax only).
++// TypeScript comes from the repository; these tests find one through the installer's end-to-end setting (git config
++// sanad.e2eRun "<repo>|<folder>|<command>") or SANAD_TEST_TYPESCRIPT (a typescript package folder). With none, the
++// TypeScript cases are skipped and say so.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { execFileSync } from 'node:child_process';
++import { syntaxProblem } from '../scripts/ts-parser.mjs';
++
++function findTypeScript() {
++  const own = process.env.SANAD_TEST_TYPESCRIPT;
++  if (own && fs.existsSync(path.join(own, 'package.json'))) return own;
++  let setting = '';
++  try { setting = execFileSync('git', ['config', '--global', '--get-all', 'sanad.e2eRun'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return ''; }
++  for (const line of setting.split(/\r?\n/).filter(Boolean)) {
++    const [repo, folder] = line.split('|');
++    // That folder, then the same folder in each work tree of its repository (as ts-parser.mjs looks).
++    let trees = [repo];
++    try { trees = [repo, ...execFileSync('git', ['-C', repo, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).split(/\r?\n/).filter((l) => l.startsWith('worktree ')).map((l) => l.slice(9))]; } catch { /* the folder alone */ }
++    for (const tree of trees) {
++      const dir = path.join(tree || '', folder || '', 'node_modules', 'typescript');
++      if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
++    }
++  }
++  return '';
++}
++const tsDir = findTypeScript();
++const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ts-parser-')));
++test.after(() => fs.rmSync(root, { recursive: true, force: true }));
++
++// A repository with one package that has TypeScript (a link to the one found), and one with none.
++function repoWith(withTs) {
++  const top = fs.mkdtempSync(path.join(root, 'repo-'));
++  execFileSync('git', ['init', '-q'], { cwd: top, windowsHide: true });
++  const web = path.join(top, 'web');
++  fs.mkdirSync(path.join(web, 'node_modules'), { recursive: true });
++  fs.writeFileSync(path.join(web, 'package.json'), '{"name":"web"}');
++  if (withTs) fs.symlinkSync(tsDir, path.join(web, 'node_modules', 'typescript'), 'junction');
++  return top;
++}
++const needsTs = tsDir ? {} : { skip: 'no TypeScript on this machine (git config sanad.e2eRun, or SANAD_TEST_TYPESCRIPT)' };
++const FILE = 'web/src/members.test.tsx';
++const BASE = [
++  "import { it, expect } from 'vitest';",
++  '// T1: "only the first 50 students of the section are listed."',
++  "it('[C1] lists every student', () => {",
++  '  const url = `//not a comment ${1} // nor this`;',
++  '  expect(<p>  Show more </p>).toBeTruthy();',
++  '  expect(url).toContain("//");',
++  '});',
++  '',
++].join('\n');
++
++test('a file that does not parse gives its first syntax error; one that parses gives an empty answer', needsTs, () => {
++  const top = repoWith(true);
++  assert.equal(syntaxProblem(top, FILE, BASE), '');
++  assert.match(syntaxProblem(top, FILE, BASE.replace('toBeTruthy()', 'toBeTruthy(')), /^line 5: '\)' expected\./);
++  // Syntax only: a name that does not exist and a wrong type both parse.
++  assert.equal(syntaxProblem(top, 'web/src/a.ts', 'const x: number = missingName("text");\n'), '');
++});
++
++test('with no TypeScript a .ts file is still parsed by Node, a .tsx or a C# file is not parsed (null)', () => {
++  const top = repoWith(false);
++  assert.match(String(syntaxProblem(top, 'web/src/fetch-all-pages.ts', 'export const all = (pages.map((p) => p.items;\n')), /\S/);
++  assert.equal(syntaxProblem(top, 'web/src/fetch-all-pages.ts', 'export const all = (pages: number[]) => pages.length;\n'), '');
++  assert.equal(syntaxProblem(top, 'web/src/Members.tsx', 'const a = <div>;'), null);
++  assert.equal(syntaxProblem(top, 'web/src/Members.cs', 'class A {'), null);
++  // A file with an enum is still read (re-check 3: the strip mode refused it, and a broken file went unparsed).
++  assert.equal(syntaxProblem(top, 'web/src/kinds.ts', 'export enum Kind { A, B }\n'), '');
++  assert.match(String(syntaxProblem(top, 'web/src/kinds.ts', 'export enum Kind { A, B }\nconst f = (x;\n')), /\S/);
++});
++
++test('plain JavaScript is parsed by Node, in either module form for .js: `const x;` and a type annotation do not parse, `export` does', () => {
++  const top = repoWith(false);
++  assert.match(String(syntaxProblem(top, 'web/src/a.cjs', 'const x;\n')), /SyntaxError/);
++  assert.match(String(syntaxProblem(top, 'web/src/a.js', 'const x: number = 1;\n')), /SyntaxError/);
++  assert.equal(syntaxProblem(top, 'web/src/a.js', 'export const x = 1;\n'), '');
++  assert.equal(syntaxProblem(top, 'web/src/a.js', 'module.exports = 1;\n'), '');
++});
+diff --git a/skills/sanad/reference/loop.md b/skills/sanad/reference/loop.md
+index 582b3d8..bebf1cc 100644
+--- a/skills/sanad/reference/loop.md
++++ b/skills/sanad/reference/loop.md
+@@ -66,7 +66,7 @@ Load [engineering-bar.md](engineering-bar.md). DB writes, migrations, transactio
+ 
+ 1. **Tests.** One test per check line, tagged `[Cn]` in its title, with the ticket line it proves quoted in a comment above it. A test goes through the public entry point. Its input is valid except for the rule under test, so that rule is the only reason for the result; a test of the first error also has a second error. A data write runs on the real database provider. A stricter rule on an old field gets the two `OLD DATA` tests of [review-checklist.md](review-checklist.md). Every wait in a test has its own bound.
+ 2. **Fix.** The change that fixes the rule in every place that shares it: the list's places and any other place with that rule or data. Finish every edit before the proof: a later edit voids it.
+-3. **Cheap checks first.** Commit, then `node <gate>/pre-review.mjs --before-proof` with the options of Step 3.5 item 1. Fix what it finds now, before the proof.
++3. **Cheap checks first.** Commit, then `node <gate>/pre-review.mjs --before-proof` with Step 3.5 item 1's options. Fix and commit until it passes: one proof per round, after it.
+ 4. **Breaks.** `<notes>/breaks.json` comes from the tool, never typed: `node <gate>/breaks.mjs add --breaks <notes>/breaks.json --repo <repo> --file <f> --line <n> (--put <text> | --put-file <file>) --must-fail <words>` reads the text to break from the file (`seed` first: an entry per new test). One break per rule; `mustFail` names only that rule's tests.
+ 5. **Proof (rule 3).**
+    `node <gate>/red-proof.mjs --repo <repo> --old <base> --files <fix files> --breaks <notes>/breaks.json --then-green --log <notes>/proof.log -- <test command for the changed test files>`
+@@ -89,7 +89,7 @@ Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
+    `NOTE <n>: refuted — <the note check's evidence>` (never a Blocker or a Question)
+    There is no other answer. Before fixing, a note's fenced test runs on the reviewed code, and the note check ([loop-rare-cases.md](loop-rare-cases.md)) tries to disprove the rest; only a note it refuted may take the third line, and the ship brief lists those. A bug related to the ticket is fixed with a test, on every sibling path, without asking. Ask the open notes in one message (`notes.mjs ask`).
+ 5. **Outside lines.** Each `OUTSIDE PR` line goes to the user at the end of the task, in one list: fix here, separate PR, or leave. The answer goes in the project's outside list.
+-6. **Fix round.** All fixes in one batch, test first, then commit and `pre-review.mjs --before-proof`. A changed test repeats the proof (`--changed-since <the last reviewed commit>`; the full proof in the last round). The proof and a fresh reviewer (a new agent; brief: `review-brief.mjs --notes <notes> --recheck`) start in the same message; it re-checks the changed lines and their callers, plus the risk reviewer for a fix on a sensitive boundary. **Stop rule:** from the stop round (round 3 unless the owner sets `sanad.stopRound`), every new note but a blocker, a security hole or a ticket line goes to the user in one list: fix now, or a known limit in the PR text. The step ends when the latest report has no open note.
++6. **Fix round.** Fix and answer every note (test first), commit, pass `pre-review.mjs --before-proof`. A changed test repeats the proof (`--changed-since <the last reviewed commit>`; the full one in the last round). The proof and a fresh reviewer (a new agent; brief: `review-brief.mjs --notes <notes> --recheck`) start in the same message; it re-checks the changed lines and their callers, plus the risk reviewer for a fix on a sensitive boundary. **Stop rule:** from the stop round (round 3 unless the owner sets `sanad.stopRound`), every new note but a blocker, a security hole or a ticket line goes to the user in one list: fix now, or a known limit in the PR text. The step ends when the latest report has no open note.
+ 7. **Verdict.** One plain sentence for the user, then the line `notes.mjs verdict --review` prints, on its own line, plain, in a message with no tool call:
+    `REVIEW: PASS|FAIL — bugs <found>/<fixed>, goals tested <k>/<k> ✓, untested <n>, open: <none|list>`
+    PASS needs `open: none`. The only allowed open item is the user's browser check, named as pending.

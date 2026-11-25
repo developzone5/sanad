@@ -1,0 +1,460 @@
+diff --git a/skills/gate/scripts/pre-review.mjs b/skills/gate/scripts/pre-review.mjs
+index 24462a3..25f7ed9 100644
+--- a/skills/gate/scripts/pre-review.mjs
++++ b/skills/gate/scripts/pre-review.mjs
+@@ -485,6 +485,43 @@ export function failureLines(text) {
+   return [...keep].sort((a, b) => a - b).map(i => text[i]);
+ }
+ 
++// The checks that can be slow or run on the test machine: lint, the type check and the formatter (2026-11-25). Every
++// other check is cheap and runs first.
++export const isHeavyCheck = (c) => Boolean(c && (c.remote || /^(?:lint|types|format)\b/.test(String(c.name))));
++
++// One `FIX <check>:` line per failed check, with the command that fixes it (2026-11-25, owner: "one run names every
++// failure, each with the exact command that fixes it"). A check that did not run because one above failed gets none.
++export function fixLines(results, { repo = '<repo>', base = '<base>', notes = '<notes>' } = {}) {
++  const gate = here.replace(/\\/g, '/'), n = (f) => `${String(notes || '<notes>').replace(/\\/g, '/')}/${f}`;
++  const q = (s) => (/[\s"'$`]/.test(String(s)) ? `"${String(s)}"` : String(s));
++  const out = [];
++  for (const r of results || []) {
++    if (!r || r.code === 0 || /^not run: a check above failed/.test(String(r.out || ''))) continue;
++    const text = String(r.out || '') + ' ' + String(r.notRun || '');
++    const name = String(r.name);
++    let fix;
++    if (name === 'commits') fix = `make one commit: git reset --soft $(git merge-base ${q(base)} HEAD) && git commit -m "<type(scope): what>"`;
++    else if (name === 'places') fix = /not on the places list/.test(text)
++      ? `add the changed code's places: node ${q(gate + '/places.mjs')} --refresh ${q(n('places.md'))} --repo ${q(repo)} --add-changed --base ${q(base)}; then open and close each OPEN place: node ${q(gate + '/places.mjs')} --close ${q(n('places.md'))} --set "P<n>=C<k>" (or "P<n>=none: <why>")`
++      : `open each OPEN place above, then close it: node ${q(gate + '/places.mjs')} --close ${q(n('places.md'))} --set "P<n>=C<k>" (or "P<n>=none: <why>")`;
++    else if (name === 'siblings') fix = `give each S and J line its outcome in ${q(n('siblings.md'))}: → P<n>, → none: <reason>, → reuse or → not: <why>`;
++    else if (name === 'ticket lines') fix = 'each T line named above needs a test that quotes it, in its name or a comment above it';
++    else if (name === 'check lines') fix = `add a check line for each T line named above to ${q(n('check.md'))}`;
++    else if (name === 'test labels') fix = 'tag each test named above with its check line, [Cn], in its title';
++    else if (name === 'test asserts') fix = /NOT PROVEN TEST|no evidence/.test(text)
++      ? 'a new or changed test has no proof yet: run the proof first (sanad.mjs next prints it), then this check again'
++      : 'fix each test named above';
++    else if (name === 'break plan') fix = /no test command/.test(text)
++      ? `name the test command: node ${q(gate + '/sanad.mjs')} start --repo ${q(repo)} --notes ${q(notes)} --side <name> [--cwd <dir>] -- <test command>`
++      : `make each break named above again on the code as it is now: node ${q(gate + '/breaks.mjs')} add --breaks ${q(n('breaks.json'))} --repo ${q(repo)} --file <f> --line <n> --put-file <file> --must-fail <words of a test title>`;
++    else if (name === 'size') fix = 'add what the larger size needs (SIZE GREW), or bring the owner\'s words';
++    else if (name === 'one job') fix = `ask the owner: split it, or keep it as one job (node ${q(gate + '/one-job.mjs')} --keep "<their words>")`;
++    else fix = 'fix what the lines above name';
++    out.push(`FIX ${name}: ${fix}`);
++  }
++  return out;
++}
++
+ // Every check at once, results in plan order. A check with `after` starts when the named check (planned before
+ // it) has ended (2026-11-14: siblings reads the list the places check rewrites). `run`: tests only.
+ export function runChecks(checks, run = runOne) {
+@@ -669,8 +706,22 @@ export async function preReview(opts) {
+     return r;
+   };
+   // The list checks start first; the results keep the plan's order.
++  // 2026-11-25 (owner, "the checks pass the first time"): the cheap checks run first (all but lint and the type check,
++  // which may run on the test machine). When one of them fails the run stops there: lint and the type check are named
++  // as not run, so no sync and no slow run is spent on code that must change anyway. Every cheap failure is named at
++  // once, each with its fix (fixLines).
+   const order = [...checks].sort((a, b) => Number(!LISTS.test(a.name)) - Number(!LISTS.test(b.name)));
+-  const ended = await runChecks(order, run);
++  const cheap = order.filter((c) => !isHeavyCheck(c)), heavy = order.filter(isHeavyCheck);
++  const firstEnded = await runChecks(cheap, run);
++  const cheapFailed = firstEnded.some((r) => r && r.code !== 0);
++  // A heavy check with a pass kept for this exact code is still read and shown: reading it runs nothing.
++  const heavyEnded = cheapFailed
++    ? await Promise.all(heavy.map(async (c) => {
++      if (c.cached) return run(c);
++      const r = { ...c, code: 1, out: 'not run: a check above failed — fix it first (see FIX), then run again', ms: 0 }; emit(r); return r;
++    }))
++    : await runChecks(heavy, run);
++  const ended = order.map((c) => (cheap.includes(c) ? firstEnded[cheap.indexOf(c)] : heavyEnded[heavy.indexOf(c)]));
+   const results = [...checks.map(c => ended[order.indexOf(c)]), ...owedResults];
+   const skippedText = skipped.length ? ` · ${skipped.length} skipped: ${skipped.map(s => s.name).join(', ')}` : '';
+   const summary = `${label}: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed${skippedText} · ${files.length} changed file(s) · ${opts.repo}`;
+@@ -679,6 +730,8 @@ export async function preReview(opts) {
+   for (const r of results) lines.push(...resultLines(r));
+   for (const s of skipped) lines.push(`  – ${s.name}: skipped (${s.why})`);
+   for (const s of skipped) say(`  – ${s.name}: skipped (${s.why})`);
++  const fixes = fixLines(results, { repo: opts.repo, base: opts.base, notes: opts.notes || (opts.places ? path.dirname(opts.places) : '') });
++  for (const l of fixes) { lines.push(l); say(l); }
+   say(summary);
+   const ok = results.every(r => r.code === 0);
+   // 2026-11-23: a whole before-proof run (no --part) keeps its answer by the tree it began on; a tree that moved during
+diff --git a/skills/gate/scripts/red-proof.mjs b/skills/gate/scripts/red-proof.mjs
+index d437b89..be216ce 100644
+--- a/skills/gate/scripts/red-proof.mjs
++++ b/skills/gate/scripts/red-proof.mjs
+@@ -172,6 +172,7 @@ import { selectCommand } from './proof-select.mjs';
+ import { changeSet, foreignLine } from './change-set.mjs';
+ import { holdTestMachine } from './test-machine-lock.mjs';
+ import { syntaxProblem } from './ts-parser.mjs';
++import { titleMatches } from './test-names.mjs';
+ 
+ // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
+ // missing element, a type, reference or build error, or a timeout means the test itself (or the
+@@ -294,15 +295,8 @@ export function ownNames(reason, pairs = []) {
+   return names;
+ }
+ 
+-// A declared title against a failing test's own names; a title with placeholders (`${x}`, %s, $name)
+-// matches any text in their place.
+-function titleMatches(title, own) {
+-  const t = String(title).toLowerCase();
+-  if (own.has(t)) return true;
+-  if (!/\$\{|%[sdifjoc#]|\$\w/.test(t)) return false;
+-  const re = new RegExp('^' + t.split(/\$\{[^}]*\}|%[sdifjoc#]|\$\w+/).map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.+') + '$');
+-  return [...own].some(n => re.test(n));
+-}
++// titleMatches (a declared title against a failing test's own names) lives in test-names.mjs (2026-11-25): the break
++// plan check reads test names the same way.
+ 
+ // The failing tests a runner printed, each with its own names, its full printed name and the test file it printed
+ // (a vitest "file > ... > test" head), for failingFor.
+@@ -1333,14 +1327,19 @@ async function main() {
+   // --check-plan ends here (2026-11-19): every check above ran, and nothing else does. One more check is its own:
+   // every mustFail part must name a test. A part in no title of the changed test files may still name an older
+   // test, so it is refused only when no file of the repository holds its words (the breaks file itself left out).
+-  if (checkPlan) {
++  // 2026-11-25 (owner, "the checks pass the first time"): this name check runs before every proof too, not only with
++  // --check-plan, so a break that names no test stops before any run (test 4: one proof run was lost to it). It reads a
++  // title as the proof does (test-names.mjs titleMatches): a .each title with placeholders names each of its rows.
++  if (checkPlan || !plan) {
+     const lost = [];
+     try {
+-      const titles = (testFiles || []).flatMap(f => { try { return declaredTests(textAt(f), f); } catch { return []; } }).flatMap(d => d.titles.map(x => String(x).toLowerCase()));
++      // The titles as the proof's record reads its tests (testSpans: a .each title with its placeholders) and as
++      // survivors() reads them (declaredTests).
++      const titles = (testFiles || []).flatMap(f => { try { const t = textAt(f); return [...declaredTests(t, f), ...testSpans(t, f)]; } catch { return []; } }).flatMap(d => d.titles.map(x => String(x).toLowerCase()));
+       const own = opt('--breaks') ? path.relative(repo, path.resolve(opt('--breaks'))).replace(/\\/g, '/') : '';
+       const spec = ['--', '.', ...(own && !own.startsWith('..') && !path.isAbsolute(own) ? [`:(exclude)${own}`] : [])];
+       for (const b of breaks.filter(x => !x.single)) for (const part of b.mustFail.map(String)) {
+-        if (part && titles.some(x => x.includes(part.toLowerCase()))) continue;
++        if (part && titles.some(x => x.includes(part.toLowerCase()) || titleMatches(x, new Set([part.toLowerCase()])))) continue;
+         let held = Boolean(part);
+         if (held) { try { git('grep', '-q', '-i', '-F', '--untracked', '-e', part, ...spec); } catch (e) { held = e.status !== 1; } }
+         if (!held) lost.push({ name: b.name, part });
+@@ -1351,6 +1350,8 @@ async function main() {
+       say('RED-PROOF: NOT PROVED ✗ — every mustFail part must be words of the own title of a test this command runs. Nothing ran; files untouched.');
+       process.exit(2);
+     }
++  }
++  if (checkPlan) {
+     const count = breaks.filter(x => !x.single).length;
+     say(`RED-PROOF: plan checked — ${count} break(s): each is filled in and its find matches once, no mustFail part is ambiguous or names no test, and no new "nothing happens" check is left unproven.${syntaxNote} No run started, no test machine contacted, no copy taken.`);
+     say('PLAN OK');
+diff --git a/skills/gate/scripts/steps.mjs b/skills/gate/scripts/steps.mjs
+index 5f092d4..93bc89d 100644
+--- a/skills/gate/scripts/steps.mjs
++++ b/skills/gate/scripts/steps.mjs
+@@ -106,9 +106,21 @@ const noProofStep = (f) => lightLane(f) || (f.lane === 'text' && !f.textProof);
+ // Fix round: with no log on disk the option is left out, never a name of a file that is not there.
+ const proofLogs = (f) => (Array.isArray(f.proofLogs) ? f.proofLogs : []).map((l) => ' --proof-log ' + p(l)).join('');
+ const brief = (c, f, extra) => `${tool(c, 'review-brief.mjs')} ${extra} --out ${note(c, 'brief.md')} --ticket ${note(c, 'ticket.md')} --lines ${note(c, 'lines.md')} --check ${note(c, 'check.md')} --places ${note(c, 'places.md')}${(c.lane === 'text' && !f.textProof) || lightLane(f) ? '' : proofLogs(f)} --engine ${q(c.engine || 'claude')} --size ${q(c.size || 'SIZE')}`;
++// 2026-11-25 (owner): the suite step says where its receipt goes, so the suite runs once (test 4: it ran twice).
+ const suiteLines = (c, f) => (f.suite.ci
+   ? [{ text: `left to CI: ${f.suite.ci}`, plain: true }]
+-  : [{ text: `the full suite, once, through the evidence helper, on this tree: ${f.git.tree ? f.git.tree.slice(0, 10) : 'commit first'}`, plain: true }]);
++  : [{ text: `the full suite, once, through the evidence helper, on this tree: ${f.git.tree ? f.git.tree.slice(0, 10) : 'commit first'}`, plain: true },
++    f.suite.mark
++      ? { text: `its receipt goes in ${note(c, 'evidence')} (the spec's outputRoot), with the command the task names: ${f.suite.mark}`, plain: true }
++      : { text: `first name the suite command: ${tool(c, 'sanad.mjs')} start --repo ${p(c.repo)} --notes ${p(c.notes)} --suite "<the full suite command>"; its receipt goes in ${note(c, 'evidence')}`, plain: true }]);
++
++// The three steps that failed most in test 4, before the checks (2026-11-25): the places list refreshed for the changed
++// code, one commit, and each test tagged with its check line and quoting its ticket line.
++const prepLines = (c) => [
++  { text: `before the checks: 1) the places of the changed code: ${tool(c, 'places.mjs')} --refresh ${note(c, 'places.md')} --repo ${p(c.repo)} --add-changed --base ${q(c.base)}, then close each open place`, plain: true },
++  { text: '2) one commit on the base (amend each fix into it)', plain: true },
++  { text: '3) each new test has its [Cn] tag in its title and quotes its ticket line in a comment above it', plain: true },
++];
+ 
+ // True when the ticket text file exists and holds no ticket ID (a word like ABC-123): the task has no ticket.
+ const noTicketText = (file) => {
+@@ -187,7 +199,9 @@ export const STEPS = [
+   // asked for voided two proofs.
+   { id: 'checks-before-proof', loop: 'Step 3, item 3', lanes: ALL, beside: 'breaks',
+     done: (f) => f.checks.beforeProof === true || f.proof.done || f.pinAtHead,
++    // 2026-11-25 (owner, "the checks pass the first time"): the three steps that failed most in test 4 come first, in order.
+     lines: (c) => [
++      ...prepLines(c),
+       { text: preReview(c, ' --before-proof') },
+       { text: 'fix what it finds and commit, then run it again: the proof waits until it passes on this commit', plain: true },
+     ] },
+@@ -210,7 +224,9 @@ export const STEPS = [
+   { id: 'review', loop: 'Step 3.5, items 1-3', lanes: ALL, early: true,
+     done: (f) => f.pinAtHead,
+     lines: (c, f) => [
+-      { text: preReview(c) },
++      // 2026-11-25 (owner): the full checks only after the proof; before it, only --before-proof (test 4: the full run
++      // before the proof failed on new tests with no proof yet, three times).
++      ...(noProofStep(f) || f.proof.done ? [{ text: preReview(c) }] : [{ text: preReview(c, ' --before-proof') }, { text: 'the full checks run after the proof', plain: true }]),
+       { text: brief(c, f, '--pin') },
+       { text: `launch every line of ${note(c, 'launch.md')} in one message`, plain: true },
+       ...(f.lane === 'small' ? [{ text: "suggestion, not measured: start the gate's focused evidence runs while the one reviewer reads", plain: true }] : []),
+@@ -253,12 +269,14 @@ export const STEPS = [
+       return [
+         ...(noProofStep(f) || f.proof.done ? [] : hold ? [{ text: `the proof waits: ${hold}`, plain: true }, ...(f.checks && f.checks.beforeProof === false ? [{ text: preReview(c, ' --before-proof') }] : [])] : sidesOf(c).map((s) => ({ text: proofLine(c, s) }))),
+         ...(f.suite.done ? [] : suiteLines(c, f)),
+-        { text: preReview(c) },
++        ...(noProofStep(f) || f.proof.done ? [{ text: preReview(c) }] : [{ text: 'the full checks run after the proof', plain: true }]),
+       ];
+     } },
+   { id: 'verdict', loop: 'Step 3.5, item 7', lanes: ALL, unknown: () => true,
+     done: (f) => f.pushed === true,
+-    lines: (c) => [{ text: `${tool(c, 'notes.mjs')} verdict --review --repo ${p(c.repo)}` }] },
++    // The full checks come first, once the proof is done (review: the last round ended with the proof and the suite and
++    // never offered them, since no record shows their pass to this printer).
++    lines: (c, f) => [...(f && (noProofStep(f) || f.proof.done) ? [{ text: preReview(c) }] : []), { text: `${tool(c, 'notes.mjs')} verdict --review --repo ${p(c.repo)}` }] },
+   { id: 'gate', loop: 'Step 4', lanes: ALL, unknown: (f) => Boolean(f.suite.ci),
+     done: (f) => Boolean(f.suite.receipt) || f.pushed === true,
+     lines: (c, f) => [{ text: '/gate   (the Definition of Done and the security list, each claim with its output)', plain: true }, ...suiteLines(c, f), { text: `${tool(c, 'notes.mjs')} verdict --gate --repo ${p(c.repo)} --notes ${p(c.notes)} --tests <passed>/<run> --build "<real result>" --attack "<real result>" --security "<real result>" --ran "<real result>"` }, { text: 'Each flag carries the real result of that check; without them the line is GATE: INCOMPLETE.', plain: true }] },
+diff --git a/skills/gate/scripts/test-names.mjs b/skills/gate/scripts/test-names.mjs
+new file mode 100644
+index 0000000..a7dcb8b
+--- /dev/null
++++ b/skills/gate/scripts/test-names.mjs
+@@ -0,0 +1,12 @@
++// test-names.mjs — how a declared test title is read against a test's names (2026-11-25, owner: one reading, used by
++// the proof and by the break plan check). Moved here from red-proof.mjs unchanged: the proof matches tests as before.
++
++// A declared title against a failing test's own names; a title with placeholders (`${x}`, %s, $name)
++// matches any text in their place.
++export function titleMatches(title, own) {
++  const t = String(title).toLowerCase();
++  if (own.has(t)) return true;
++  if (!/\$\{|%[sdifjoc#]|\$\w/.test(t)) return false;
++  const re = new RegExp('^' + t.split(/\$\{[^}]*\}|%[sdifjoc#]|\$\w+/).map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.+') + '$');
++  return [...own].some(n => re.test(n));
++}
+diff --git a/skills/gate/tests/pre-review-cache.test.mjs b/skills/gate/tests/pre-review-cache.test.mjs
+index 2784ff3..8ccd458 100644
+--- a/skills/gate/tests/pre-review-cache.test.mjs
++++ b/skills/gate/tests/pre-review-cache.test.mjs
+@@ -121,7 +121,8 @@ test('check a dirty tree, commit it, check again: lint and types show the kept p
+   const dirty = f.run();
+   assert.match(dirty.stdout, /✓ lint web \(1 file\) \(\d+\.\d s\)/, dirty.stdout);
+   assert.deepEqual([f.runs('lint'), f.runs('types'), f.runs('mechanical')], [1, 1, 1]);
+-  f.git('commit', '-qam', 'fix(web): three');
++  // One commit on the base (2026-11-25: a second commit fails the cheap commits check, and lint would not start).
++  f.git('commit', '-q', '--amend', '-am', 'fix(web): three');
+   const committed = f.run();
+   assert.match(committed.stdout, /✓ lint web \(1 file\) \(same code: passed at \d\d:\d\d\)/, committed.stdout);
+   assert.match(committed.stdout, /✓ types web \(same code: passed at \d\d:\d\d\)/);
+@@ -138,7 +139,8 @@ test('a changed lock file or tool version misses the cache, though no tracked fi
+   const f = fixture();
+   // The lock file and node_modules are not in git here, so the tree is the same before and after.
+   f.write('web/.gitignore', 'node_modules/\npackage-lock.json\n');
+-  f.git('commit', '-qam', 'fix(web): ignore the lock file');
++  // One commit on the base (2026-11-25: a second commit fails the cheap commits check, and lint would not start).
++  f.git('commit', '-q', '--amend', '-am', 'fix(web): ignore the lock file');
+   f.write('web/package-lock.json', '{"lockfileVersion":3,"packages":{"node_modules/eslint":{"version":"9.0.0"}}}\n');
+   f.write('web/node_modules/eslint/package.json', '{"name":"eslint","version":"9.0.0"}\n');
+   f.run(); f.run();
+diff --git a/skills/gate/tests/pre-review.test.mjs b/skills/gate/tests/pre-review.test.mjs
+index c995f88..4d89d26 100644
+--- a/skills/gate/tests/pre-review.test.mjs
++++ b/skills/gate/tests/pre-review.test.mjs
+@@ -848,3 +848,49 @@ test('Y2: with no strictEvidence setting, the missing-run-evidence row fails the
+   assert.match(r.stdout, /✗ test asserts/, r.stdout + r.stderr);
+   assert.match(r.stdout, /NOT PROVEN TEST: web\/src\/form\.test\.ts:1 shows the count once/, r.stdout + r.stderr);
+ });
++
++// 2026-11-25 (owner, "the checks pass the first time"): in test 4, 28 runs took 24 minutes; 13 of them were runs that
++// a cheap check failed. The cheap checks run first; when one fails, lint and the type check are not started, and every
++// failure is named with the command that fixes it.
++test('a failed cheap check stops the run before lint and the type check; every failure gets its FIX line', () => {
++  const { repo, git, write } = fixture();
++  write('web/src/a.ts', 'export const a = 2;\n');
++  git('add', '-A'); git('commit', '-qm', 'one');
++  write('web/src/a.ts', 'export const a = 3;\n');
++  git('add', '-A'); git('commit', '-qm', 'two');
++  const r = run(repo, closed(repo));
++  assert.equal(r.status, 1, r.stdout + r.stderr);
++  assert.match(r.stdout, /✗ commits/);
++  assert.doesNotMatch(r.stdout, /eslint ran on/, 'lint was not started');
++  assert.match(r.stdout, /✗ lint web[^\n]*\n\s+not run: a check above failed — fix it first \(see FIX\), then run again/);
++  assert.match(r.stdout, /✗ types web[^\n]*\n\s+not run: a check above failed/);
++  assert.match(r.stdout, /^FIX commits: make one commit: git reset --soft \$\(git merge-base base HEAD\) && git commit -m "<type\(scope\): what>"$/m);
++  assert.doesNotMatch(r.stdout, /^FIX (?:lint|types)/m, 'no FIX line for a check that did not run');
++  // With the cheap checks green, lint and the type check run as before.
++  git('reset', '-q', '--soft', 'base');
++  const ok = run(repo, closed(repo));
++  assert.match(ok.stdout, /✓ lint web/);
++  assert.doesNotMatch(ok.stdout, /not run: a check above failed/);
++  assert.match(ok.stdout, /✓ types web/);
++});
++
++test('fixLines: one line per failed check, each with its command; a check that did not run gets none', async () => {
++  const { fixLines, isHeavyCheck } = await import('../scripts/pre-review.mjs');
++  const lines = fixLines([
++    { name: 'commits', code: 1, out: 'COMMIT: 2 commits since origin/staging' },
++    { name: 'places', code: 1, out: 'OPEN: P22 · enums.roles' },
++    { name: 'break plan', code: 1, out: '', notRun: 'the notes folder names no test command (task.json)' },
++    { name: 'test asserts', code: 1, out: 'NOT PROVEN TEST: a.test.ts:3 [C3] switches' },
++    { name: 'ticket lines', code: 1, out: '✗ L2 — no test quotes it' },
++    { name: 'lint web (1 file)', code: 1, out: 'not run: a check above failed — fix it first (see FIX), then run again' },
++    { name: 'size', code: 0, out: '' },
++  ], { repo: '/r', base: 'origin/staging', notes: '/n' });
++  assert.deepEqual(lines.map((l) => l.split(':')[0]), ['FIX commits', 'FIX places', 'FIX break plan', 'FIX test asserts', 'FIX ticket lines']);
++  assert.match(lines[1], /places\.mjs"? --close \/n\/places\.md --set "P<n>=C<k>"/);
++  assert.match(lines[2], /sanad\.mjs"? start --repo \/r --notes \/n --side <name>/);
++  assert.match(lines[3], /run the proof first/);
++  assert.equal(isHeavyCheck({ name: 'lint web (1 file)' }), true);
++  assert.equal(isHeavyCheck({ name: 'types web (app)' }), true);
++  assert.equal(isHeavyCheck({ name: 'places', remote: false }), false);
++  assert.equal(isHeavyCheck({ name: 'test asserts' }), false);
++});
+diff --git a/skills/gate/tests/proof-attack-fixes.test.mjs b/skills/gate/tests/proof-attack-fixes.test.mjs
+index 6231c38..d3c9436 100644
+--- a/skills/gate/tests/proof-attack-fixes.test.mjs
++++ b/skills/gate/tests/proof-attack-fixes.test.mjs
+@@ -74,7 +74,8 @@ test('the proof is not offered at a pinned commit whose checks before the proof
+ 
+ test('the printed pre-review command names the notes folder, so its break plan check runs', () => {
+   const step = STEPS.find((s) => s.id === 'checks-before-proof');
+-  const line = step.lines({ gate: '/g', repo: '/r', notes: '/n', size: 'small' }, {})[0].text;
++  // The prep lines come first (2026-11-25); the checks command is the line that runs pre-review.
++  const line = step.lines({ gate: '/g', repo: '/r', notes: '/n', size: 'small' }, {}).find((l) => /pre-review\.mjs/.test(l.text)).text;
+   assert.match(line, /pre-review\.mjs --before-proof .* --notes \/n$/);
+ });
+ 
+diff --git a/skills/gate/tests/red-proof-ambiguous.test.mjs b/skills/gate/tests/red-proof-ambiguous.test.mjs
+index 21b6a19..a404b6e 100644
+--- a/skills/gate/tests/red-proof-ambiguous.test.mjs
++++ b/skills/gate/tests/red-proof-ambiguous.test.mjs
+@@ -106,10 +106,12 @@ test('a part that holds only new titles is allowed, and a part that holds no tit
+   assert.equal(result.status, 0, result.stdout);
+   assert.doesNotMatch(result.stdout, /AMBIGUOUS/);
+   assert.match(result.stdout, /RED-PROOF: PROVED ✓ — 2 break\(s\) caught/);
++  // 2026-11-25 (owner, item 4): a part that names no test stops the proof before any run (it ran, then read NOT PROVED).
+   const none = proof([['attempts', ['no such title']]], ['--parallel', '1']);
+-  assert.equal(none.status, 1, none.stdout);
++  assert.equal(none.status, 2, none.stdout);
+   assert.doesNotMatch(none.stdout, /AMBIGUOUS/);
+-  assert.match(none.stdout, /BREAK ✗ attempts broken: still pass \(or not seen failing\): no such title/);
++  assert.match(none.stdout, /BREAK UNNAMED ✗ attempts broken: mustFail part "no such title" names no test/);
++  assert.match(none.stdout, /Nothing ran; files untouched\./);
+ });
+ 
+ test('C#: a part in a new DisplayName and an older one is refused; the new test\'s method name is allowed', () => {
+diff --git a/skills/gate/tests/red-proof-check-plan.test.mjs b/skills/gate/tests/red-proof-check-plan.test.mjs
+index b208386..6ab72ce 100644
+--- a/skills/gate/tests/red-proof-check-plan.test.mjs
++++ b/skills/gate/tests/red-proof-check-plan.test.mjs
+@@ -267,3 +267,28 @@ test('a break saved as invalid on this exact code stops the same proof before an
+   const code = f.proof([cleans], ['--then-green', '--parallel', '1']);
+   assert.doesNotMatch(code.stdout, /NOT RUN ✗/);
+ });
++
++// 2026-11-25 (owner, "the checks pass the first time"): test 4 lost one proof run to a break whose mustFail named an
++// it.each row ("[C7] ... for Teacher ...") the plan check could not read; the real run did not check names at all.
++// The rows ("tray", "shelf") are words no file of the fixture holds: only the it.each title can name them.
++const EACH_JS = ["describe('clean', () => {", "  it.each(['tray', 'shelf'])('empties the %s', (k) => {", "    expect(k).toBeTruthy();", '  });', '});', ''].join('\n');
++test('an it.each title names each of its rows, as the proof reads it: the plan check passes a row name', () => {
++  const f = fixture({ 'src/clean.test.cjs': EACH_JS });
++  const r = f.proof([{ ...cleans, mustFail: ['empties the tray'] }], ['--check-plan']);
++  assert.equal(r.status, 0, r.stdout);
++  assert.equal(lastLine(r), 'PLAN OK');
++  // A row word the title cannot hold is still no test.
++  const wrong = f.proof([{ ...cleans, mustFail: ['wipes the list'] }], ['--check-plan']);
++  assert.equal(wrong.status, 2, wrong.stdout);
++  assert.match(wrong.stdout, /BREAK UNNAMED ✗ cleans broken: mustFail part "wipes the list" names no test/);
++  nothingRan(f);
++});
++
++test('a real proof checks the break names before any run: a part that names no test stops it, nothing ran', () => {
++  const f = fixture();
++  const r = f.proof([{ ...cleans, mustFail: ['words no test holds anywhere'] }], ['--then-green', '--parallel', '1']);
++  assert.equal(r.status, 2, r.stdout);
++  assert.match(r.stdout, /BREAK UNNAMED ✗ cleans broken: mustFail part "words no test holds anywhere" names no test/);
++  assert.match(r.stdout, /Nothing ran; files untouched\./);
++  nothingRan(f);
++});
+diff --git a/skills/gate/tests/red-proof-warm-join.test.mjs b/skills/gate/tests/red-proof-warm-join.test.mjs
+index a0a4b56..af5f295 100644
+--- a/skills/gate/tests/red-proof-warm-join.test.mjs
++++ b/skills/gate/tests/red-proof-warm-join.test.mjs
+@@ -77,7 +77,7 @@ test('--warm: a copy whose build exits 1 is not marked built; after a build that
+ test('a run whose build failed (a break that does not compile) does not mark its copy built', () => {
+   const f = fixture();
+   const breaks = path.join(f.root, 'breaks.json');
+-  fs.writeFileSync(breaks, JSON.stringify([{ name: 'does not compile', file: 'rule.cjs', find: 'compiles: true', put: 'compiles: false', mustFail: ['any test'] }]));
++  fs.writeFileSync(breaks, JSON.stringify([{ name: 'does not compile', file: 'rule.cjs', find: 'compiles: true', put: 'compiles: false', mustFail: ['compiles'] }]));
+   // `dotnet test.js` has no compile check of its own, so the copy's first build is this run.
+   const r = node(script, ['--repo', f.repo, '--base', 'HEAD', '--breaks', breaks, '--parallel', '2', '--', fakeDotnet, 'test.js'], f.env);
+   assert.equal(r.status, 1, r.stdout + r.stderr);
+diff --git a/skills/gate/tests/sanad.test.mjs b/skills/gate/tests/sanad.test.mjs
+index b0218ac..1e184fc 100644
+--- a/skills/gate/tests/sanad.test.mjs
++++ b/skills/gate/tests/sanad.test.mjs
+@@ -740,3 +740,19 @@ test('the round count leaves out the short checks; the evidence names them', ()
+   assert.equal(facts.pins.length, 3);
+   assert.match(evidenceBlock(facts).join('\n'), /Review rounds: 2 \(full, recheck, short check\)/);
+ });
++
++// 2026-11-25 (owner, item 5): a before-proof pass counts when the base is the same commit, however it was written.
++// Guard: test 4 ran pre-review with --base origin/staging; the task's base was written another way.
++test('a before-proof pass counts for the same base commit, written as a name or as the commit', async () => {
++  const fx = fixture();
++  start(fx);
++  commit(fx, 'export const a = 2;\n');
++  const cache = await import('../scripts/pre-review-cache.mjs');
++  const keep = process.env.SANAD_STATE_DIR;
++  process.env.SANAD_STATE_DIR = fx.state;
++  try {
++    const sha = gitIn(fx.repo, 'rev-parse', 'base');
++    cache.rememberBeforeProof(fx.repo, cache.workTree(fx.repo), true, cache.notesInputs(cache.BEFORE_PROOF_FILES.map((n) => path.join(fx.notes, n))), undefined, sha);
++    assert.equal(readFacts({ repo: fx.repo, notes: fx.notes }).checks.beforeProof, true, 'the task names the base "base"; the pass was kept for its commit');
++  } finally { if (keep === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = keep; }
++});
+diff --git a/skills/gate/tests/steps.test.mjs b/skills/gate/tests/steps.test.mjs
+index b4ddf02..08ab356 100644
+--- a/skills/gate/tests/steps.test.mjs
++++ b/skills/gate/tests/steps.test.mjs
+@@ -332,3 +332,48 @@ test('the review step names one --proof-log per existing log, and none when no l
+   assert.doesNotMatch(text(facts({ proof: { done: true } })), /--proof-log/);
+   assert.doesNotMatch(text(facts({ proof: { done: true }, proofLogs: [] })), /--proof-log/);
+ });
++
++// 2026-11-25 (owner, "the checks pass the first time"): the printed steps prepare the checks, never offer the full
++// checks before the proof, and say where the suite receipt goes.
++test('before the checks the three steps that failed most in test 4 are printed, in order', () => {
++  const out = text(facts({ checks: { beforeProof: false } }));
++  const at = (re) => out.search(re);
++  assert.ok(at(/1\) the places of the changed code: node \/g\/places\.mjs --refresh \/n\/places\.md --repo '\/r\/my repo' --add-changed --base origin\/staging/) >= 0, out);
++  assert.ok(at(/2\) one commit on the base/) > at(/1\) the places/));
++  assert.ok(at(/3\) each new test has its \[Cn\] tag in its title and quotes its ticket line/) > at(/2\) one commit/));
++  assert.ok(at(/pre-review\.mjs --before-proof/) > at(/3\) each new test/));
++});
++
++test('the full checks are never offered before the proof: the review step and the last round print --before-proof only', () => {
++  // The review step, with the proof not done for this code.
++  const step = STEPS.find((s) => s.id === 'review');
++  const review = step.lines(ctx, facts({ proof: { done: false, early: true } })).map((l) => l.text).join('\n');
++  assert.doesNotMatch(review, /pre-review\.mjs --was/, 'no full checks before the proof');
++  assert.match(review, /pre-review\.mjs --before-proof/);
++  assert.match(review, /the full checks run after the proof/);
++  assert.match(step.lines(ctx, facts({ proof: { done: true } })).map((l) => l.text).join('\n'), /pre-review\.mjs --was/);
++  const pin = { round: 1, kind: 'recheck', commit: 'h2', ref: 'refs/sanad/review/t/1' };
++  const last = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: false } }));
++  assert.doesNotMatch(last, /pre-review\.mjs --was/);
++  assert.match(last, /the full checks run after the proof/);
++  // With the proof done, the full checks are offered.
++  const done = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: true } }));
++  assert.match(done, /pre-review\.mjs --was/);
++  // Review finding: when the proof and the suite are both done, the last round is over; the full checks still come,
++  // before the verdict line.
++  const over = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: true }, suite: { done: true, receipt: { runId: 'r' } } }));
++  assert.ok(over.search(/pre-review\.mjs --was/) >= 0 && over.search(/pre-review\.mjs --was/) < over.search(/notes\.mjs verdict --review/), over);
++  // Review finding (Claude): an early full review with no note never reaches the last round; the full checks still
++  // come once the proof is done, before the verdict.
++  const full = { round: 1, kind: 'full', commit: 'h2', ref: 'refs/sanad/review/t/1' };
++  const early = text(facts({ round: 1, pins: [full], lastPin: full, pinAtHead: true, proof: { done: true }, reviewReported: true, notes: { known: true, all: [], open: [] } }));
++  assert.ok(early.search(/pre-review\.mjs --was/) >= 0 && early.search(/pre-review\.mjs --was/) < early.search(/notes\.mjs verdict --review/), early);
++});
++
++test('the suite step says where its receipt goes, and asks for the suite command when the task names none', () => {
++  const pin = { round: 1, kind: 'recheck', commit: 'h2', ref: 'refs/sanad/review/t/1' };
++  const named = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: true }, suite: { done: false, mark: 'npm run test' } }));
++  assert.match(named, /its receipt goes in \/n\/evidence \(the spec's outputRoot\), with the command the task names: npm run test/);
++  const none = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: true }, suite: { done: false, mark: '' } }));
++  assert.match(none, /first name the suite command: node \/g\/sanad\.mjs start --repo '\/r\/my repo' --notes \/n --suite "<the full suite command>"; its receipt goes in \/n\/evidence/);
++});

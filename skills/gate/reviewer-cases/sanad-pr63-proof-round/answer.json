@@ -1,0 +1,22 @@
+{
+  "family": "test-cannot-fail",
+  "source": "real: Sanad PR #63 (one proof per round), c45ae8b5d1 on 62e3542; its reviews passed it and the owner list _handoff/sanad-proof1-2026-11-23/OWNER-LIST.md names these faults (items 1-3, 7-10)",
+  "step": "review",
+  "checklist": "TESTS CAN FAIL",
+  "faults": [
+    { "id": "F1", "family": "test-cannot-fail", "file": "skills/gate/tests/proof-attack-fixes.test.mjs", "lines": [59, 62], "grade": "gap",
+      "wrong": "The test for two breaks of one name reads red-proof.mjs as text and matches a regex, so it passes whatever the remote run does." },
+    { "id": "F2", "family": "other", "file": "hooks/lib/timer-idle.cjs", "lines": [397, 400], "grade": "bug",
+      "wrong": "`red-proof.mjs --help;` (a shell ; right after the flag) is counted as a proof run, because the flag must be followed by a quote, a space or the end." },
+    { "id": "F3", "family": "other", "file": "skills/gate/scripts/ts-parser.mjs", "lines": [108, 116], "grade": "bug",
+      "wrong": "A top-level return in a module-mode .js file passes the syntax check, because the file parses in the CommonJS form too." },
+    { "id": "F4", "family": "other", "file": "skills/gate/scripts/red-proof.mjs", "lines": [1120, 1127], "grade": "gap",
+      "wrong": "A break outside every test folder is deferred by each folder's proof, so the cheap check passes it and no folder runs it." },
+    { "id": "F5", "family": "other", "file": "skills/gate/scripts/pre-review-cache.mjs", "lines": [131, 178], "grade": "gap",
+      "wrong": "A break list, a new source file or places.md changed while pre-review --before-proof runs can still get the pass of the tree read at the start." }
+  ],
+  "notes": [
+    { "kind": "Gap", "true": true, "text": "skills/gate/tests/proof-attack-fixes.test.mjs:60 — the test reads red-proof.mjs as text and matches a regex → it passes whatever the remote run does — run a real remote proof with two breaks of one name" },
+    { "kind": "Bug", "true": false, "text": "hooks/lib/timer-idle.cjs:399 — `red-proof.mjs --warm` → counted as a proof run, so the report shows one run too many — leave --warm out of the count" }
+  ]
+}

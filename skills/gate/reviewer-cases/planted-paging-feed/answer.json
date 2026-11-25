@@ -1,0 +1,16 @@
+{
+  "family": "paging",
+  "source": "planted: no real escaped case of paging by position over a list that can change in bench4 or the owner lists",
+  "step": "review",
+  "checklist": "DATABASE",
+  "faults": [
+    { "id": "F1", "family": "paging", "file": "src/Application/Announcements/AnnouncementService.cs", "lines": [17, 24], "grade": "bug",
+      "wrong": "Pages are cut by position (Skip) over a list that grows at the top, so an announcement published while the student reads shows twice after Show more, and one is pushed past the page and shown twice or skipped." },
+    { "id": "F2", "family": "paging", "file": "web/src/pages/AnnouncementsPage.tsx", "lines": [9, 11], "grade": "bug",
+      "wrong": "The next page is asked by its number, so the page repeats the item that moved down from the first page (a duplicate key in the list)." }
+  ],
+  "notes": [
+    { "kind": "Bug", "true": true, "text": "src/Application/Announcements/AnnouncementService.cs:21 — a teacher publishes one announcement after page 1 loaded → Show more returns the last item of page 1 again — page by the last (PublishedAt, Id) seen, not by position" },
+    { "kind": "Bug", "true": false, "text": "src/Application/Announcements/AnnouncementService.cs:20 — two announcements with the same PublishedAt → their order changes between requests — add a second sort key" }
+  ]
+}

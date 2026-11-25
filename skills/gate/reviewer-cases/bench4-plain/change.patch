@@ -1,0 +1,177 @@
+diff --git a/eduquest-frontend/src/components/layout/Topbar.role-label.test.tsx b/eduquest-frontend/src/components/layout/Topbar.role-label.test.tsx
+new file mode 100644
+index 00000000000..8c26d126ca2
+--- /dev/null
++++ b/eduquest-frontend/src/components/layout/Topbar.role-label.test.tsx
+@@ -0,0 +1,128 @@
++// Topbar — the role line under the user's name.
++// The API sends role names in English ("Teacher") and the topbar printed them as they came, so an
++// Arabic page showed "Teacher" in a bar that is otherwise all Arabic. The line now reads the role's
++// label from the language bundle, for every role, and follows a language switch without a reload.
++// Real i18n bundles and the real UI store; the API modules are mocked.
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { fireEvent, render, screen, waitFor } from '@testing-library/react';
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { MemoryRouter } from 'react-router-dom';
++
++// Implementations go into vi.fn() itself: the config's mockReset restores them before each test.
++vi.mock('@/api/auth', () => ({ authApi: { logout: vi.fn(async () => undefined) } }));
++vi.mock('@/api/communications', () => ({
++  communicationsApi: { getUnreadCount: vi.fn(async () => ({ unreadCount: 0 })), getFeed: vi.fn(async () => ({ items: [] })) },
++}));
++vi.mock('@/api/notifications', () => ({
++  notificationsApi: {
++    getUnreadCount: vi.fn(async () => ({ unreadCount: 0 })),
++    getAll: vi.fn(async () => ({ items: [] })),
++    markRead: vi.fn(async () => undefined),
++  },
++}));
++vi.mock('@/lib/unsaved-changes', () => ({ confirmDiscardUnsavedChanges: vi.fn(async () => true) }));
++
++const { i18nReady, switchLanguage } = await import('@/i18n');
++const { default: useAuthStore } = await import('@/stores/auth-store');
++const { default: useUIStore } = await import('@/stores/ui-store');
++const { default: Topbar } = await import('./Topbar');
++
++type Lang = 'en' | 'ar';
++
++function renderTopbar() {
++  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  return render(
++    <QueryClientProvider client={client}>
++      <MemoryRouter>
++        <Topbar />
++      </MemoryRouter>
++    </QueryClientProvider>,
++  );
++}
++
++async function setPageLanguage(lang: Lang) {
++  await i18nReady;
++  useUIStore.setState({ language: lang });
++  await switchLanguage(lang);
++}
++
++function signInAs(roles: string[]) {
++  useAuthStore.setState({ user: { id: 7, fullName: 'Demo User', email: 'demo@example.test', roles } as never });
++}
++
++/** The text of the line under the name (the role, followed by the chevron icon). */
++function roleLine(container: HTMLElement): string {
++  const line = container.querySelector('.profile-media p');
++  expect(line, 'the role line is rendered').not.toBeNull();
++  return (line as HTMLElement).textContent?.trim() ?? '';
++}
++
++// Expected labels, written out on purpose: the test must fail if the topbar ever prints the
++// API's English role name on an Arabic page again, or drifts from the Users page labels.
++const ROLE_LABELS: Record<string, Record<Lang, string>> = {
++  Teacher: { en: 'Teacher', ar: 'معلم' },
++  Student: { en: 'Student', ar: 'طالب' },
++  Parent: { en: 'Parent', ar: 'ولي أمر' },
++  Manager: { en: 'Manager', ar: 'مدير' },
++  Admin: { en: 'Admin', ar: 'مسؤول النظام' },
++  Applicant: { en: 'Applicant', ar: 'متقدم' },
++};
++
++beforeEach(() => {
++  signInAs(['Teacher']);
++});
++
++describe('Topbar — role under the name', () => {
++  it.each(Object.keys(ROLE_LABELS))('[R1] shows the %s role in Arabic on an Arabic page', async (role) => {
++    await setPageLanguage('ar');
++    signInAs([role]);
++    const { container } = renderTopbar();
++    expect(roleLine(container)).toBe(ROLE_LABELS[role].ar);
++  });
++
++  it.each(Object.keys(ROLE_LABELS))('[R2] shows the %s role in English on an English page', async (role) => {
++    await setPageLanguage('en');
++    signInAs([role]);
++    const { container } = renderTopbar();
++    expect(roleLine(container)).toBe(ROLE_LABELS[role].en);
++  });
++
++  it('[R3] follows the language switch in the topbar both ways, without a reload', async () => {
++    await setPageLanguage('ar');
++    signInAs(['Manager']);
++    const { container } = renderTopbar();
++    expect(roleLine(container)).toBe('مدير');
++
++    fireEvent.click(screen.getByRole('button', { name: 'EN' }));
++    await waitFor(() => expect(roleLine(container)).toBe('Manager'));
++
++    fireEvent.click(screen.getByRole('button', { name: 'ع' }));
++    await waitFor(() => expect(roleLine(container)).toBe('مدير'));
++  });
++
++  it('[R4] reads the role case-insensitively and shows the first role of a multi-role user', async () => {
++    await setPageLanguage('ar');
++    signInAs(['teacher', 'Parent']);
++    const { container } = renderTopbar();
++    expect(roleLine(container)).toBe('معلم');
++  });
++
++  it('[R5] shows an unknown role by its own name, never a translation key', async () => {
++    await setPageLanguage('ar');
++    signInAs(['Librarian']);
++    const { container } = renderTopbar();
++    expect(roleLine(container)).toBe('Librarian');
++  });
++
++  it('[R6] shows "User" in the page language when the user has no role', async () => {
++    await setPageLanguage('ar');
++    signInAs([]);
++    const arabic = renderTopbar();
++    expect(roleLine(arabic.container)).toBe('المستخدم');
++    arabic.unmount();
++
++    await setPageLanguage('en');
++    const english = renderTopbar();
++    expect(roleLine(english.container)).toBe('User');
++  });
++});
+diff --git a/eduquest-frontend/src/components/layout/Topbar.tsx b/eduquest-frontend/src/components/layout/Topbar.tsx
+index c38007bf5ca..f38d3873a7f 100644
+--- a/eduquest-frontend/src/components/layout/Topbar.tsx
++++ b/eduquest-frontend/src/components/layout/Topbar.tsx
+@@ -191,7 +191,13 @@ function Topbar() {
+     navigate('/login', { replace: true });
+   };
+ 
+-  const displayRole = user?.roles[0] || 'User';
++  // The API sends role names in English ("Teacher"); show them in the page's language with the
++  // same labels the Users page uses. A role with no label yet shows its raw name, never a key;
++  // no role at all reads "User" in the page's language.
++  const primaryRole = user?.roles[0];
++  const displayRole = primaryRole
++    ? t(`users.enums.roles.${primaryRole.toLowerCase()}`, { defaultValue: primaryRole })
++    : t('users.table.user');
+   const tourActive = tourRunning || tourStarting;
+   const tourControlLabel = t(
+     tourActive ? 'tourControls.stopPageTour' : 'tourControls.startPageTour',
+diff --git a/eduquest-frontend/src/i18n/locales/ar/users.ts b/eduquest-frontend/src/i18n/locales/ar/users.ts
+index 409d0665df7..9156c280639 100644
+--- a/eduquest-frontend/src/i18n/locales/ar/users.ts
++++ b/eduquest-frontend/src/i18n/locales/ar/users.ts
+@@ -108,6 +108,7 @@ export default {
+       parent: 'ولي أمر',
+       manager: 'مدير',
+       admin: 'مسؤول النظام',
++      applicant: 'متقدم',
+     },
+     statuses: {
+       active: 'نشط',
+diff --git a/eduquest-frontend/src/i18n/locales/en/users.ts b/eduquest-frontend/src/i18n/locales/en/users.ts
+index c9402b3a958..cd2ba3969fa 100644
+--- a/eduquest-frontend/src/i18n/locales/en/users.ts
++++ b/eduquest-frontend/src/i18n/locales/en/users.ts
+@@ -108,6 +108,7 @@ export default {
+       parent: 'Parent',
+       manager: 'Manager',
+       admin: 'Admin',
++      applicant: 'Applicant',
+     },
+     statuses: {
+       active: 'Active',

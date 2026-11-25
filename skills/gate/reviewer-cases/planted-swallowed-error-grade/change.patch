@@ -1,0 +1,44 @@
+diff --git a/src/Api/Controllers/GradesController.cs b/src/Api/Controllers/GradesController.cs
+index 87efe21..700ef7e 100644
+--- a/src/Api/Controllers/GradesController.cs
++++ b/src/Api/Controllers/GradesController.cs
+@@ -16,4 +16,11 @@ public class GradesController : ControllerBase
+     [HttpGet("{submissionId:int}")]
+     public async Task<IActionResult> Get(int submissionId, CancellationToken ct)
+         => Ok(await _grades.GetAsync(submissionId, User.UserId(), ct));
++
++    [HttpPut("{submissionId:int}")]
++    public async Task<IActionResult> Save(int submissionId, [FromBody] SaveGradeDto dto, CancellationToken ct)
++    {
++        await _grades.SaveAsync(submissionId, User.UserId(), dto.Grade, ct);
++        return NoContent();
++    }
+ }
+diff --git a/src/Application/Grades/GradeService.cs b/src/Application/Grades/GradeService.cs
+index d866b01..62a1fce 100644
+--- a/src/Application/Grades/GradeService.cs
++++ b/src/Application/Grades/GradeService.cs
+@@ -20,4 +20,23 @@ public class GradeService
+             .Where(s => s.Id == submissionId && s.Assignment.Class.TeacherId == teacherId)
+             .Select(s => s.Grade)
+             .FirstOrDefaultAsync(ct);
++
++    // SCH-452: the teacher of the submission's class stores a grade from 0 to 100.
++    // Review round 1: a database error must not reach the teacher as a raw 500; it is logged here.
++    public async Task SaveAsync(int submissionId, int teacherId, decimal grade, CancellationToken ct)
++    {
++        if (grade < 0 || grade > 100) throw new ValidationException("grade.outOfRange");
++        var submission = await _db.Submissions
++            .FirstOrDefaultAsync(s => s.Id == submissionId && s.Assignment.Class.TeacherId == teacherId, ct)
++            ?? throw new NotFoundException("submission.notFound");
++        submission.Grade = grade;
++        try
++        {
++            await _db.SaveChangesAsync(ct);
++        }
++        catch (DbUpdateException ex)
++        {
++            _log.LogError(ex, "Saving the grade of submission {SubmissionId} failed", submissionId);
++        }
++    }
+ }

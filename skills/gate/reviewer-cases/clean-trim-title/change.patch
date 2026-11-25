@@ -1,0 +1,51 @@
+diff --git a/src/Application/Assignments/AssignmentService.cs b/src/Application/Assignments/AssignmentService.cs
+index cc20c13..add4ed0 100644
+--- a/src/Application/Assignments/AssignmentService.cs
++++ b/src/Application/Assignments/AssignmentService.cs
+@@ -15,7 +15,7 @@ public class AssignmentService
+         if (string.IsNullOrWhiteSpace(dto.Title)) throw new ValidationException("assignment.titleRequired");
+         var owns = await _db.Classes.AnyAsync(c => c.Id == dto.ClassId && c.TeacherId == teacherId, ct);
+         if (!owns) throw new NotFoundException("class.notFound");
+-        var entity = new Assignment { ClassId = dto.ClassId, Title = dto.Title, DueAt = dto.DueAt };
++        var entity = new Assignment { ClassId = dto.ClassId, Title = dto.Title.Trim(), DueAt = dto.DueAt };
+         _db.Assignments.Add(entity);
+         await _db.SaveChangesAsync(ct);
+         return entity.Id;
+@@ -26,7 +26,7 @@ public class AssignmentService
+         if (string.IsNullOrWhiteSpace(dto.Title)) throw new ValidationException("assignment.titleRequired");
+         var entity = await _db.Assignments.FirstOrDefaultAsync(a => a.Id == id && a.Class.TeacherId == teacherId, ct)
+             ?? throw new NotFoundException("assignment.notFound");
+-        entity.Title = dto.Title;
++        entity.Title = dto.Title.Trim();
+         entity.DueAt = dto.DueAt;
+         await _db.SaveChangesAsync(ct);
+     }
+diff --git a/tests/Application.Tests/AssignmentServiceTests.cs b/tests/Application.Tests/AssignmentServiceTests.cs
+index 0ca22b6..7364bbc 100644
+--- a/tests/Application.Tests/AssignmentServiceTests.cs
++++ b/tests/Application.Tests/AssignmentServiceTests.cs
+@@ -19,4 +19,24 @@ public class AssignmentServiceTests : DbTestBase
+         var (db, classId, teacherId) = await SeedClassAsync();
+         await Assert.ThrowsAsync<ValidationException>(() => new AssignmentService(db).CreateAsync(new CreateAssignmentDto(classId, "  ", null), teacherId, default));
+     }
++
++    // SCH-460: "The title is saved and shown as "Essay 2"."
++    [Fact]
++    public async Task Create_saves_the_title_without_spaces_around_it()
++    {
++        var (db, classId, teacherId) = await SeedClassAsync();
++        var id = await new AssignmentService(db).CreateAsync(new CreateAssignmentDto(classId, " Essay 2 ", null), teacherId, default);
++        Assert.Equal("Essay 2", (await db.Assignments.FindAsync(id))!.Title);
++    }
++
++    // SCH-460: "A teacher types " Essay 2 " as an assignment title, on create and on edit."
++    [Fact]
++    public async Task Update_saves_the_title_without_spaces_around_it()
++    {
++        var (db, classId, teacherId) = await SeedClassAsync();
++        var service = new AssignmentService(db);
++        var id = await service.CreateAsync(new CreateAssignmentDto(classId, "Essay", null), teacherId, default);
++        await service.UpdateAsync(id, new UpdateAssignmentDto(" Essay 2 ", null), teacherId, default);
++        Assert.Equal("Essay 2", (await db.Assignments.FindAsync(id))!.Title);
++    }
+ }

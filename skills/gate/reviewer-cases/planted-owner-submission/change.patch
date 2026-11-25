@@ -1,0 +1,43 @@
+diff --git a/src/Api/Controllers/SubmissionsController.cs b/src/Api/Controllers/SubmissionsController.cs
+index 31e602e..364915b 100644
+--- a/src/Api/Controllers/SubmissionsController.cs
++++ b/src/Api/Controllers/SubmissionsController.cs
+@@ -18,4 +18,13 @@ public class SubmissionsController : ControllerBase
+     [Authorize(Roles = "Student")]
+     public async Task<IActionResult> Mine([FromQuery] int assignmentId, CancellationToken ct)
+         => Ok(await _submissions.ListMineAsync(User.UserId(), assignmentId, ct));
++
++    // SCH-422: one submission with its feedback.
++    [HttpGet("{id:int}")]
++    [Authorize(Roles = "Student")]
++    public async Task<IActionResult> Get(int id, CancellationToken ct)
++    {
++        var submission = await _submissions.GetAsync(id, ct);
++        return submission is null ? NotFound() : Ok(submission);
++    }
+ }
+diff --git a/src/Application/Submissions/ISubmissionService.cs b/src/Application/Submissions/ISubmissionService.cs
+index 8dbf793..b35fb66 100644
+--- a/src/Application/Submissions/ISubmissionService.cs
++++ b/src/Application/Submissions/ISubmissionService.cs
+@@ -3,4 +3,5 @@ namespace School.Application.Submissions;
+ public interface ISubmissionService
+ {
+     Task<IReadOnlyList<SubmissionDto>> ListMineAsync(int studentId, int assignmentId, CancellationToken ct);
++    Task<SubmissionDetailDto?> GetAsync(int id, CancellationToken ct);
+ }
+diff --git a/src/Application/Submissions/SubmissionService.cs b/src/Application/Submissions/SubmissionService.cs
+index dbb7a36..6fc6629 100644
+--- a/src/Application/Submissions/SubmissionService.cs
++++ b/src/Application/Submissions/SubmissionService.cs
+@@ -15,4 +15,10 @@ public class SubmissionService : ISubmissionService
+             .OrderByDescending(s => s.SubmittedAt).ThenByDescending(s => s.Id)
+             .Select(s => new SubmissionDto(s.Id, s.AssignmentId, s.SubmittedAt, s.Grade))
+             .ToListAsync(ct);
++
++    public async Task<SubmissionDetailDto?> GetAsync(int id, CancellationToken ct)
++        => await _db.Submissions.AsNoTracking()
++            .Where(s => s.Id == id)
++            .Select(s => new SubmissionDetailDto(s.Id, s.FileName, s.Grade, s.Feedback))
++            .FirstOrDefaultAsync(ct);
+ }
