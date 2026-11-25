@@ -106,10 +106,12 @@ test('a part that holds only new titles is allowed, and a part that holds no tit
   assert.equal(result.status, 0, result.stdout);
   assert.doesNotMatch(result.stdout, /AMBIGUOUS/);
   assert.match(result.stdout, /RED-PROOF: PROVED ✓ — 2 break\(s\) caught/);
+  // 2026-11-25 (owner, item 4): a part that names no test stops the proof before any run (it ran, then read NOT PROVED).
   const none = proof([['attempts', ['no such title']]], ['--parallel', '1']);
-  assert.equal(none.status, 1, none.stdout);
+  assert.equal(none.status, 2, none.stdout);
   assert.doesNotMatch(none.stdout, /AMBIGUOUS/);
-  assert.match(none.stdout, /BREAK ✗ attempts broken: still pass \(or not seen failing\): no such title/);
+  assert.match(none.stdout, /BREAK UNNAMED ✗ attempts broken: mustFail part "no such title" names no test/);
+  assert.match(none.stdout, /Nothing ran; files untouched\./);
 });
 
 test('C#: a part in a new DisplayName and an older one is refused; the new test\'s method name is allowed', () => {

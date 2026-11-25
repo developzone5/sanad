@@ -121,7 +121,8 @@ test('check a dirty tree, commit it, check again: lint and types show the kept p
   const dirty = f.run();
   assert.match(dirty.stdout, /✓ lint web \(1 file\) \(\d+\.\d s\)/, dirty.stdout);
   assert.deepEqual([f.runs('lint'), f.runs('types'), f.runs('mechanical')], [1, 1, 1]);
-  f.git('commit', '-qam', 'fix(web): three');
+  // One commit on the base (2026-11-25: a second commit fails the cheap commits check, and lint would not start).
+  f.git('commit', '-q', '--amend', '-am', 'fix(web): three');
   const committed = f.run();
   assert.match(committed.stdout, /✓ lint web \(1 file\) \(same code: passed at \d\d:\d\d\)/, committed.stdout);
   assert.match(committed.stdout, /✓ types web \(same code: passed at \d\d:\d\d\)/);
@@ -138,7 +139,8 @@ test('a changed lock file or tool version misses the cache, though no tracked fi
   const f = fixture();
   // The lock file and node_modules are not in git here, so the tree is the same before and after.
   f.write('web/.gitignore', 'node_modules/\npackage-lock.json\n');
-  f.git('commit', '-qam', 'fix(web): ignore the lock file');
+  // One commit on the base (2026-11-25: a second commit fails the cheap commits check, and lint would not start).
+  f.git('commit', '-q', '--amend', '-am', 'fix(web): ignore the lock file');
   f.write('web/package-lock.json', '{"lockfileVersion":3,"packages":{"node_modules/eslint":{"version":"9.0.0"}}}\n');
   f.write('web/node_modules/eslint/package.json', '{"name":"eslint","version":"9.0.0"}\n');
   f.run(); f.run();

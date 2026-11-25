@@ -267,3 +267,28 @@ test('a break saved as invalid on this exact code stops the same proof before an
   const code = f.proof([cleans], ['--then-green', '--parallel', '1']);
   assert.doesNotMatch(code.stdout, /NOT RUN ✗/);
 });
+
+// 2026-11-25 (owner, "the checks pass the first time"): test 4 lost one proof run to a break whose mustFail named an
+// it.each row ("[C7] ... for Teacher ...") the plan check could not read; the real run did not check names at all.
+// The rows ("tray", "shelf") are words no file of the fixture holds: only the it.each title can name them.
+const EACH_JS = ["describe('clean', () => {", "  it.each(['tray', 'shelf'])('empties the %s', (k) => {", "    expect(k).toBeTruthy();", '  });', '});', ''].join('\n');
+test('an it.each title names each of its rows, as the proof reads it: the plan check passes a row name', () => {
+  const f = fixture({ 'src/clean.test.cjs': EACH_JS });
+  const r = f.proof([{ ...cleans, mustFail: ['empties the tray'] }], ['--check-plan']);
+  assert.equal(r.status, 0, r.stdout);
+  assert.equal(lastLine(r), 'PLAN OK');
+  // A row word the title cannot hold is still no test.
+  const wrong = f.proof([{ ...cleans, mustFail: ['wipes the list'] }], ['--check-plan']);
+  assert.equal(wrong.status, 2, wrong.stdout);
+  assert.match(wrong.stdout, /BREAK UNNAMED ✗ cleans broken: mustFail part "wipes the list" names no test/);
+  nothingRan(f);
+});
+
+test('a real proof checks the break names before any run: a part that names no test stops it, nothing ran', () => {
+  const f = fixture();
+  const r = f.proof([{ ...cleans, mustFail: ['words no test holds anywhere'] }], ['--then-green', '--parallel', '1']);
+  assert.equal(r.status, 2, r.stdout);
+  assert.match(r.stdout, /BREAK UNNAMED ✗ cleans broken: mustFail part "words no test holds anywhere" names no test/);
+  assert.match(r.stdout, /Nothing ran; files untouched\./);
+  nothingRan(f);
+});

@@ -74,7 +74,8 @@ test('the proof is not offered at a pinned commit whose checks before the proof 
 
 test('the printed pre-review command names the notes folder, so its break plan check runs', () => {
   const step = STEPS.find((s) => s.id === 'checks-before-proof');
-  const line = step.lines({ gate: '/g', repo: '/r', notes: '/n', size: 'small' }, {})[0].text;
+  // The prep lines come first (2026-11-25); the checks command is the line that runs pre-review.
+  const line = step.lines({ gate: '/g', repo: '/r', notes: '/n', size: 'small' }, {}).find((l) => /pre-review\.mjs/.test(l.text)).text;
   assert.match(line, /pre-review\.mjs --before-proof .* --notes \/n$/);
 });
 

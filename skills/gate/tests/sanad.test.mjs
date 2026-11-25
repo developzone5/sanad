@@ -740,3 +740,19 @@ test('the round count leaves out the short checks; the evidence names them', () 
   assert.equal(facts.pins.length, 3);
   assert.match(evidenceBlock(facts).join('\n'), /Review rounds: 2 \(full, recheck, short check\)/);
 });
+
+// 2026-11-25 (owner, item 5): a before-proof pass counts when the base is the same commit, however it was written.
+// Guard: test 4 ran pre-review with --base origin/staging; the task's base was written another way.
+test('a before-proof pass counts for the same base commit, written as a name or as the commit', async () => {
+  const fx = fixture();
+  start(fx);
+  commit(fx, 'export const a = 2;\n');
+  const cache = await import('../scripts/pre-review-cache.mjs');
+  const keep = process.env.SANAD_STATE_DIR;
+  process.env.SANAD_STATE_DIR = fx.state;
+  try {
+    const sha = gitIn(fx.repo, 'rev-parse', 'base');
+    cache.rememberBeforeProof(fx.repo, cache.workTree(fx.repo), true, cache.notesInputs(cache.BEFORE_PROOF_FILES.map((n) => path.join(fx.notes, n))), undefined, sha);
+    assert.equal(readFacts({ repo: fx.repo, notes: fx.notes }).checks.beforeProof, true, 'the task names the base "base"; the pass was kept for its commit');
+  } finally { if (keep === undefined) delete process.env.SANAD_STATE_DIR; else process.env.SANAD_STATE_DIR = keep; }
+});

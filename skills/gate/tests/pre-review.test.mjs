@@ -848,3 +848,49 @@ test('Y2: with no strictEvidence setting, the missing-run-evidence row fails the
   assert.match(r.stdout, /✗ test asserts/, r.stdout + r.stderr);
   assert.match(r.stdout, /NOT PROVEN TEST: web\/src\/form\.test\.ts:1 shows the count once/, r.stdout + r.stderr);
 });
+
+// 2026-11-25 (owner, "the checks pass the first time"): in test 4, 28 runs took 24 minutes; 13 of them were runs that
+// a cheap check failed. The cheap checks run first; when one fails, lint and the type check are not started, and every
+// failure is named with the command that fixes it.
+test('a failed cheap check stops the run before lint and the type check; every failure gets its FIX line', () => {
+  const { repo, git, write } = fixture();
+  write('web/src/a.ts', 'export const a = 2;\n');
+  git('add', '-A'); git('commit', '-qm', 'one');
+  write('web/src/a.ts', 'export const a = 3;\n');
+  git('add', '-A'); git('commit', '-qm', 'two');
+  const r = run(repo, closed(repo));
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /✗ commits/);
+  assert.doesNotMatch(r.stdout, /eslint ran on/, 'lint was not started');
+  assert.match(r.stdout, /✗ lint web[^\n]*\n\s+not run: a check above failed — fix it first \(see FIX\), then run again/);
+  assert.match(r.stdout, /✗ types web[^\n]*\n\s+not run: a check above failed/);
+  assert.match(r.stdout, /^FIX commits: make one commit: git reset --soft \$\(git merge-base base HEAD\) && git commit -m "<type\(scope\): what>"$/m);
+  assert.doesNotMatch(r.stdout, /^FIX (?:lint|types)/m, 'no FIX line for a check that did not run');
+  // With the cheap checks green, lint and the type check run as before.
+  git('reset', '-q', '--soft', 'base');
+  const ok = run(repo, closed(repo));
+  assert.match(ok.stdout, /✓ lint web/);
+  assert.doesNotMatch(ok.stdout, /not run: a check above failed/);
+  assert.match(ok.stdout, /✓ types web/);
+});
+
+test('fixLines: one line per failed check, each with its command; a check that did not run gets none', async () => {
+  const { fixLines, isHeavyCheck } = await import('../scripts/pre-review.mjs');
+  const lines = fixLines([
+    { name: 'commits', code: 1, out: 'COMMIT: 2 commits since origin/staging' },
+    { name: 'places', code: 1, out: 'OPEN: P22 · enums.roles' },
+    { name: 'break plan', code: 1, out: '', notRun: 'the notes folder names no test command (task.json)' },
+    { name: 'test asserts', code: 1, out: 'NOT PROVEN TEST: a.test.ts:3 [C3] switches' },
+    { name: 'ticket lines', code: 1, out: '✗ L2 — no test quotes it' },
+    { name: 'lint web (1 file)', code: 1, out: 'not run: a check above failed — fix it first (see FIX), then run again' },
+    { name: 'size', code: 0, out: '' },
+  ], { repo: '/r', base: 'origin/staging', notes: '/n' });
+  assert.deepEqual(lines.map((l) => l.split(':')[0]), ['FIX commits', 'FIX places', 'FIX break plan', 'FIX test asserts', 'FIX ticket lines']);
+  assert.match(lines[1], /places\.mjs"? --close \/n\/places\.md --set "P<n>=C<k>"/);
+  assert.match(lines[2], /sanad\.mjs"? start --repo \/r --notes \/n --side <name>/);
+  assert.match(lines[3], /run the proof first/);
+  assert.equal(isHeavyCheck({ name: 'lint web (1 file)' }), true);
+  assert.equal(isHeavyCheck({ name: 'types web (app)' }), true);
+  assert.equal(isHeavyCheck({ name: 'places', remote: false }), false);
+  assert.equal(isHeavyCheck({ name: 'test asserts' }), false);
+});

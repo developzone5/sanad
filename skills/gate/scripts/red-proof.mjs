@@ -172,6 +172,7 @@ import { selectCommand } from './proof-select.mjs';
 import { changeSet, foreignLine } from './change-set.mjs';
 import { holdTestMachine } from './test-machine-lock.mjs';
 import { syntaxProblem } from './ts-parser.mjs';
+import { titleMatches } from './test-names.mjs';
 
 // Why each test failed (2026-11-06). An assertion about behavior proves the code is wrong. A
 // missing element, a type, reference or build error, or a timeout means the test itself (or the
@@ -294,15 +295,8 @@ export function ownNames(reason, pairs = []) {
   return names;
 }
 
-// A declared title against a failing test's own names; a title with placeholders (`${x}`, %s, $name)
-// matches any text in their place.
-function titleMatches(title, own) {
-  const t = String(title).toLowerCase();
-  if (own.has(t)) return true;
-  if (!/\$\{|%[sdifjoc#]|\$\w/.test(t)) return false;
-  const re = new RegExp('^' + t.split(/\$\{[^}]*\}|%[sdifjoc#]|\$\w+/).map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.+') + '$');
-  return [...own].some(n => re.test(n));
-}
+// titleMatches (a declared title against a failing test's own names) lives in test-names.mjs (2026-11-25): the break
+// plan check reads test names the same way.
 
 // The failing tests a runner printed, each with its own names, its full printed name and the test file it printed
 // (a vitest "file > ... > test" head), for failingFor.
@@ -1333,14 +1327,19 @@ async function main() {
   // --check-plan ends here (2026-11-19): every check above ran, and nothing else does. One more check is its own:
   // every mustFail part must name a test. A part in no title of the changed test files may still name an older
   // test, so it is refused only when no file of the repository holds its words (the breaks file itself left out).
-  if (checkPlan) {
+  // 2026-11-25 (owner, "the checks pass the first time"): this name check runs before every proof too, not only with
+  // --check-plan, so a break that names no test stops before any run (test 4: one proof run was lost to it). It reads a
+  // title as the proof does (test-names.mjs titleMatches): a .each title with placeholders names each of its rows.
+  if (checkPlan || !plan) {
     const lost = [];
     try {
-      const titles = (testFiles || []).flatMap(f => { try { return declaredTests(textAt(f), f); } catch { return []; } }).flatMap(d => d.titles.map(x => String(x).toLowerCase()));
+      // The titles as the proof's record reads its tests (testSpans: a .each title with its placeholders) and as
+      // survivors() reads them (declaredTests).
+      const titles = (testFiles || []).flatMap(f => { try { const t = textAt(f); return [...declaredTests(t, f), ...testSpans(t, f)]; } catch { return []; } }).flatMap(d => d.titles.map(x => String(x).toLowerCase()));
       const own = opt('--breaks') ? path.relative(repo, path.resolve(opt('--breaks'))).replace(/\\/g, '/') : '';
       const spec = ['--', '.', ...(own && !own.startsWith('..') && !path.isAbsolute(own) ? [`:(exclude)${own}`] : [])];
       for (const b of breaks.filter(x => !x.single)) for (const part of b.mustFail.map(String)) {
-        if (part && titles.some(x => x.includes(part.toLowerCase()))) continue;
+        if (part && titles.some(x => x.includes(part.toLowerCase()) || titleMatches(x, new Set([part.toLowerCase()])))) continue;
         let held = Boolean(part);
         if (held) { try { git('grep', '-q', '-i', '-F', '--untracked', '-e', part, ...spec); } catch (e) { held = e.status !== 1; } }
         if (!held) lost.push({ name: b.name, part });
@@ -1351,6 +1350,8 @@ async function main() {
       say('RED-PROOF: NOT PROVED ✗ — every mustFail part must be words of the own title of a test this command runs. Nothing ran; files untouched.');
       process.exit(2);
     }
+  }
+  if (checkPlan) {
     const count = breaks.filter(x => !x.single).length;
     say(`RED-PROOF: plan checked — ${count} break(s): each is filled in and its find matches once, no mustFail part is ambiguous or names no test, and no new "nothing happens" check is left unproven.${syntaxNote} No run started, no test machine contacted, no copy taken.`);
     say('PLAN OK');
