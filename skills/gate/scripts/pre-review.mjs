@@ -485,6 +485,43 @@ export function failureLines(text) {
   return [...keep].sort((a, b) => a - b).map(i => text[i]);
 }
 
+// The checks that can be slow or run on the test machine: lint, the type check and the formatter (2026-11-25). Every
+// other check is cheap and runs first.
+export const isHeavyCheck = (c) => Boolean(c && (c.remote || /^(?:lint|types|format)\b/.test(String(c.name))));
+
+// One `FIX <check>:` line per failed check, with the command that fixes it (2026-11-25, owner: "one run names every
+// failure, each with the exact command that fixes it"). A check that did not run because one above failed gets none.
+export function fixLines(results, { repo = '<repo>', base = '<base>', notes = '<notes>' } = {}) {
+  const gate = here.replace(/\\/g, '/'), n = (f) => `${String(notes || '<notes>').replace(/\\/g, '/')}/${f}`;
+  const q = (s) => (/[\s"'$`]/.test(String(s)) ? `"${String(s)}"` : String(s));
+  const out = [];
+  for (const r of results || []) {
+    if (!r || r.code === 0 || /^not run: a check above failed/.test(String(r.out || ''))) continue;
+    const text = String(r.out || '') + ' ' + String(r.notRun || '');
+    const name = String(r.name);
+    let fix;
+    if (name === 'commits') fix = `make one commit: git reset --soft $(git merge-base ${q(base)} HEAD) && git commit -m "<type(scope): what>"`;
+    else if (name === 'places') fix = /not on the places list/.test(text)
+      ? `add the changed code's places: node ${q(gate + '/places.mjs')} --refresh ${q(n('places.md'))} --repo ${q(repo)} --add-changed --base ${q(base)}; then open and close each OPEN place: node ${q(gate + '/places.mjs')} --close ${q(n('places.md'))} --set "P<n>=C<k>" (or "P<n>=none: <why>")`
+      : `open each OPEN place above, then close it: node ${q(gate + '/places.mjs')} --close ${q(n('places.md'))} --set "P<n>=C<k>" (or "P<n>=none: <why>")`;
+    else if (name === 'siblings') fix = `give each S and J line its outcome in ${q(n('siblings.md'))}: → P<n>, → none: <reason>, → reuse or → not: <why>`;
+    else if (name === 'ticket lines') fix = 'each T line named above needs a test that quotes it, in its name or a comment above it';
+    else if (name === 'check lines') fix = `add a check line for each T line named above to ${q(n('check.md'))}`;
+    else if (name === 'test labels') fix = 'tag each test named above with its check line, [Cn], in its title';
+    else if (name === 'test asserts') fix = /NOT PROVEN TEST|no evidence/.test(text)
+      ? 'a new or changed test has no proof yet: run the proof first (sanad.mjs next prints it), then this check again'
+      : 'fix each test named above';
+    else if (name === 'break plan') fix = /no test command/.test(text)
+      ? `name the test command: node ${q(gate + '/sanad.mjs')} start --repo ${q(repo)} --notes ${q(notes)} --side <name> [--cwd <dir>] -- <test command>`
+      : `make each break named above again on the code as it is now: node ${q(gate + '/breaks.mjs')} add --breaks ${q(n('breaks.json'))} --repo ${q(repo)} --file <f> --line <n> --put-file <file> --must-fail <words of a test title>`;
+    else if (name === 'size') fix = 'add what the larger size needs (SIZE GREW), or bring the owner\'s words';
+    else if (name === 'one job') fix = `ask the owner: split it, or keep it as one job (node ${q(gate + '/one-job.mjs')} --keep "<their words>")`;
+    else fix = 'fix what the lines above name';
+    out.push(`FIX ${name}: ${fix}`);
+  }
+  return out;
+}
+
 // Every check at once, results in plan order. A check with `after` starts when the named check (planned before
 // it) has ended (2026-11-14: siblings reads the list the places check rewrites). `run`: tests only.
 export function runChecks(checks, run = runOne) {
@@ -669,8 +706,22 @@ export async function preReview(opts) {
     return r;
   };
   // The list checks start first; the results keep the plan's order.
+  // 2026-11-25 (owner, "the checks pass the first time"): the cheap checks run first (all but lint and the type check,
+  // which may run on the test machine). When one of them fails the run stops there: lint and the type check are named
+  // as not run, so no sync and no slow run is spent on code that must change anyway. Every cheap failure is named at
+  // once, each with its fix (fixLines).
   const order = [...checks].sort((a, b) => Number(!LISTS.test(a.name)) - Number(!LISTS.test(b.name)));
-  const ended = await runChecks(order, run);
+  const cheap = order.filter((c) => !isHeavyCheck(c)), heavy = order.filter(isHeavyCheck);
+  const firstEnded = await runChecks(cheap, run);
+  const cheapFailed = firstEnded.some((r) => r && r.code !== 0);
+  // A heavy check with a pass kept for this exact code is still read and shown: reading it runs nothing.
+  const heavyEnded = cheapFailed
+    ? await Promise.all(heavy.map(async (c) => {
+      if (c.cached) return run(c);
+      const r = { ...c, code: 1, out: 'not run: a check above failed — fix it first (see FIX), then run again', ms: 0 }; emit(r); return r;
+    }))
+    : await runChecks(heavy, run);
+  const ended = order.map((c) => (cheap.includes(c) ? firstEnded[cheap.indexOf(c)] : heavyEnded[heavy.indexOf(c)]));
   const results = [...checks.map(c => ended[order.indexOf(c)]), ...owedResults];
   const skippedText = skipped.length ? ` · ${skipped.length} skipped: ${skipped.map(s => s.name).join(', ')}` : '';
   const summary = `${label}: ${results.filter(r => r.code === 0).length} of ${results.length} checks passed${skippedText} · ${files.length} changed file(s) · ${opts.repo}`;
@@ -679,6 +730,8 @@ export async function preReview(opts) {
   for (const r of results) lines.push(...resultLines(r));
   for (const s of skipped) lines.push(`  – ${s.name}: skipped (${s.why})`);
   for (const s of skipped) say(`  – ${s.name}: skipped (${s.why})`);
+  const fixes = fixLines(results, { repo: opts.repo, base: opts.base, notes: opts.notes || (opts.places ? path.dirname(opts.places) : '') });
+  for (const l of fixes) { lines.push(l); say(l); }
   say(summary);
   const ok = results.every(r => r.code === 0);
   // 2026-11-23: a whole before-proof run (no --part) keeps its answer by the tree it began on; a tree that moved during

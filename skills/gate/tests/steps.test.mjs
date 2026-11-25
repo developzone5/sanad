@@ -332,3 +332,48 @@ test('the review step names one --proof-log per existing log, and none when no l
   assert.doesNotMatch(text(facts({ proof: { done: true } })), /--proof-log/);
   assert.doesNotMatch(text(facts({ proof: { done: true }, proofLogs: [] })), /--proof-log/);
 });
+
+// 2026-11-25 (owner, "the checks pass the first time"): the printed steps prepare the checks, never offer the full
+// checks before the proof, and say where the suite receipt goes.
+test('before the checks the three steps that failed most in test 4 are printed, in order', () => {
+  const out = text(facts({ checks: { beforeProof: false } }));
+  const at = (re) => out.search(re);
+  assert.ok(at(/1\) the places of the changed code: node \/g\/places\.mjs --refresh \/n\/places\.md --repo '\/r\/my repo' --add-changed --base origin\/staging/) >= 0, out);
+  assert.ok(at(/2\) one commit on the base/) > at(/1\) the places/));
+  assert.ok(at(/3\) each new test has its \[Cn\] tag in its title and quotes its ticket line/) > at(/2\) one commit/));
+  assert.ok(at(/pre-review\.mjs --before-proof/) > at(/3\) each new test/));
+});
+
+test('the full checks are never offered before the proof: the review step and the last round print --before-proof only', () => {
+  // The review step, with the proof not done for this code.
+  const step = STEPS.find((s) => s.id === 'review');
+  const review = step.lines(ctx, facts({ proof: { done: false, early: true } })).map((l) => l.text).join('\n');
+  assert.doesNotMatch(review, /pre-review\.mjs --was/, 'no full checks before the proof');
+  assert.match(review, /pre-review\.mjs --before-proof/);
+  assert.match(review, /the full checks run after the proof/);
+  assert.match(step.lines(ctx, facts({ proof: { done: true } })).map((l) => l.text).join('\n'), /pre-review\.mjs --was/);
+  const pin = { round: 1, kind: 'recheck', commit: 'h2', ref: 'refs/sanad/review/t/1' };
+  const last = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: false } }));
+  assert.doesNotMatch(last, /pre-review\.mjs --was/);
+  assert.match(last, /the full checks run after the proof/);
+  // With the proof done, the full checks are offered.
+  const done = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: true } }));
+  assert.match(done, /pre-review\.mjs --was/);
+  // Review finding: when the proof and the suite are both done, the last round is over; the full checks still come,
+  // before the verdict line.
+  const over = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: true }, suite: { done: true, receipt: { runId: 'r' } } }));
+  assert.ok(over.search(/pre-review\.mjs --was/) >= 0 && over.search(/pre-review\.mjs --was/) < over.search(/notes\.mjs verdict --review/), over);
+  // Review finding (Claude): an early full review with no note never reaches the last round; the full checks still
+  // come once the proof is done, before the verdict.
+  const full = { round: 1, kind: 'full', commit: 'h2', ref: 'refs/sanad/review/t/1' };
+  const early = text(facts({ round: 1, pins: [full], lastPin: full, pinAtHead: true, proof: { done: true }, reviewReported: true, notes: { known: true, all: [], open: [] } }));
+  assert.ok(early.search(/pre-review\.mjs --was/) >= 0 && early.search(/pre-review\.mjs --was/) < early.search(/notes\.mjs verdict --review/), early);
+});
+
+test('the suite step says where its receipt goes, and asks for the suite command when the task names none', () => {
+  const pin = { round: 1, kind: 'recheck', commit: 'h2', ref: 'refs/sanad/review/t/1' };
+  const named = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: true }, suite: { done: false, mark: 'npm run test' } }));
+  assert.match(named, /its receipt goes in \/n\/evidence \(the spec's outputRoot\), with the command the task names: npm run test/);
+  const none = text(facts({ round: 1, pins: [pin], lastPin: pin, pinAtHead: true, proof: { done: true }, suite: { done: false, mark: '' } }));
+  assert.match(none, /first name the suite command: node \/g\/sanad\.mjs start --repo '\/r\/my repo' --notes \/n --suite "<the full suite command>"; its receipt goes in \/n\/evidence/);
+});

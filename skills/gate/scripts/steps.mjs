@@ -106,9 +106,21 @@ const noProofStep = (f) => lightLane(f) || (f.lane === 'text' && !f.textProof);
 // Fix round: with no log on disk the option is left out, never a name of a file that is not there.
 const proofLogs = (f) => (Array.isArray(f.proofLogs) ? f.proofLogs : []).map((l) => ' --proof-log ' + p(l)).join('');
 const brief = (c, f, extra) => `${tool(c, 'review-brief.mjs')} ${extra} --out ${note(c, 'brief.md')} --ticket ${note(c, 'ticket.md')} --lines ${note(c, 'lines.md')} --check ${note(c, 'check.md')} --places ${note(c, 'places.md')}${(c.lane === 'text' && !f.textProof) || lightLane(f) ? '' : proofLogs(f)} --engine ${q(c.engine || 'claude')} --size ${q(c.size || 'SIZE')}`;
+// 2026-11-25 (owner): the suite step says where its receipt goes, so the suite runs once (test 4: it ran twice).
 const suiteLines = (c, f) => (f.suite.ci
   ? [{ text: `left to CI: ${f.suite.ci}`, plain: true }]
-  : [{ text: `the full suite, once, through the evidence helper, on this tree: ${f.git.tree ? f.git.tree.slice(0, 10) : 'commit first'}`, plain: true }]);
+  : [{ text: `the full suite, once, through the evidence helper, on this tree: ${f.git.tree ? f.git.tree.slice(0, 10) : 'commit first'}`, plain: true },
+    f.suite.mark
+      ? { text: `its receipt goes in ${note(c, 'evidence')} (the spec's outputRoot), with the command the task names: ${f.suite.mark}`, plain: true }
+      : { text: `first name the suite command: ${tool(c, 'sanad.mjs')} start --repo ${p(c.repo)} --notes ${p(c.notes)} --suite "<the full suite command>"; its receipt goes in ${note(c, 'evidence')}`, plain: true }]);
+
+// The three steps that failed most in test 4, before the checks (2026-11-25): the places list refreshed for the changed
+// code, one commit, and each test tagged with its check line and quoting its ticket line.
+const prepLines = (c) => [
+  { text: `before the checks: 1) the places of the changed code: ${tool(c, 'places.mjs')} --refresh ${note(c, 'places.md')} --repo ${p(c.repo)} --add-changed --base ${q(c.base)}, then close each open place`, plain: true },
+  { text: '2) one commit on the base (amend each fix into it)', plain: true },
+  { text: '3) each new test has its [Cn] tag in its title and quotes its ticket line in a comment above it', plain: true },
+];
 
 // True when the ticket text file exists and holds no ticket ID (a word like ABC-123): the task has no ticket.
 const noTicketText = (file) => {
@@ -187,7 +199,9 @@ export const STEPS = [
   // asked for voided two proofs.
   { id: 'checks-before-proof', loop: 'Step 3, item 3', lanes: ALL, beside: 'breaks',
     done: (f) => f.checks.beforeProof === true || f.proof.done || f.pinAtHead,
+    // 2026-11-25 (owner, "the checks pass the first time"): the three steps that failed most in test 4 come first, in order.
     lines: (c) => [
+      ...prepLines(c),
       { text: preReview(c, ' --before-proof') },
       { text: 'fix what it finds and commit, then run it again: the proof waits until it passes on this commit', plain: true },
     ] },
@@ -210,7 +224,9 @@ export const STEPS = [
   { id: 'review', loop: 'Step 3.5, items 1-3', lanes: ALL, early: true,
     done: (f) => f.pinAtHead,
     lines: (c, f) => [
-      { text: preReview(c) },
+      // 2026-11-25 (owner): the full checks only after the proof; before it, only --before-proof (test 4: the full run
+      // before the proof failed on new tests with no proof yet, three times).
+      ...(noProofStep(f) || f.proof.done ? [{ text: preReview(c) }] : [{ text: preReview(c, ' --before-proof') }, { text: 'the full checks run after the proof', plain: true }]),
       { text: brief(c, f, '--pin') },
       { text: `launch every line of ${note(c, 'launch.md')} in one message`, plain: true },
       ...(f.lane === 'small' ? [{ text: "suggestion, not measured: start the gate's focused evidence runs while the one reviewer reads", plain: true }] : []),
@@ -253,12 +269,14 @@ export const STEPS = [
       return [
         ...(noProofStep(f) || f.proof.done ? [] : hold ? [{ text: `the proof waits: ${hold}`, plain: true }, ...(f.checks && f.checks.beforeProof === false ? [{ text: preReview(c, ' --before-proof') }] : [])] : sidesOf(c).map((s) => ({ text: proofLine(c, s) }))),
         ...(f.suite.done ? [] : suiteLines(c, f)),
-        { text: preReview(c) },
+        ...(noProofStep(f) || f.proof.done ? [{ text: preReview(c) }] : [{ text: 'the full checks run after the proof', plain: true }]),
       ];
     } },
   { id: 'verdict', loop: 'Step 3.5, item 7', lanes: ALL, unknown: () => true,
     done: (f) => f.pushed === true,
-    lines: (c) => [{ text: `${tool(c, 'notes.mjs')} verdict --review --repo ${p(c.repo)}` }] },
+    // The full checks come first, once the proof is done (review: the last round ended with the proof and the suite and
+    // never offered them, since no record shows their pass to this printer).
+    lines: (c, f) => [...(f && (noProofStep(f) || f.proof.done) ? [{ text: preReview(c) }] : []), { text: `${tool(c, 'notes.mjs')} verdict --review --repo ${p(c.repo)}` }] },
   { id: 'gate', loop: 'Step 4', lanes: ALL, unknown: (f) => Boolean(f.suite.ci),
     done: (f) => Boolean(f.suite.receipt) || f.pushed === true,
     lines: (c, f) => [{ text: '/gate   (the Definition of Done and the security list, each claim with its output)', plain: true }, ...suiteLines(c, f), { text: `${tool(c, 'notes.mjs')} verdict --gate --repo ${p(c.repo)} --notes ${p(c.notes)} --tests <passed>/<run> --build "<real result>" --attack "<real result>" --security "<real result>" --ran "<real result>"` }, { text: 'Each flag carries the real result of that check; without them the line is GATE: INCOMPLETE.', plain: true }] },

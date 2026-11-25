@@ -77,7 +77,7 @@ test('--warm: a copy whose build exits 1 is not marked built; after a build that
 test('a run whose build failed (a break that does not compile) does not mark its copy built', () => {
   const f = fixture();
   const breaks = path.join(f.root, 'breaks.json');
-  fs.writeFileSync(breaks, JSON.stringify([{ name: 'does not compile', file: 'rule.cjs', find: 'compiles: true', put: 'compiles: false', mustFail: ['any test'] }]));
+  fs.writeFileSync(breaks, JSON.stringify([{ name: 'does not compile', file: 'rule.cjs', find: 'compiles: true', put: 'compiles: false', mustFail: ['compiles'] }]));
   // `dotnet test.js` has no compile check of its own, so the copy's first build is this run.
   const r = node(script, ['--repo', f.repo, '--base', 'HEAD', '--breaks', breaks, '--parallel', '2', '--', fakeDotnet, 'test.js'], f.env);
   assert.equal(r.status, 1, r.stdout + r.stderr);
