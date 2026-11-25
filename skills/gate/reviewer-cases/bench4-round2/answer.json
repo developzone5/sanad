@@ -6,11 +6,11 @@
   "faults": [
     { "id": "F1", "family": "shared-value", "file": "eduquest-frontend/src/pages/settings/SettingsPage.tsx", "lines": [455, 459], "grade": "bug", "place": true,
       "wrong": "The shared helper did not reach the Settings identity badges, which still print the raw English role on an Arabic page." },
-    { "id": "F2", "family": "shared-value", "file": "eduquest-frontend/src/utils/role-helpers.ts", "lines": [48, 50], "grade": "gap",
+    { "id": "F2", "family": "shared-value", "file": "eduquest-frontend/src/utils/role-helpers.ts", "lines": [48, 50], "grade": "gap", "words": ["comment", "every screen", "one rule"],
       "wrong": "The helper's comment says one rule for every screen while the Settings badges and the ticket pages do not use it." },
-    { "id": "F3", "family": "language", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [213, 214], "grade": "bug",
+    { "id": "F3", "family": "language", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [213, 214], "grade": "bug", "words": ["logo", "aria-label", "alt=", "alt text", "Tuwaiq", "Go to dashboard"],
       "wrong": "The logo link's aria-label and alt stay English on an Arabic page." },
-    { "id": "F4", "family": "crash", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [197, 197], "grade": "bug",
+    { "id": "F4", "family": "crash", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [197, 197], "grade": "bug", "words": ["undefined", "crash", "iterable", "no roles", "throw", "TypeError", "missing roles", "without roles", "roles field", "null"],
       "wrong": "A saved session with no roles field crashes the top bar: user?.roles[0] reads a field that is undefined." },
     { "id": "F5", "family": "crash", "file": "eduquest-frontend/src/components/layout/UserViewBar.tsx", "lines": [38, 38], "grade": "bug",
       "wrong": "The view-as strip crashes the same way on a user with no roles field." },
@@ -22,7 +22,7 @@
       "wrong": "The Users export builds role words from a fixed list of five, so an Applicant row is exported with the raw English role in Arabic." },
     { "id": "F9", "family": "other", "file": "eduquest-frontend/src/components/layout/Topbar.tsx", "lines": [387, 387], "grade": "gap",
       "wrong": "The top bar shows only roles[0], so a user with combined roles sees one role." },
-    { "id": "F10", "family": "other", "file": "eduquest-frontend/src/utils/role-helpers.ts", "lines": [51, 53], "grade": "gap",
+    { "id": "F10", "family": "other", "file": "eduquest-frontend/src/utils/role-helpers.ts", "lines": [51, 53], "grade": "gap", "words": ["space", "blank", "trim", "whitespace", "empty"],
       "wrong": "A role name of only spaces is returned as it is, so the strip shows a blank role." }
   ],
   "notes": [

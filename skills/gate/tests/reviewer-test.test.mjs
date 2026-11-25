@@ -9,7 +9,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   answerProblems, scoreReview, scorePlace, scoreNotes, reportText, refsOf, sameFile, launchSection, checkCase, caseNames,
-  add, prepare, CASES, FAMILIES, JOBS, stepIds, checklistNames,
+  add, prepare, CASES, FAMILIES, JOBS, stepIds, checklistNames, noteOrder,
 } from '../scripts/reviewer-test.mjs';
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'reviewer-test.mjs');
@@ -90,14 +90,62 @@ test('the second look is caught when a SIBLING line names the place the change s
   assert.equal(caught.graded, 1, 'only faults marked place are graded');
   assert.deepEqual(scorePlace(answer, 'SIBLINGS: none\nSAME JOB: none').missed, ['F1']);
   assert.deepEqual(scorePlace(answer, 'The settings page SettingsPage.tsx also prints the role.').caught, [], 'prose is no SIBLING line');
+  // Review round: a base name alone is no path (another SettingsPage.tsx), and the second look has no false notes to count.
+  assert.deepEqual(scorePlace(answer, 'SIBLING: SettingsPage.tsx:458 · badges — raw role').caught, []);
+  assert.deepEqual(scorePlace(answer, 'SIBLING: admin/src/pages/SettingsPage.tsx:458 · badges — raw role').caught, []);
+  assert.equal(caught.falseNotes, null);
+  assert.match(reportText([{ job: 'second-look', families: { 'shared-value': { caught: 1, total: 1 } }, falseNotes: null }]), /\| second-look · second-look \| [^|]+ \| 1\/1 \| – \|/);
 });
 
 test('the note check keeps the true note and drops the false one; the reverse is a miss and a false note', () => {
-  const good = scoreNotes(answer, 'BRIEF 1a2b g1\nCONFIRMED K1 — web/src/pages/SettingsPage.tsx:458 prints role\nREFUTED K2 — web/src/components/Topbar.tsx:199 lower-cases first');
+  const good = scoreNotes(answer, 'BRIEF 1a2b3c4d g1\nCONFIRMED K1 — web/src/pages/SettingsPage.tsx:458 prints role\nREFUTED K2 — web/src/components/Topbar.tsx:199 lower-cases first');
   assert.deepEqual([good.caught.length, good.missed.length, good.falseNotes.length], [1, 0, 0]);
-  const bad = scoreNotes(answer, 'BRIEF 1a2b g1\n- **REFUTED** K1 — x.ts:1 guard\nUNSURE K2 — could not read');
+  const bad = scoreNotes(answer, 'BRIEF 1a2b3c4d g1\n- **REFUTED** K1 — src/x.ts:1 guards it here\nUNSURE K2 — could not read');
   assert.deepEqual([bad.caught.length, bad.missed.length, bad.falseNotes.length], [0, 1, 1]);
   assert.match(bad.falseNotes[0], /^K2 UNSURE \(kept a false note\)/);
+});
+
+test('a note-check reply is read as note-check --record reads it: no BRIEF line or no verdict is no answer; a bare REFUTED keeps the note', () => {
+  assert.deepEqual([scoreNotes(answer, '').caught.length, scoreNotes(answer, '').missed.length], [0, 1], 'an empty reply catches nothing');
+  assert.match(scoreNotes(answer, 'CONFIRMED K1 — web/src/pages/SettingsPage.tsx:458 x').note, /no BRIEF line/);
+  const bare = scoreNotes(answer, 'BRIEF 1a2b3c4d g1\nCONFIRMED K1 — web/src/pages/SettingsPage.tsx:458 prints role\nREFUTED K2');
+  assert.equal(bare.falseNotes.length, 1, 'REFUTED with no file:line evidence keeps the false note');
+});
+
+test('the true note goes first or second by the case name, and prepare and score use the same order', () => {
+  const two = [{ true: true }, { true: false }];
+  const firsts = ['a-case', 'b-case', 'c-case', 'd-case', 'e-case', 'f-case'].map((n) => noteOrder(n, two)[0].true);
+  assert.ok(firsts.includes(true) && firsts.includes(false), 'both orders occur');
+  const name = ['a-case', 'b-case', 'c-case', 'd-case'].find((n) => noteOrder(n, two)[0].true === false);
+  const r = scoreNotes(answer, 'BRIEF 1a2b3c4d g1\nREFUTED K1 — web/src/components/Topbar.tsx:199 lower-cases it first\nCONFIRMED K2 — web/src/pages/SettingsPage.tsx:458 x', name);
+  assert.deepEqual([r.caught.length, r.falseNotes.length], [1, 0], 'K2 is the true note for this name');
+  const set = caseNames().map((n) => JSON.parse(fs.readFileSync(path.join(CASES, n, 'answer.json'), 'utf8'))).filter((a) => a.notes);
+  assert.ok(set.length >= 12, `${set.length} cases have a note pair`);
+});
+
+test('a hygiene line, a place in the also: tail, or a note without the fault\'s words is no catch; one note catches one fault', () => {
+  const a = { family: 'access', faults: [
+    { id: 'F1', family: 'access', file: 'src/A.cs', lines: [10, 12], grade: 'blocker', wrong: 'any teacher archives any class' },
+    { id: 'F2', family: 'crash', file: 'src/A.cs', lines: [11, 11], grade: 'bug', wrong: 'a missing roles field crashes', words: ['undefined', 'crash'] },
+  ] };
+  assert.deepEqual(scoreReview(a, 'Gap (HYGIENE) — src/A.cs:11 — the name x is short — fix cost: rename').caught, []);
+  assert.equal(scoreReview(a, 'Gap (HYGIENE) — src/A.cs:11 — the name x is short — fix cost: rename').falseNotes.length, 0);
+  assert.deepEqual(scoreReview(a, 'Bug — src/B.cs:3 — x → y — z — kind: role check; also: src/A.cs:11').caught, [], 'the also: tail names other places');
+  const one = scoreReview(a, 'Blocker — src/A.cs:11 — a teacher posts archive → archived — add the role check');
+  assert.deepEqual(one.caught, ['F1'], 'F2 needs one of its words');
+  const both = scoreReview(a, 'Blocker — src/A.cs:11 — a teacher posts archive → archived — add the role check\nBug — src/A.cs:11 — a session with no roles → undefined → crash — guard it');
+  assert.deepEqual(both.caught.sort(), ['F1', 'F2']);
+  // the real case: the round-one false note names Topbar.tsx:199, near three faults, and catches none of them
+  const r1 = JSON.parse(fs.readFileSync(path.join(CASES, 'bench4-round1', 'answer.json'), 'utf8'));
+  const wrong = r1.notes.find((x) => !x.true);
+  const s = scoreReview(r1, `${wrong.kind} — ${wrong.text}`);
+  assert.deepEqual([s.caught, s.falseNotes.length], [[], 1]);
+});
+
+test('check fails when the case folder is empty or missing: nothing checked is no pass', () => {
+  const r = run('check', '--cases', tmp('rt-none-'));
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /BAD: no case in/);
 });
 
 test('the report: one row per seat job with its model, caught of total per family, false notes and minutes', () => {
@@ -150,6 +198,16 @@ test('prepare builds the throwaway repository and one launch per seat job from t
   const brief = fs.readFileSync(path.join(work, 'notes', 'claude', 'brief-fresh.md'), 'utf8');
   assert.match(brief, /A teacher enters a grade from 0 to 100/);
   assert.doesNotMatch(brief, /swallowed|planted/i);
+  // Review round: nothing under the seat's work folder names the case, and the launch texts, seats.json and the
+  // replies live in the control folder beside it.
+  roots.push(work + '-control');
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? (e.name === '.git' ? [] : walk(path.join(d, e.name))) : [path.join(d, e.name)]));
+  for (const f of walk(work)) assert.doesNotMatch(fs.readFileSync(f, 'utf8'), /planted-|swallowed-error/, f);
+  assert.ok(fs.existsSync(path.join(work + '-control', 'seats.json')));
+  assert.ok(!fs.existsSync(path.join(work, 'seats.json')));
+  for (const s of r.seats) assert.ok(!s.launch.startsWith(work.replace(/\\/g, '/') + '/'), s.launch);
+  const codex = r.seats.find((s) => s.job === 'fresh-codex');
+  assert.ok(fs.readFileSync(codex.launch, 'utf8').includes(`-o "${codex.reply}"`), 'a Codex reply is where its launch writes it');
 });
 
 test('add makes a case from a real change: the files at the base, the --also files, the patch, an empty answer the check refuses', () => {

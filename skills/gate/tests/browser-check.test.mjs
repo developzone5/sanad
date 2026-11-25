@@ -9,7 +9,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readPlan, readSite, rowsOf, textsFor, shotName, tableText, rowPassed, runCheck, loadPlaywright, launch, siteFile, toolDir } from '../scripts/browser-check.mjs';
+import { readPlan, readSite, rowsOf, textsFor, shotName, tableText, rowPassed, runCheck, loadPlaywright, launch, siteFile, toolDir, redact } from '../scripts/browser-check.mjs';
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'browser-check.mjs');
 const roots = [];
@@ -18,7 +18,7 @@ test.after(() => { for (const r of roots) fs.rmSync(r, { recursive: true, force:
 
 const PLAN = { url: 'http://localhost:1', pages: ['/settings', '/users'], roles: ['Teacher', 'Admin'], languages: ['ar', 'en'],
   lines: [{ id: 'T1', see: { ar: ['معلم'], en: ['Teacher'] }, roles: ['Teacher'] }, { id: 'T2', see: ['EduQuest'], pages: ['/users'] }] };
-const SITE = { login: { path: '/login', user: '#u', password: '#p', submit: '#go' }, language: { localStorage: { 'ui-storage': '{"state":{"language":"{lang}"}}' } },
+const SITE = { url: 'http://localhost:1', login: { path: '/login', user: '#u', password: '#p', submit: '#go' }, language: { localStorage: { 'ui-storage': '{"state":{"language":"{lang}"}}' } },
   accounts: { Teacher: { user: 't@x.test', password: 'Secret-T-123' }, Admin: { user: 'a@x.test', passwordEnv: 'BC_TEST_ADMIN_PW' } } };
 
 test('the plan: pages, roles from the ticket, languages, and each visible line with its texts', () => {
@@ -31,6 +31,10 @@ test('the plan: pages, roles from the ticket, languages, and each visible line w
   assert.throws(() => readPlan(JSON.stringify({ ...PLAN, lines: [{ id: 'X1', see: ['a'] }] })), /id is the ticket line's T<n>/);
   assert.throws(() => readPlan(JSON.stringify({ ...PLAN, lines: [{ id: 'T1', see: [] }] })), /see is a list of texts/);
   assert.throws(() => readPlan(JSON.stringify({ ...PLAN, lines: [{ id: 'T1', see: ['a'], roles: ['Parent'] }] })), /its roles are roles of the plan/);
+  // Review round: a line is never skipped in a language of the plan, and never limited to no row.
+  assert.throws(() => readPlan(JSON.stringify({ ...PLAN, lines: [{ id: 'T1', see: { ar: ['معلم'] } }] })), /see has no texts for en/);
+  assert.throws(() => readPlan(JSON.stringify({ pages: ['/s'], roles: ['Teacher'], lines: [{ id: 'T1', see: { en: ['Teacher'] } }] })), /see has no texts for the plan without languages/);
+  assert.throws(() => readPlan(JSON.stringify({ ...PLAN, lines: [{ id: 'T1', see: ['a'], roles: [] }] })), /its roles are roles of the plan/);
 });
 
 test('one row per page, role and language; each row gets only its own lines, in its own language', () => {
@@ -42,8 +46,18 @@ test('one row per page, role and language; each row gets only its own lines, in 
   assert.deepEqual(textsFor(p, { page: '/settings', role: 'Teacher', lang: 'en' }), [{ id: 'T1', texts: ['Teacher'] }]);
   assert.deepEqual(textsFor(p, { page: '/settings', role: 'Admin', lang: 'en' }), []);
   assert.deepEqual(textsFor(p, { page: '/users', role: 'Admin', lang: 'ar' }), [{ id: 'T2', texts: ['EduQuest'] }]);
-  assert.equal(shotName({ page: '/users/42/edit', role: 'Teacher', lang: 'ar' }), 'users-42-edit-Teacher-ar.png');
-  assert.equal(shotName({ page: '/', role: 'Admin', lang: '' }), 'root-Admin.png');
+  assert.match(shotName({ page: '/users/42/edit', role: 'Teacher', lang: 'ar' }), /^users-42-edit-[0-9a-f]{6}-Teacher-ar\.png$/);
+  assert.match(shotName({ page: '/', role: 'Admin', lang: '' }), /^root-[0-9a-f]{6}-Admin\.png$/);
+  // Review round: two pages that read the same once cleaned keep two screenshots.
+  assert.notEqual(shotName({ page: '/a/b', role: 'R', lang: 'en' }), shotName({ page: '/a-b', role: 'R', lang: 'en' }));
+});
+
+test('a saved password is hidden in every text the run records; a run on another address types none', async () => {
+  assert.equal(redact('POST /login?p=Secret-T-123 — 500', ['Secret-T-123']), 'POST /login?p=[hidden] — 500');
+  const s = readSite(JSON.stringify(SITE), ['Teacher'], {});
+  const plan = readPlan(JSON.stringify({ ...PLAN, roles: ['Teacher'], lines: [] }));
+  await assert.rejects(() => runCheck({ plan, site: s, notes: tmp('bc-other-'), url: 'http://evil.example', browser: null }), /is not the site file's address http:\/\/localhost:1: its accounts are typed only there/);
+  assert.throws(() => readSite(JSON.stringify({ ...SITE, url: undefined }), ['Teacher'], {}), /url is the address the accounts belong to/);
 });
 
 test('the site file: sign-in steps and one account per role; a password from the environment; a missing one is named', () => {
@@ -89,6 +103,17 @@ test('without Sanad\'s browser tool the run says so in one line, exits 3, and is
   assert.equal(r.stdout.trim().split('\n').length, 1);
   assert.match(r.stdout, /^BROWSER CHECK: NOT DONE — no browser tool in Sanad's folder .* — run: node .*browser-check\.mjs setup/);
   assert.ok(!fs.existsSync(path.join(notes, 'browser.json')), 'no result is written');
+  assert.match(fs.readFileSync(path.join(notes, 'browser.md'), 'utf8'), /^BROWSER CHECK: NOT DONE — no browser tool/, 'the NOT DONE line is the notes\' result');
+});
+
+test('a run that does not finish takes an older passing result away (review round)', () => {
+  const notes = tmp('bc-notes-');
+  fs.writeFileSync(path.join(notes, 'browser.json'), '{"rows":[{"passed":true}]}');
+  fs.writeFileSync(path.join(notes, 'browser.md'), 'BROWSER CHECK: 1 row(s), 0 failed\n');
+  const r = spawnSync(process.execPath, [script, 'run', '--notes', notes], { encoding: 'utf8', windowsHide: true });
+  assert.equal(r.status, 2);
+  assert.ok(!fs.existsSync(path.join(notes, 'browser.json')));
+  assert.match(fs.readFileSync(path.join(notes, 'browser.md'), 'utf8'), /^BROWSER CHECK: NOT DONE — no plan/);
 });
 
 test('a run with no plan or no site file is a usage error that names the file to write', () => {
@@ -99,7 +124,7 @@ test('a run with no plan or no site file is a usage error that names the file to
   fs.writeFileSync(path.join(notes, 'browser-plan.json'), JSON.stringify(PLAN));
   const s = spawnSync(process.execPath, [script, 'run', '--notes', notes, '--site', path.join(notes, 'none.json')], { encoding: 'utf8', windowsHide: true });
   assert.equal(s.status, 2);
-  assert.match(s.stderr, /no site file .*none\.json: it holds the sign-in steps and one test account per role/);
+  assert.match(s.stderr, /no site file .*none\.json: it holds the sign-in steps, the address and one test account per role/);
 });
 
 // A small site: a sign-in form, a page whose role word follows the language stored in localStorage, a page with a
@@ -123,6 +148,8 @@ function site() {
     if (u.pathname === '/login') return send(200, page('<form method="post" action="/login"><input id="u" name="u"><input id="p" name="p" type="password"><button id="go" type="submit">Go</button></form>'));
     if (!signed) return send(302, '', { location: '/login' });
     if (u.pathname === '/home') return send(200, page('home'));
+    if (u.pathname === '/moved') return send(302, '', { location: '/home' });
+    if (u.pathname === '/leak') return send(200, page('<p>EduQuest</p><script>console.error("token Secret-T-123 in a log");</script>'));
     if (u.pathname === '/settings') return send(200, page('<p id="r"></p><script>const s=JSON.parse(localStorage.getItem("ui-storage")||"{}");document.getElementById("r").textContent=(s.state&&s.state.language)==="ar"?"معلم":"Teacher";</script>'));
     if (u.pathname === '/broken') return send(200, page('<p>EduQuest</p><script>console.error("boom on load");fetch("/api/missing");</script>'));
     if (u.pathname === '/api/missing') { res.writeHead(500); return res.end('no'); }
@@ -141,7 +168,7 @@ test('a real run in the installed Edge or Chrome: loaded, console errors, failed
   try {
     const plan = readPlan(JSON.stringify({ url, pages: ['/settings', '/broken'], roles: ['Teacher'], languages: ['ar', 'en'],
       lines: [{ id: 'T1', see: { ar: ['معلم'], en: ['Teacher'] }, pages: ['/settings'] }, { id: 'T2', see: ['Not on the page'], pages: ['/broken'] }] }));
-    const s = readSite(JSON.stringify(SITE), plan.roles, {});
+    const s = readSite(JSON.stringify({ ...SITE, url }), plan.roles, {});
     const rows = await runCheck({ plan, site: s, notes, browser, timeoutMs: 8000 });
     assert.equal(rows.length, 4);
     const [arSettings, enSettings, arBroken] = rows;
@@ -153,11 +180,18 @@ test('a real run in the installed Edge or Chrome: loaded, console errors, failed
     assert.match(arBroken.failedRequests.join('\n'), /\/api\/missing — 500/);
     assert.deepEqual(arBroken.lines, [{ id: 'T2', seen: false, missing: ['Not on the page'] }]);
     for (const r of rows) assert.ok(fs.statSync(r.screenshot).size > 0, r.screenshot);
-    assert.deepEqual(fs.readdirSync(path.join(notes, 'browser')).sort(), ['broken-Teacher-ar.png', 'broken-Teacher-en.png', 'settings-Teacher-ar.png', 'settings-Teacher-en.png']);
+    assert.deepEqual(fs.readdirSync(path.join(notes, 'browser')).length, 4);
+    for (const r of rows) assert.equal(path.basename(r.screenshot), shotName(r));
     assert.doesNotMatch(JSON.stringify(rows) + tableText(rows), /Secret-T-123/);
-    const wrong = readSite(JSON.stringify({ ...SITE, accounts: { Teacher: { user: 't@x.test', password: 'wrong' } } }), plan.roles, {});
+    const wrong = readSite(JSON.stringify({ ...SITE, url, accounts: { Teacher: { user: 't@x.test', password: 'wrong' } } }), plan.roles, {});
     const refused = await runCheck({ plan: { ...plan, pages: ['/settings'], languages: ['en'] }, site: wrong, notes, browser, timeoutMs: 4000 });
     assert.deepEqual([refused[0].loaded, refused[0].why], [false, 'sign-in failed']);
+    // Review round: a page that sends the browser elsewhere with status 200 is not loaded, and a password a page logs is hidden.
+    const extra = await runCheck({ plan: { ...plan, pages: ['/moved', '/leak'], languages: ['en'], lines: [] }, site: s, notes, browser, timeoutMs: 6000 });
+    assert.deepEqual([extra[0].loaded, extra[0].why], [false, 'opened /home, not the page']);
+    assert.ok(!rowPassed(extra[0]));
+    assert.match(extra[1].consoleErrors.join('\n'), /token \[hidden\] in a log/);
+    assert.doesNotMatch(JSON.stringify(extra), /Secret-T-123/);
   } finally {
     await browser.close();
     await new Promise((r) => server.close(r));

@@ -81,6 +81,7 @@ test('install puts one hook in one repository; remove takes it out; another repo
   const r = f.node('install', '--repo', f.repo);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /^PUSH LOCK: installed in .*\/hooks\/pre-push/);
+  assert.match(r.stdout, /Limits: `git push --no-verify` skips it, and a core\.hooksPath set later turns it off\./);
   const hook = path.join(f.repo, '.git', 'hooks', 'pre-push');
   assert.match(fs.readFileSync(hook, 'utf8'), /^#!\/bin\/sh\n# sanad-push-lock\n/);
   assert.ok(!fs.existsSync(path.join(other, '.git', 'hooks', 'pre-push')), 'a repository where it was never installed has no hook');
@@ -213,6 +214,82 @@ test('what the guard would ask the human first is refused: a direct push to the 
   const forced = spawnSync('git', ['push', '--force', 'origin', 'HEAD:refs/heads/fix/probe'], { cwd: f.repo, encoding: 'utf8', env: f.env, windowsHide: true, timeout: 180000 });
   assert.notEqual(forced.status, 0);
   assert.match(refusal(forced)[0], /would ask the human first \(force-push rewrites pushed history/);
+  // Review round: a push from a Claude session runs this same hook, so the way out names the owner's own push.
+  assert.doesNotMatch(refusal(forced)[0], /push from a Claude session/);
+  assert.match(refusal(forced)[0], /the owner's own decision: the owner runs it by hand/);
+});
+
+test('a branch that is not checked out, a tag and a remote delete are refused (review round)', (t) => {
+  const f = fixture(t);
+  const tree = f.commit('fix/probe', 'src/App.ts');
+  f.session([...f.receipt(tree), ...f.verdicts()]);
+  f.record();
+  f.git('branch', 'other', 'origin/staging');
+  f.git('tag', 'v1');
+  f.node('install', '--repo', f.repo);
+  assert.equal(f.push().status, 0, 'control');
+  const other = f.push('other:refs/heads/other');
+  assert.notEqual(other.status, 0);
+  assert.match(refusal(other)[0], /^PUSH LOCK: refused — /);
+  const tag = f.push('refs/tags/v1:refs/tags/v1');
+  assert.notEqual(tag.status, 0);
+  assert.match(refusal(tag)[0], /^PUSH LOCK: refused — /);
+  const del = f.push(':refs/heads/fix/probe');
+  assert.notEqual(del.status, 0);
+  assert.match(refusal(del)[0], /would ask the human first/);
+  assert.ok(f.remoteHas('refs/heads/fix/probe'), 'the remote branch is still there');
+});
+
+test('the newest session decides: an older pass does not outlive a newer session of the same repository (review round)', (t) => {
+  const f = fixture(t);
+  const tree = f.commit('fix/probe', 'src/App.ts');
+  f.session([...f.receipt(tree), ...f.verdicts()]);
+  f.record();
+  const newer = path.join(f.env.CLAUDE_CONFIG_DIR, 'projects', 'p', 'session-2.jsonl');
+  fs.writeFileSync(newer, [say('Working in ' + f.repo), ...reviewerRun(), say('REVIEW: FAIL')].map((e) => JSON.stringify(e)).join('\n'));
+  const later = new Date(Date.now() + 5000);
+  fs.utimesSync(newer, later, later);
+  f.node('install', '--repo', f.repo);
+  const r = f.push();
+  assert.notEqual(r.status, 0);
+  assert.match(refusal(r)[0], /the push guard refuses it/);
+  fs.rmSync(newer);
+  assert.equal(f.push().status, 0, 'control: the session that checked this tree');
+});
+
+test('a review record whose commit list is damaged is no record of these commits (review round)', (t) => {
+  const f = fixture(t);
+  f.commit('fix/probe', 'src/App.ts');
+  const tree = f.commit(null, 'src/Other.ts');
+  f.session([...f.receipt(tree), ...f.verdicts()]);
+  f.record();
+  const file = path.join(f.state, 'review-records.json');
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  data.records[0].commits = [data.records[0].commits.join(',')];
+  fs.writeFileSync(file, JSON.stringify(data));
+  f.node('install', '--repo', f.repo);
+  const r = f.push();
+  assert.notEqual(r.status, 0);
+  assert.match(refusal(r)[0], /no review record holds these 2 commit\(s\)/);
+});
+
+test('git\'s list of what is pushed that cannot be read is a refusal, never "nothing is pushed" (review round)', (t) => {
+  const f = fixture(t);
+  f.commit('fix/probe', 'src/App.ts');
+  const req = createRequire(import.meta.url);
+  const lockModule = req(lock);
+  const nfs = req('fs');
+  const real = nfs.readFileSync;
+  const cwd = process.cwd();
+  const err = [];
+  const write = process.stderr.write;
+  process.chdir(f.repo);
+  nfs.readFileSync = (file, ...rest) => { if (file === 0) throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' }); return real(file, ...rest); };
+  process.stderr.write = (s) => { err.push(String(s)); return true; };
+  let code;
+  try { code = lockModule.main(['check', 'origin']); } finally { nfs.readFileSync = real; process.stderr.write = write; process.chdir(cwd); }
+  assert.equal(code, 1);
+  assert.match(err.join(''), /^PUSH LOCK: refused — git's list of what is pushed could not be read \(EAGAIN\)/);
 });
 
 test('the workflow lane is read as the guard reads it: no reviewer and no review record, but the receipt and the gate stay', (t) => {

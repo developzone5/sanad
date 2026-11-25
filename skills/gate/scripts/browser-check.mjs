@@ -18,7 +18,8 @@
 // Where the test accounts come from: the site file, outside every repository and outside the notes folder. The site
 // file is `--site <file>`, else `git config sanad.browserSite`, else ~/.claude/state/browser-sites/<repository folder
 // name>.json. It holds the sign-in steps, how a language is chosen, and one account per role:
-//   { "login": { "path": "/login", "user": "#login-email", "password": "#login-password", "submit": "button[type=submit]" },
+//   { "url": "http://localhost:3000",   (the one address the accounts belong to: no password is typed anywhere else)
+//     "login": { "path": "/login", "user": "#login-email", "password": "#login-password", "submit": "button[type=submit]" },
 //     "language": { "localStorage": { "ui-storage": "{\"state\":{\"language\":\"{lang}\"},\"version\":0}" } },
 //     "accounts": { "Teacher": { "user": "teacher@example.test", "passwordEnv": "EQ_TEACHER_PASSWORD" } } }
 // A role's password is `passwordEnv` (an environment variable, preferred) or `password`. No password is ever written
@@ -70,8 +71,14 @@ export function readPlan(text) {
     const see = l.see;
     const okList = (v) => Array.isArray(v) && v.length && v.every((s) => typeof s === 'string' && s.trim());
     if (!(okList(see) || (see && typeof see === 'object' && !Array.isArray(see) && Object.values(see).length && Object.values(see).every(okList)))) out.push(`${at}: see is a list of texts, or one list per language`);
-    if (l.pages !== undefined && !(Array.isArray(l.pages) && l.pages.every((x) => p.pages && p.pages.includes(x)))) out.push(`${at}: its pages are pages of the plan`);
-    if (l.roles !== undefined && !(Array.isArray(l.roles) && l.roles.every((x) => p.roles && p.roles.includes(x)))) out.push(`${at}: its roles are roles of the plan`);
+    // Review round (2026-11-25): a line with texts for one language only was never looked for in the others, and its
+    // rows passed. One list per language must name every language of the plan.
+    else if (!Array.isArray(see)) {
+      const missing = (Array.isArray(langs) ? langs : []).filter((g) => !Object.prototype.hasOwnProperty.call(see, g));
+      if (missing.length) out.push(`${at}: see has no texts for ${missing.map((g) => g || 'the plan without languages').join(', ')}: give a list for every language of the plan, or one list for all`);
+    }
+    if (l.pages !== undefined && !(Array.isArray(l.pages) && l.pages.length && l.pages.every((x) => p.pages && p.pages.includes(x)))) out.push(`${at}: its pages are pages of the plan`);
+    if (l.roles !== undefined && !(Array.isArray(l.roles) && l.roles.length && l.roles.every((x) => p.roles && p.roles.includes(x)))) out.push(`${at}: its roles are roles of the plan`);
   }
   if (out.length) throw usage(`the plan: ${out.join('; ')}`);
   return { url: p.url ? String(p.url).replace(/\/+$/, '') : '', pages: p.pages, roles: p.roles, languages: langs, lines };
@@ -89,6 +96,9 @@ export function readSite(text, roles, env = process.env) {
     if (a.passwordEnv !== undefined ? !env[a.passwordEnv] : typeof a.password !== 'string' || !a.password) out.push(`the role ${r} has no password (${a.passwordEnv ? `the variable ${a.passwordEnv} is empty` : 'password or passwordEnv'})`);
   }
   if (s && s.language !== undefined && !(s.language.localStorage && typeof s.language.localStorage === 'object')) out.push('language holds localStorage: { key: value with {lang} }');
+  // Review round (2026-11-25): the plan's address decided where the saved passwords were typed. The site file names
+  // the one address its accounts belong to; a run on any other address types no password.
+  if (!s || !/^https?:\/\/[^\s/]+/.test(String(s.url || ''))) out.push('url is the address the accounts belong to (http://localhost:3000): no password is typed anywhere else');
   if (out.length) throw usage(`the site file: ${out.join('; ')}`);
   const secret = (r) => (accounts[r].passwordEnv !== undefined ? env[accounts[r].passwordEnv] : accounts[r].password);
   return { login: l, language: s.language || null, user: (r) => accounts[r].user, secret, url: s.url ? String(s.url).replace(/\/+$/, '') : '' };
@@ -124,9 +134,20 @@ export function textsFor(plan, row) {
   return out;
 }
 const safe = (s) => String(s || 'all').replace(/^\/+/, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'root';
-export const shotName = (row) => `${safe(row.page)}-${safe(row.role)}${row.lang ? '-' + safe(row.lang) : ''}.png`;
-// A row passes when the page loaded, no console error, no failed request, and every ticket line was seen.
-export const rowPassed = (r) => r.loaded && !r.consoleErrors.length && !r.failedRequests.length && r.lines.every((l) => l.seen);
+// A short hash of the page keeps two pages apart that read the same once cleaned (/a/b and /a-b, review round).
+const tag = (s) => { let h = 2166136261; for (const ch of String(s)) h = Math.imul(h ^ ch.codePointAt(0), 16777619) >>> 0; return h.toString(16).padStart(8, '0').slice(0, 6); };
+export const shotName = (row) => `${safe(row.page)}-${tag(row.page)}-${safe(row.role)}${row.lang ? '-' + safe(row.lang) : ''}.png`;
+// A row passes when the page loaded, no console error, no failed request, every ticket line was seen, and its
+// screenshot was saved (review round: a failed capture left a passing row with a path to nothing).
+export const rowPassed = (r) => r.loaded && !r.consoleErrors.length && !r.failedRequests.length && r.lines.every((l) => l.seen) && Boolean(r.screenshot);
+// Every saved password, hidden in a text the run records (a page that logs or sends it, review round).
+export function redact(text, secrets) {
+  let s = String(text);
+  for (const x of secrets) if (x && String(x).length >= 3) s = s.split(String(x)).join('[hidden]');
+  return s;
+}
+// The path of an address, without a trailing slash, its query or its fragment.
+const pathOf = (u) => { try { return new URL(u).pathname.replace(/\/+$/, '') || '/'; } catch { return ''; } };
 
 // The short table for the final report. A password never reaches it: the row holds the role, never the account.
 export function tableText(results) {
@@ -183,6 +204,8 @@ async function checkRow(browser, base, site, plan, row, shotDir, timeoutMs) {
     page.on('requestfailed', (q) => { if (signedIn) r.failedRequests.push(`${q.method()} ${q.url()} — ${(q.failure() && q.failure().errorText) || 'failed'}`); });
     page.on('response', (s) => { if (signedIn && s.status() >= 400 && SAME(base, s.url())) r.failedRequests.push(`${s.request().method()} ${s.url()} — ${s.status()}`); });
     await page.goto(base + site.login.path, { waitUntil: 'domcontentloaded' });
+    // The password is typed only on the site file's own address (a redirect elsewhere gets none).
+    if (!SAME(site.url, page.url())) { r.why = `the sign-in page is not on ${site.url}: no password typed`; return r; }
     await page.fill(site.login.user, site.user(row.role));
     await page.fill(site.login.password, site.secret(row.role));
     await Promise.all([page.waitForURL((u) => !String(u).includes(site.login.path), { timeout: timeoutMs }).catch(() => null), page.click(site.login.submit)]);
@@ -193,6 +216,8 @@ async function checkRow(browser, base, site, plan, row, shotDir, timeoutMs) {
     if (!res) r.why = 'no answer';
     else if (res.status() >= 400) r.why = `status ${res.status()}`;
     else if (page.url().includes(site.login.path)) r.why = 'sent back to sign-in';
+    // A redirect to another page (a dashboard with status 200) is not the page (review round).
+    else if (pathOf(page.url()) !== pathOf(base + row.page)) r.why = `opened ${pathOf(page.url())}, not the page`;
     else r.loaded = true;
     for (const want of textsFor(plan, row)) {
       const missing = [];
@@ -203,20 +228,26 @@ async function checkRow(browser, base, site, plan, row, shotDir, timeoutMs) {
       r.lines.push({ id: want.id, seen: missing.length === 0, missing });
     }
     fs.mkdirSync(shotDir, { recursive: true });
-    r.screenshot = path.join(shotDir, shotName(row));
-    await page.screenshot({ path: r.screenshot, fullPage: true });
+    const shot = path.join(shotDir, shotName(row));
+    await page.screenshot({ path: shot, fullPage: true });
+    r.screenshot = shot;   // only once it is saved
     return r;
   } catch (e) {
     r.why = r.why || String(e.message || e).split('\n')[0].slice(0, 160);
     return r;
   } finally {
     await context.close().catch(() => null);
+    const secrets = [site.secret(row.role)];
+    r.why = redact(r.why, secrets);
+    r.consoleErrors = r.consoleErrors.map((t) => redact(t, secrets));
+    r.failedRequests = r.failedRequests.map((t) => redact(t, secrets));
   }
 }
 
 export async function runCheck({ plan, site, notes, url, browser, timeoutMs = 15000 }) {
   const base = (url || plan.url || site.url || '').replace(/\/+$/, '');
   if (!/^https?:\/\//.test(base)) throw usage('no address: give --url, or url in the plan or the site file');
+  if (!SAME(site.url, base)) throw usage(`the address ${base} is not the site file's address ${site.url}: its accounts are typed only there`);
   const shotDir = path.join(notes, 'browser');
   const results = [];
   for (const row of rowsOf(plan)) results.push(await checkRow(browser, base, site, plan, row, shotDir, timeoutMs));
@@ -264,18 +295,30 @@ async function main(argv) {
   if (cmd !== 'run') throw usage('give one of setup, status, run');
   if (!o.notes) throw usage('run needs --notes <dir>');
   const notes = path.resolve(o.notes);
-  const planFile = o.plan ? path.resolve(o.plan) : path.join(notes, 'browser-plan.json');
-  if (!fs.existsSync(planFile)) throw usage(`no plan: write ${slash(planFile)} from the ticket (pages, roles, languages, the lines that name something visible)`);
-  const plan = readPlan(fs.readFileSync(planFile, 'utf8'));
-  const sf = siteFile(o.repo ? path.resolve(o.repo) : process.cwd(), o.site);
-  if (!fs.existsSync(sf)) throw usage(`no site file ${slash(sf)}: it holds the sign-in steps and one test account per role (see the head of this tool); the owner makes it, outside every repository`);
-  const site = readSite(fs.readFileSync(sf, 'utf8'), plan.roles);
+  // Review round (2026-11-25): a run that ended NOT DONE, with a usage error or a crash left an older passing result in
+  // the notes, which read as this run's. Every run first takes the old result away; a run that does not finish leaves
+  // its own NOT DONE line in browser.md.
+  try { fs.rmSync(path.join(notes, 'browser.json'), { force: true }); } catch { /* none */ }
+  const notDone = (why) => {
+    const line = `BROWSER CHECK: NOT DONE — ${why}`;
+    try { fs.mkdirSync(notes, { recursive: true }); fs.writeFileSync(path.join(notes, 'browser.md'), line + '\n'); } catch { /* the line still prints */ }
+    return line;
+  };
+  let plan, sf, site;
+  try {
+    const planFile = o.plan ? path.resolve(o.plan) : path.join(notes, 'browser-plan.json');
+    if (!fs.existsSync(planFile)) throw usage(`no plan: write ${slash(planFile)} from the ticket (pages, roles, languages, the lines that name something visible)`);
+    plan = readPlan(fs.readFileSync(planFile, 'utf8'));
+    sf = siteFile(o.repo ? path.resolve(o.repo) : process.cwd(), o.site);
+    if (!fs.existsSync(sf)) throw usage(`no site file ${slash(sf)}: it holds the sign-in steps, the address and one test account per role (see the head of this tool); the owner makes it, outside every repository`);
+    site = readSite(fs.readFileSync(sf, 'utf8'), plan.roles);
+  } catch (e) { notDone(e.message); throw e; }
   const { pw, why } = loadPlaywright();
-  if (!pw) { process.stdout.write(`BROWSER CHECK: NOT DONE — ${why}\n`); return 3; }
+  if (!pw) { process.stdout.write(notDone(why) + '\n'); return 3; }
   const { browser, channel, why: noBrowser } = await launch(pw);
-  if (!browser) { process.stdout.write(`BROWSER CHECK: NOT DONE — ${noBrowser}\n`); return 3; }
+  if (!browser) { process.stdout.write(notDone(noBrowser) + '\n'); return 3; }
   let results;
-  try { results = await runCheck({ plan, site, notes, url: o.url, browser }); } finally { await browser.close().catch(() => null); }
+  try { results = await runCheck({ plan, site, notes, url: o.url, browser }); } catch (e) { notDone(e.message); throw e; } finally { await browser.close().catch(() => null); }
   const table = tableText(results);
   fs.writeFileSync(path.join(notes, 'browser.md'), `Browser check (${channel}), accounts from ${slash(sf)}\n\n` + table);
   fs.writeFileSync(path.join(notes, 'browser.json'), JSON.stringify({ at: new Date().toISOString(), channel, rows: results.map((r) => ({ ...r, passed: rowPassed(r) })) }, null, 2) + '\n');

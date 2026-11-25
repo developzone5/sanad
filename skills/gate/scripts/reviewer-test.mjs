@@ -28,8 +28,9 @@
 //       (review-brief.mjs --pin on the first round, then --recheck on the change). A case with a fault marked
 //       "place" gets the second look's brief (siblings.mjs --brief on the code before the change, where the second
 //       look runs in a task). A case with "notes" gets the note check's brief (note-check.mjs --brief on a report
-//       that holds those notes). Writes <work>/seats.json and one launch text per seat job in <work>/launch/,
-//       copied from the launch lines the live tools printed. Prints `SEAT <seat> · <job> · <engine> · <file>` per job.
+//       that holds those notes; the true note goes first or second by the case's name, noteOrder). Writes, in a
+//       control folder outside the work folder (<work>-control), seats.json and one launch text per seat job in
+//       launch/, copied from the launch lines the live tools printed, and replies/ for the Claude seats' replies. Prints `SEAT <seat> · <job> · <engine> · <file>` per job.
 //   node reviewer-test.mjs score <case> <reply file> --job <job> [--cases <dir>] [--minutes <n>] [--results <dir>]
 //       Decides caught, missed or false note by comparing the reply with answer.json. No model call; the same input
 //       always gives the same result. With --results, writes <results>/<job>/<case>.json.
@@ -53,6 +54,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { isMain } from './is-main.mjs';
+import { parseVerdicts, judge } from './note-check.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CASES = path.resolve(HERE, '..', 'reviewer-cases');
@@ -107,6 +109,7 @@ export function answerProblems(a) {
     if (!Array.isArray(f.lines) || f.lines.length !== 2 || !f.lines.every((n) => Number.isInteger(n) && n > 0) || f.lines[0] > f.lines[1]) out.push(`${at}: lines is [from, to]`);
     if (typeof f.wrong !== 'string' || f.wrong.trim().length < 12) out.push(`${at}: wrong is one sentence`);
     if (!GRADES.includes(f.grade)) out.push(`${at}: grade is one of ${GRADES.join(', ')}`);
+    if (f.words !== undefined && !(Array.isArray(f.words) && f.words.length && f.words.every((w) => typeof w === 'string' && w.trim().length >= 3))) out.push(`${at}: words is a list of words a note on this fault holds (3 letters or more)`);
   }
   if (a.family !== 'clean' && a.faults.length && !a.faults.some((f) => f && f.family === a.family)) out.push(`no fault of the case's own family ${a.family}`);
   if (a.margin !== undefined && !(Number.isInteger(a.margin) && a.margin >= 0 && a.margin <= 20)) out.push('margin is a whole number from 0 to 20');
@@ -205,17 +208,24 @@ export function prepare(name, { cases = CASES, work } = {}) {
   // No folder, branch or file name tells the reviewer the case's name or family (it is in the brief's paths).
   const root = work ? path.resolve(work) : fs.mkdtempSync(path.join(os.tmpdir(), 'task-'));
   fs.mkdirSync(root, { recursive: true });
+  // Review round (2026-11-25): seats.json, the launch texts and the replies sat in the seat's own work folder, where a
+  // seat that lists it found the case's name and earlier seats' replies. They live in a control folder of their own,
+  // outside the work folder, and seats.json does not name the case.
+  const control = work ? path.resolve(work) + '-control' : fs.mkdtempSync(path.join(os.tmpdir(), 'run-'));
   const repo = path.join(root, 'repo'), notes = path.join(root, 'notes');
   baseRepo(c, repo);
   git(repo, ['checkout', '-q', '-b', 'feat/change']);
   const seats = [];
-  const launchDir = path.join(root, 'launch');
+  const launchDir = path.join(control, 'launch'), replies = path.join(control, 'replies');
   fs.mkdirSync(launchDir, { recursive: true });
-  const keep = (job, text, reply) => {
+  fs.mkdirSync(replies, { recursive: true });
+  const keep = (job, text) => {
     if (!text) throw new Error(`${name}: the live tools printed no launch line for ${job}`);
     const file = path.join(launchDir, `${job}.txt`);
     fs.writeFileSync(file, text + '\n');
-    seats.push({ job, seat: JOBS[job].seat, engine: JOBS[job].engine, launch: slash(file), reply: slash(reply) });
+    // A Codex launch writes its own reply where its -o names it; a Claude seat's reply is saved in replies/.
+    const out = (/\s-o\s+"([^"]+)"/.exec(text) || [])[1];
+    seats.push({ job, seat: JOBS[job].seat, engine: JOBS[job].engine, launch: slash(file), reply: slash(out || path.join(replies, `${job}.md`)) });
   };
   const pin = path.join(c.dir, 'pin.patch');
   if (fs.existsSync(pin)) {
@@ -233,7 +243,7 @@ export function prepare(name, { cases = CASES, work } = {}) {
     git(repo, ['commit', '-q', '-m', 'change (fix)']);
     seedNotes(c, rn, repo);
     tool('review-brief.mjs', [...briefArgs, '--recheck'], rn);
-    keep('recheck', launchSection(fs.readFileSync(path.join(rn, 'launch.md'), 'utf8'), JOBS.recheck.heading), path.join(root, 'replies', 'recheck.md'));
+    keep('recheck', launchSection(fs.readFileSync(path.join(rn, 'launch.md'), 'utf8'), JOBS.recheck.heading));
   } else {
     applyPatch(repo, path.join(c.dir, 'change.patch'));
     git(repo, ['add', '--all']);
@@ -246,7 +256,7 @@ export function prepare(name, { cases = CASES, work } = {}) {
     const launch = fs.readFileSync(path.join(n, 'launch.md'), 'utf8');
     for (const [job, j] of Object.entries(JOBS)) {
       if (j.kind !== 'review' || job === 'recheck' || j.engine !== engine) continue;
-      keep(job, launchSection(launch, j.heading), path.join(root, 'replies', `${job}.md`));
+      keep(job, launchSection(launch, j.heading));
     }
   }
   if (c.answer.faults.some((f) => f.place)) {
@@ -257,20 +267,19 @@ export function prepare(name, { cases = CASES, work } = {}) {
     seedNotes(c, sn, before);
     const out = tool('siblings.mjs', ['--brief', '--notes', sn, '--repo', before], sn);
     const line = (out.match(/^LAUNCH: Agent second-look · prompt: (.*)$/m) || [])[1] || '';
-    keep('second-look', line, path.join(root, 'replies', 'second-look.md'));
+    keep('second-look', line);
   }
   if (Array.isArray(c.answer.notes)) {
     const nn = path.join(notes, 'note-check');
     fs.mkdirSync(nn, { recursive: true });
     const report = path.join(nn, 'review-report.md');
-    fs.writeFileSync(report, ['RECOMMEND: FAIL', '', ...c.answer.notes.map((x) => `${x.kind} — ${x.text}`), ''].join('\n'));
+    fs.writeFileSync(report, ['RECOMMEND: FAIL', '', ...noteOrder(name, c.answer.notes).map((x) => `${x.kind} — ${x.text}`), ''].join('\n'));
     const out = tool('note-check.mjs', ['--brief', '--notes', nn, '--reports', report, '--repo', repo], nn);
     const line = (out.match(/^LAUNCH: Agent note-checker · prompt: (.*)$/m) || [])[1] || '';
-    keep('note-check', line, path.join(root, 'replies', 'note-check.md'));
+    keep('note-check', line);
   }
-  fs.mkdirSync(path.join(root, 'replies'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'seats.json'), JSON.stringify({ case: name, repo: slash(repo), seats }, null, 2) + '\n');
-  return { root: slash(root), repo: slash(repo), seats };
+  fs.writeFileSync(path.join(control, 'seats.json'), JSON.stringify({ work: slash(root), repo: slash(repo), seats }, null, 2) + '\n');
+  return { root: slash(root), control: slash(control), repo: slash(repo), seats };
 }
 
 // ---- scoring ---------------------------------------------------------------------------------------------------
@@ -301,16 +310,32 @@ const firstLine = (t) => String(t).split('\n')[0].slice(0, 200);
 // A review reply against the answer. Counted notes: Blocker, Bug and Gap lines (the hooks' parser; a "none" line
 // is no note). A note that names a fault's file and a line within its range (± margin) catches that fault. A
 // counted note that catches no fault is a false note. A Question or an EXTRA TEST line counts neither way.
+// Review round (2026-11-25): a place alone was a catch, whatever the note said. Now:
+//  - a `Gap (HYGIENE)` line names no wrong result: it is neither a catch nor a false note;
+//  - only the file:line before the note's `— kind:` tail counts (its `also:` inputs are other places);
+//  - a fault with `words` is caught only by a note that holds one of them (a fault among several on close lines);
+//  - one note catches one fault: the nearest of those it names.
+const HYGIENE = /^\s*Gap\s*\(\s*HYGIENE\s*\)/i;
+const head = (text) => String(text).split(/\s[—–-]\s*kind:/i)[0];
+const saysOne = (f, text) => !Array.isArray(f.words) || !f.words.length || f.words.some((w) => text.toLowerCase().includes(String(w).toLowerCase()));
+const distance = (r, f) => Math.max(0, f.lines[0] - r.to, r.from - f.lines[1]);
 export function scoreReview(answer, reply) {
   const margin = Number.isInteger(answer.margin) ? answer.margin : 3;
-  const notes = reportNotes(reply).filter((n) => /^(Blocker|Bug|Gap)$/.test(n.kind) && !n.none);
+  const notes = reportNotes(reply).filter((n) => /^(Blocker|Bug|Gap)$/.test(n.kind) && !n.none && !HYGIENE.test(n.text));
   const caught = new Map(), falseNotes = [];
   for (const n of notes) {
-    const refs = refsOf(n.text);
-    const found = answer.faults.filter((f) => refs.some((r) => hits(r, f, margin)));
+    const refs = refsOf(head(n.text));
+    const found = answer.faults
+      .map((f) => ({ f, d: Math.min(...refs.filter((r) => hits(r, f, margin)).map((r) => distance(r, f)), Infinity) }))
+      .filter((x) => x.d !== Infinity && saysOne(x.f, n.text) && !caught.has(x.f.id))
+      .sort((a, b) => a.d - b.d || (a.f.lines[1] - a.f.lines[0]) - (b.f.lines[1] - b.f.lines[0]));
     // The parser's text is the note line itself, its kind included.
-    if (!found.length) { falseNotes.push(firstLine(n.text)); continue; }
-    for (const f of found) if (!caught.has(f.id)) caught.set(f.id, firstLine(n.text));
+    if (!found.length) {
+      // A second note on a fault already caught is no false note; a note that catches nothing is.
+      if (!answer.faults.some((f) => caught.has(f.id) && refs.some((r) => hits(r, f, margin)))) falseNotes.push(firstLine(n.text));
+      continue;
+    }
+    caught.set(found[0].f.id, firstLine(n.text));
   }
   return result(answer, caught, falseNotes);
 }
@@ -321,21 +346,40 @@ export function scorePlace(answer, reply) {
   const caught = new Map();
   for (const row of String(reply).replace(/\r/g, '').split('\n')) {
     if (!/^\s*(?:[-*•]\s+|\d+[.)]\s+)?(?:\*\*)?(?:SIBLING|SAME JOB|OUTSIDE PR)\b/i.test(row)) continue;
+    // By its path only (review round: a base name alone, index.ts, matched any file of that name).
     for (const f of graded) {
-      const named = refsOf(row).some((r) => sameFile(r.file, f.file)) || row.toLowerCase().includes(slash(f.file).toLowerCase().split('/').pop());
+      const named = refsOf(row).some((r) => sameFile(r.file, f.file) && r.file.includes('/'));
       if (named && !caught.has(f.id)) caught.set(f.id, firstLine(row.trim()));
     }
   }
-  return result({ ...answer, faults: graded }, caught, []);
+  // The second look gives hints, not notes: its other lines are not counted either way (the report shows –).
+  return { ...result({ ...answer, faults: graded }, caught, []), falseNotes: null };
+}
+// The order the two notes go into the note check's brief: the true note first or second, by the case's name, so a
+// checker that always confirms K1 and refutes K2 is not right by position. prepare and score use the same order.
+export function noteOrder(name, notes) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  const list = Array.isArray(notes) ? notes : [];
+  return h % 2 ? [...list].reverse() : [...list];
 }
 // The note check: one true note and one false note. Kept = CONFIRMED or UNSURE; dropped = REFUTED. The true note
 // kept is a catch; the false note kept is a false note; the true note dropped is a miss.
-export function scoreNotes(answer, reply) {
-  const verdicts = new Map();
-  for (const m of String(reply).matchAll(/^\s*(?:[-*•]\s+)?(?:\*\*)?(CONFIRMED|REFUTED|UNSURE)(?:\*\*)?\s+(?:\*\*)?K\s?(\d+)/gim)) verdicts.set(Number(m[2]), m[1].toUpperCase());
+// The reply is read as note-check.mjs --record reads it (its own parseVerdicts and judge): a REFUTED with no file:line
+// evidence of 12 characters is UNSURE, the false note kept. A reply with no BRIEF line or no verdict at all is no
+// answer: nothing is caught (review round: an empty reply scored one catch).
+export function scoreNotes(answer, reply, name = '') {
+  const notes = noteOrder(name, answer.notes);
   const out = { caught: [], missed: [], falseNotes: [], caughtLines: [], graded: 1, note: '' };
-  answer.notes.forEach((n, i) => {
-    const v = verdicts.get(i + 1) || 'UNSURE';
+  const verdicts = /^\s*(?:[-*•]\s+)?(?:\*\*)?BRIEF\s+[0-9a-f]{6,}/im.test(String(reply)) ? parseVerdicts(String(reply)) : new Map();
+  if (!verdicts.size) {
+    out.missed.push('TRUE');
+    out.note = 'no answer: the reply has no BRIEF line or no verdict';
+    out.families = { [answer.family]: { caught: 0, total: 1 } };
+    return out;
+  }
+  notes.forEach((n, i) => {
+    const v = judge({ n: i + 1, kind: n.kind, text: n.text }, verdicts.get(i + 1)).verdict;
     if (n.true && v !== 'REFUTED') { out.caught.push('TRUE'); out.caughtLines.push(`K${i + 1} ${v} — ${firstLine(n.text)}`); }
     if (n.true && v === 'REFUTED') out.missed.push('TRUE');
     if (!n.true && v !== 'REFUTED') out.falseNotes.push(`K${i + 1} ${v} (kept a false note) — ${firstLine(n.text)}`);
@@ -360,7 +404,7 @@ export function score(c, reply, job) {
   if (!j) throw usage(`--job is one of ${Object.keys(JOBS).join(', ')}`);
   if (j.kind === 'notes') {
     if (!Array.isArray(c.answer.notes)) throw usage(`${c.name} has no notes for the note check`);
-    return scoreNotes(c.answer, reply);
+    return scoreNotes(c.answer, reply, c.name);
   }
   if (j.kind === 'place') return scorePlace(c.answer, reply);
   return scoreReview(c.answer, reply);
@@ -402,7 +446,8 @@ export function reportText(rows, { home } = {}) {
     });
     const minutes = mine.filter((r) => typeof r.minutes === 'number');
     const avg = minutes.length ? (minutes.reduce((s, r) => s + r.minutes, 0) / minutes.length).toFixed(1) : '–';
-    lines.push(`| ${JOBS[job].seat} · ${job} | ${seatModel(JOBS[job].seat, home)} | ${cells.join(' | ')} | ${mine.reduce((s, r) => s + r.falseNotes.length, 0)} | ${avg} |`);
+    const falseCount = mine.every((r) => r.falseNotes === null) ? '–' : mine.reduce((s, r) => s + (r.falseNotes || []).length, 0);
+    lines.push(`| ${JOBS[job].seat} · ${job} | ${seatModel(JOBS[job].seat, home)} | ${cells.join(' | ')} | ${falseCount} | ${avg} |`);
   }
   return lines.join('\n') + '\n';
 }
@@ -504,6 +549,8 @@ function main(argv) {
       if (p.length) { bad++; for (const x of p) process.stdout.write(`BAD ${n}: ${x}\n`); } else process.stdout.write(`OK ${n}\n`);
     }
     process.stdout.write(`CASES: ${names.length}, ${bad} bad\n`);
+    // Review round: a missing or empty case folder checked nothing; it is no pass.
+    if (!names.length) { process.stdout.write(`BAD: no case in ${slash(cases)}\n`); return 1; }
     return bad ? 1 : 0;
   }
   if (cmd === 'prepare') {
@@ -521,8 +568,9 @@ function main(argv) {
     if (o.minutes !== undefined) { const n = Number(o.minutes); if (!Number.isFinite(n) || n < 0) throw usage('--minutes is a number'); r.minutes = n; }
     for (const l of r.caughtLines) process.stdout.write(`CAUGHT ${l}\n`);
     for (const id of r.missed) process.stdout.write(`MISSED ${id}\n`);
-    for (const l of r.falseNotes) process.stdout.write(`FALSE ${l}\n`);
-    process.stdout.write(`SCORE ${o._[0]} · ${o.job}: ${r.caught.length} caught, ${r.missed.length} missed, ${r.falseNotes.length} false\n`);
+    for (const l of r.falseNotes || []) process.stdout.write(`FALSE ${l}\n`);
+    if (r.note) process.stdout.write(`NOTE ${r.note}\n`);
+    process.stdout.write(`SCORE ${o._[0]} · ${o.job}: ${r.caught.length} caught, ${r.missed.length} missed, ${r.falseNotes === null ? 'no' : r.falseNotes.length} false\n`);
     if (o.results) {
       const d = path.join(path.resolve(o.results), o.job);
       fs.mkdirSync(d, { recursive: true });

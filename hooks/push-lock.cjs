@@ -32,7 +32,8 @@
  * The transcripts searched: the newest .jsonl files (at most 12, changed in the last 7 days) under the session roots
  * that lib/session-root.cjs trusts (~/.claude/projects, the projects folder of CLAUDE_CONFIG_DIR, and Orca's
  * <APPDATA>/orca/claude-profiles/<id>/home/projects) whose text names this repository's folder. The guard is asked with
- * each in turn, newest first, until one allows; 150 s in all.
+ * the newest of them only (review round, 2026-11-25: an older session's pass must not outlive a newer session where
+ * the same tree failed); 150 s in all.
  */
 const fs = require('fs');
 const os = require('os');
@@ -77,7 +78,9 @@ function install(repo) {
   fs.mkdirSync(h.dir, { recursive: true });
   fs.writeFileSync(file, shim(), { mode: 0o755 });
   try { fs.chmodSync(file, 0o755); } catch (e) { /* Windows */ }
-  return { code: 0, line: `PUSH LOCK: installed in ${slash(file)} — every push from ${slash(h.top)} now needs the push guard's yes.` };
+  // The limits are said where the lock is made (review round): git skips every pre-push hook on `git push --no-verify`,
+  // and a core.hooksPath set later moves git away from this folder.
+  return { code: 0, line: `PUSH LOCK: installed in ${slash(file)} — every push from ${slash(h.top)} now needs the push guard's yes. Limits: \`git push --no-verify\` skips it, and a core.hooksPath set later turns it off.` };
 }
 function remove(repo) {
   const h = hooksDir(repo);
@@ -101,8 +104,7 @@ function pushLines(text) {
 // The push as the guard reads it: one git push command with every ref of this push. HEAD stands for the checked-out
 // commit (the guard verifies HEAD only); a delete is `:<ref>`; a remote ref the local commit does not contain is a
 // force push.
-function pushCommand(top, remote, lines) {
-  const head = git(top, ['rev-parse', 'HEAD']);
+function pushCommand(top, remote, lines, head = git(top, ['rev-parse', 'HEAD'])) {
   let force = false;
   const specs = lines.map((l) => {
     if (ZERO.test(l.localSha)) return ':' + l.remoteRef;
@@ -177,7 +179,10 @@ function reviewRecord(top) {
   }
   const snap = store.snapshot(top, store.defaultBase(top));
   if (!snap) return { ok: false, why: 'the commits being pushed cannot be listed (no push base, or changed files of these commits are not committed)' };
-  const hit = store.load().some((x) => x.repo === snap.repo && x.head === snap.head && Array.isArray(x.commits) && x.commits.join() === snap.commits.join());
+  // Each commit compared on its own (review round: a damaged entry "a,b" read as equal to ["a", "b"]).
+  const same = (x) => x.repo === snap.repo && x.head === snap.head && Array.isArray(x.commits) && x.commits.length === snap.commits.length &&
+    x.commits.every((c, i) => typeof c === 'string' && /^[0-9a-f]{40,64}$/i.test(c) && c.toLowerCase() === snap.commits[i]);
+  const hit = store.load().some(same);
   return hit ? { ok: true, why: '' } : { ok: false, why: `no review record holds these ${snap.commits.length} commit(s) (HEAD ${snap.head.slice(0, 12)})` };
 }
 
@@ -187,28 +192,32 @@ function check(top, remote, stdinText, env = process.env) {
   const lines = pushLines(stdinText);
   if (!lines.length) return { code: 0, line: '' };   // git sends no line when nothing is pushed
   if (lines.some((l) => !l.localRef || !/^[0-9a-f]{40,64}$/i.test(l.localSha || '') || !l.remoteRef)) return refuse('git sent a push line that cannot be read', NEXT(top));
-  const command = pushCommand(top, remote || 'origin', lines);
+  const headBefore = git(top, ['rev-parse', 'HEAD']);
+  const command = pushCommand(top, remote || 'origin', lines, headBefore);
   const lane = String(git(top, ['config', '--get', 'sanad.lane']) || '').toLowerCase();
   if (lane !== 'workflow' && !lines.every((l) => ZERO.test(l.localSha))) {
     let rec;
     try { rec = reviewRecord(top); } catch (e) { rec = { ok: false, why: 'the review record cannot be read' }; }
     if (!rec.ok) return refuse(rec.why, NEXT(top));
   }
-  const start = Date.now();
   const list = transcripts(top, env);
   if (!list.length) return refuse('no Claude session on this PC checked and reviewed this tree (a push from a Codex task or a terminal needs one)', NEXT(top));
-  let first = null;
-  for (const t of list) {
-    const left = BUDGET_MS - (Date.now() - start);
-    if (left <= 1000) break;
-    const a = askGuard(top, command, t, Math.min(left, 40000));
-    if (a.decision === 'allow') return { code: 0, line: `PUSH LOCK: the push guard allows this push (session ${path.basename(t, '.jsonl')}).` };
-    if (!first || (first.decision === 'deny' && a.decision === 'ask')) first = a;
+  // Review round (2026-11-25): the first of 12 sessions that allowed decided, so an older session's pass outlived a
+  // newer session where the same tree failed its check. Now the newest session that names this repository decides,
+  // as the guard in that session would.
+  const t = list[0];
+  const a = askGuard(top, command, t, BUDGET_MS);
+  if (a.decision === 'allow') {
+    // HEAD may move while the guard reads (review round): the command named git's commit as HEAD, and the guard
+    // judged HEAD, so HEAD must still be that commit.
+    if (!headBefore || git(top, ['rev-parse', 'HEAD']) !== headBefore) return refuse('HEAD moved while the push was checked', 'push again');
+    return { code: 0, line: `PUSH LOCK: the push guard allows this push (session ${path.basename(t, '.jsonl')}).` };
   }
-  if (!first) return refuse('the push guard could not be asked in time', 'push again');
-  const reason = first.reason.replace(/^Blocked by policy-guard:\s*|^policy-guard:\s*/, '').replace(/\s+/g, ' ').slice(0, 300);
-  return first.decision === 'ask'
-    ? refuse(`the push guard would ask the human first (${reason}), and a hook cannot ask`, 'push from a Claude session, where the guard asks you, or push the feature branch to its PR instead')
+  const reason = a.reason.replace(/^Blocked by policy-guard:\s*|^policy-guard:\s*/, '').replace(/\s+/g, ' ').slice(0, 300);
+  // A hook cannot ask, and a push from a Claude session runs this same hook (review round: the old way out did not
+  // work). Such a push is the owner's own decision, by hand.
+  return a.decision === 'ask'
+    ? refuse(`the push guard would ask the human first (${reason}), and a hook cannot ask`, 'this kind of push is the owner\'s own decision: the owner runs it by hand with `git push --no-verify …` after reading the reason (never an agent)')
     : refuse(`the push guard refuses it (${reason})`, NEXT(top));
 }
 
@@ -223,10 +232,15 @@ function main(argv) {
     return r.code;
   }
   if (cmd === 'check') {
-    let stdin = '';
-    try { stdin = fs.readFileSync(0, 'utf8'); } catch (e) { stdin = ''; }
     const top = git(process.cwd(), ['rev-parse', '--show-toplevel']);
     if (!top) { process.stderr.write('PUSH LOCK: refused — the repository of this push cannot be found. To make it pass: push from inside the repository.\n'); return 1; }
+    // Review round (2026-11-25): a read error was read as "nothing is pushed", and the push went out unchecked. Only a
+    // clean read counts; an error is a refusal (promise 6).
+    let stdin;
+    try { stdin = fs.readFileSync(0, 'utf8'); } catch (e) {
+      process.stderr.write(`PUSH LOCK: refused — git's list of what is pushed could not be read (${e && e.code || 'error'}). To make it pass: push again.\n`);
+      return 1;
+    }
     let r;
     try { r = check(top, rest[0], stdin); } catch (e) { r = { code: 1, line: `PUSH LOCK: refused — the check failed (${String(e && e.message || e).slice(0, 160)}). To make it pass: ${NEXT(top)}.` }; }
     if (r.line) process.stderr.write(r.line + '\n');
@@ -237,4 +251,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { MARK, install, remove, check, pushLines, pushCommand, transcripts, reviewRecord };
+module.exports = { MARK, install, remove, check, pushLines, pushCommand, transcripts, reviewRecord, main };
