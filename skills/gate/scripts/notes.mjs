@@ -79,18 +79,23 @@ function reportFileNotes(files, scan) {
   for (const file of files) {
     if (!isFile(file)) throw usage('no such report: ' + file);
     const text = readReport(file);
-    const read = scan.reportNotes(text);
+    const classes = [];
+    const read = scan.reportNotes(text, classes);
     const seat = path.basename(file);
     if (!read.some((n) => !n.none && /^(?:Blocker|Bug|Gap)$/.test(n.kind)) && FAIL_REPORT.test(text.replace(/\r/g, '').replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, ''))) {
       out.push({ kind: 'Blocker', text: 'the reviewer said FAIL but no finding line could be read: ask it to restate each finding as a line that starts with Blocker, Bug, Gap or Question', seat });
     }
     // A line that only says there is none keeps its number, closed (state 'none'), as the guards keep it.
-    for (const n of read) out.push({ kind: n.kind, text: n.text, seat, ...(n.asks ? { asks: true } : {}), ...(n.none ? { none: true } : {}) });
+    // A hygiene note is set aside (state 'hygiene'), by the scanner's own rule (hygieneNote).
+    for (const [i, n] of read.entries()) {
+      const hygiene = !n.none && typeof scan.hygieneNote === 'function' && scan.hygieneNote(n.kind, classes[i], n.text, n.asks);
+      out.push({ kind: n.kind, text: n.text, seat, ...(n.asks ? { asks: true } : {}), ...(n.none ? { none: true } : {}), ...(hygiene ? { hygiene: true } : {}) });
+    }
   }
   return out;
 }
 
-// Each note with number, seat, kind, state (open | fixed | user | refuted), answer and place, for this tool, the
+// Each note with number, seat, kind, state (open | fixed | user | refuted | none | hygiene), answer and place, for this tool, the
 // re-check brief and the printed steps. An array; it also carries: source ('session' | 'reports'), transcript,
 // groups, checked (false with no session log) and scan (the scanner's own result, for a session).
 // transcript: the session log; else repo: the newest session of that repository that holds the reports' notes
@@ -137,7 +142,7 @@ export function sessionNotes({ repo, transcript, reports = [], notes } = {}) {
     Object.assign(list, { source: 'session', transcript: found, checked: true, scan: r, searched });
   } else {
     if (!files.length) throw usage(repo !== undefined ? `no session log of ${slash(repo)} holds a review note: pass --transcript <file.jsonl>, or --reports <files> on a host with no session log` : 'the notes cannot be read: give --transcript <file.jsonl>, --repo <path> or --reports <file1,file2,...>');
-    list = reportFileNotes(files, scan).map((n, i) => ({ n: i + 1, seat: n.seat, kind: n.kind, state: n.none ? 'none' : 'open', answer: '', place: placeOf(n.text), text: oneLine(n.text), ...(n.asks ? { asks: true } : {}) }));
+    list = reportFileNotes(files, scan).map((n, i) => ({ n: i + 1, seat: n.seat, kind: n.kind, state: n.none ? 'none' : n.hygiene ? 'hygiene' : 'open', answer: '', place: placeOf(n.text), text: oneLine(n.text), ...(n.asks ? { asks: true } : {}) }));
     Object.assign(list, { source: 'reports', transcript: '', checked: false, scan: null });
   }
   list.groups = groupNotes(list);
@@ -363,6 +368,13 @@ function runList(o, out) {
     if (!group) { rows.push(noteRow(n)); continue; }
     rows.push(`${group.id} · ${group.place} · ${group.notes.map((x) => 'N' + x).join(', ')} (one place, ${group.notes.length} notes: each text is below and each number is answered)`);
     for (const m of shown.filter((x) => x.group === group.id)) { rows.push('  ' + noteRow(m)); done.add(m.n); }
+  }
+  // Hygiene notes (2026-11-25, owner): they hold nothing and are not fixed in the loop; the owner reads them at the
+  // end, one line each, with the fix cost the reviewer wrote. Shown with --open too: that list is the owner's.
+  const hygiene = list.filter((n) => n.state === 'hygiene');
+  if (hygiene.length) {
+    rows.push(`FOR THE OWNER'S END LIST — ${hygiene.length} hygiene note(s): they hold no stop and no push; each is fixed only if the owner says so`);
+    for (const n of hygiene) rows.push(`  N${n.n} · ${n.text}`);
   }
   out(rows.join('\n') + '\n');
   return 0;

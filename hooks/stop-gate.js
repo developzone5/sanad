@@ -29,7 +29,7 @@
  *    the same unverified change only warns (the claim lock still holds a pass claim or a push command). A new
  *    edit or a new failure blocks once again. No memory (it cannot be read or written): block as before.
  *  - a block reason of this file ends with its rule id in round brackets: (SG-UNVERIFIED), (SG-FAILED),
- *    (SG-PENDING), (SG-CLAIM). The guard report counts blocks by these ids. The open-notes list ends with its id
+ *    (SG-PENDING), (SG-CLAIM), (SG-GO-ON). The guard report counts blocks by these ids. The open-notes list ends with its id
  *    (SG-NOTES); review-notes.test.mjs pins the end of that text. It is known by its first words, and when it
  *    joins another block it comes after that block's id.
  *
@@ -49,6 +49,7 @@ var claimHeld = false; // this stop was held by the claim lock (see claimBlock)
 // Open reviewer notes (2026-11-12, rule 5): notesBlock turns this stop into a block (joined to any other
 // block reason); notesWarn is only a warning (the runaway guard, or an older host's repeated stop).
 var notesBlock = '', notesWarn = '';
+var goOnBlock = ''; // set below, after the scan: only note answers in the final text
 function markIdle() {
   // A stop the claim lock did not hold ends its 5-in-a-row count.
   if (!claimHeld) { try { notesBlockCount(() => 0, '#claim'); } catch (e) { /* no count to clear */ } }
@@ -60,10 +61,12 @@ function markIdle() {
 function out(obj) {
   if (notesBlock) obj = obj && obj.decision === 'block' ? { ...obj, reason: obj.reason + '\n\n' + notesBlock } : { decision: 'block', reason: notesBlock };
   else if (notesWarn && !(obj && obj.decision === 'block')) obj = { ...(obj || {}), systemMessage: (obj && obj.systemMessage ? obj.systemMessage + '\n' : '') + notesWarn };
+  // Only note answers in the final text: the stop is held once with the next step (see goOnBlock below).
+  if (goOnBlock && !(obj && obj.decision === 'block')) obj = { decision: 'block', reason: goOnBlock + (obj && obj.systemMessage ? '\n\n' + obj.systemMessage : '') };
   if (!obj || obj.decision !== 'block') markIdle();
   process.stdout.write(JSON.stringify(obj)); process.exit(0);
 }
-function allow() { if (notesBlock || notesWarn) out({}); markIdle(); process.exit(0); }
+function allow() { if (notesBlock || notesWarn || goOnBlock) out({}); markIdle(); process.exit(0); }
 
 function readStdin() {
   try {
@@ -142,6 +145,35 @@ try {
     notesBlockCount(() => 0);
   }
 } catch (e) { notesBlock = ''; notesWarn = ''; }
+
+// Go on after note answers (2026-11-25, owner; test 4 stopped three times). The NOTE lines go in a message with no
+// tool call, so that message ends the turn and the author waited for "go on". When the final text holds only note
+// answers the guards accept (transcript-scan.js noteAnswersOnly), a step is still due: the review re-check, the
+// verdict, the gate or the ship brief. This stop is then held once, with the way on. The gate does not run
+// sanad.mjs itself (14 s a run, the hook has 20 s): the author runs it and does the step it prints. One time per
+// stop: the gate keeps the text it held (a hash, key '#goon' in the count file of the notes lock) and never holds
+// the same text twice. It does not read stop_hook_active: that stays true for the rest of a turn after any block
+// (an SG-NOTES or SG-UNVERIFIED block before the answers), which would switch this rule off (review fix 2026-11-25).
+// With no state folder it falls back to stop_hook_active. A stop another rule blocks keeps that block alone.
+// Any error: no hold.
+function goOnFirstTime(text) {
+  const hash = require('crypto').createHash('sha1').update(String(text).replace(/\r/g, '').trim()).digest('hex');
+  let first = !input.stop_hook_active;
+  notesBlockCount((n) => { first = n !== goOnMark(hash); return goOnMark(hash); }, '#goon');
+  return first;
+}
+// The count file keeps whole numbers: the text's hash as one (its first 12 hex digits), never 0.
+function goOnMark(hash) { return parseInt(hash.slice(0, 12), 16) || 1; }
+try {
+  const last = typeof input.last_assistant_message === 'string' ? input.last_assistant_message : null;
+  if (last !== null && typeof scan.noteAnswersOnly === 'function' && scan.noteAnswersOnly(r, last) && goOnFirstTime(last)) {
+    const next = path.join(__dirname, '..', 'skills', 'gate', 'scripts', 'sanad.mjs').replace(/\\/g, '/');
+    const repo = String(input.cwd || r.reviewCwd || '').replace(/\\/g, '/');
+    goOnBlock = 'Your last message held only note answers, and the task is not done: do not wait for the user. ' +
+      'Run `node ' + next + ' next' + (repo ? ' --repo "' + repo + '"' : '') + '` and do the step it prints (the re-check after a fix, the verdict, the gate or the ship brief). ' +
+      'If it prints that nothing is due, send the ship brief. (SG-GO-ON)';
+  }
+} catch (e) { goOnBlock = ''; }
 
 // The claim lock (2026-11-18, stop gate promise, finding 3). The notes lock above holds a final text that claims a
 // pass while a reviewer note is open. The same final text, claiming a pass (`REVIEW: PASS` / `GATE: PASS`) or handing
