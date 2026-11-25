@@ -281,6 +281,20 @@ test('P20: a stop round below 2 is invalid; switch lines show scope and origin; 
   assert.match(text('after-push', {}), /review-brief\.mjs --drop-pins --notes/);
 });
 
+// 2026-11-25 (owner, batch x task 2): "It runs when the change touches a page, at the point where the builder would say ready."
+test('the ready step prints the browser check for a page side, and nothing for a server-only task', () => {
+  const ready = STEPS.find((s) => s.id === 'ready');
+  const page = ready.lines(ctx, facts({ switches: { remoteHost: 'pc2' } })).map((l) => l.text).join('\n');
+  assert.match(page, /the change touches a page: write \/n\/browser-plan\.json from the ticket \(pages, roles, languages/);
+  assert.match(page, /remote-web\.sh start prints its address/);
+  assert.match(page, /node \/g\/browser-check\.mjs run --notes \/n --repo '\/r\/my repo'   \(its table and screenshot paths go in the final report/);
+  assert.ok(page.search(/browser-check\.mjs run/) < page.search(/sanad\.mjs ready/), 'before the ready list');
+  const server = ready.lines({ ...ctx, sides: [{ name: 'api', cwd: '/r/my repo/api', test: 'dotnet test', server: true }] }, facts()).map((l) => l.text).join('\n');
+  assert.doesNotMatch(server, /browser-check/);
+  assert.match(ready.lines({ ...ctx, sides: [{ name: 'tests', test: 'node node_modules/vitest/vitest.mjs run' }] }, facts()).map((l) => l.text).join('\n'), /browser-check\.mjs run/, 'a vitest side holds pages');
+  assert.equal(ready.done(facts({ pushed: false })), false, 'the done test is unchanged: nothing reads the browser result');
+});
+
 test('the gate step shows verdict --gate with every evidence flag', () => {
   const gate = STEPS.find((s) => s.id === 'gate');
   const out = gate.lines(ctx, facts()).map((l) => l.text).join('\n');
