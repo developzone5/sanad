@@ -29,17 +29,38 @@ test('the security checklist entrypoint resolves to the canonical checklist', { 
   assert.ok(entry.includes('C:/Users/Asus/.claude/skills/gate/security-checklist.md'));
   assert.match(fs.readFileSync(path.join(canonicalRoot, 'gate/security-checklist.md'), 'utf8'), /Access control/);
 });
-test('pinned agent types exist with their model, xhigh effort and no write tools', () => {
+// 2026-11-25 (owner): effort by role. The second look, the note check, the re-check after a fix and the practical
+// experts run at high; the fresh eyes and risk reviewer, the whole diff of a Big task, the deep expert seats and the
+// boss stay xhigh. Each role that moved shares no agent file with a role that stays.
+test('pinned agent types exist with their model, their role effort and no write tools', () => {
   const agentRoot = candidate ? path.join(staged, 'claude/agents') : path.join(os.homedir(), '.claude/agents');
-  for (const [name, model] of [['independent-reviewer', 'opus'], ['braintrust-expert', 'opus'], ['routing-boss', 'fable'], ['routine-reviewer', 'sonnet'], ['braintrust-expert-sonnet', 'sonnet']]) {
+  for (const [name, model, effort] of [['independent-reviewer', 'opus', 'xhigh'], ['braintrust-expert', 'opus', 'xhigh'], ['routing-boss', 'fable', 'xhigh'], ['routine-reviewer', 'sonnet', 'xhigh'],
+    ['braintrust-expert-sonnet', 'sonnet', 'high'], ['recheck-reviewer', 'sonnet', 'high'], ['second-look', 'opus', 'high'], ['note-checker', 'opus', 'high']]) {
     const text = fs.readFileSync(path.join(agentRoot, name + '.md'), 'utf8');
     const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)[1];
     assert.match(front, new RegExp('^name: ' + name + '$', 'm'), name);
     assert.match(front, /^description: \S/m, name);
     assert.match(front, new RegExp('^model: ' + model + '$', 'm'), name);
-    assert.match(front, /^effort: xhigh$/m, name);
+    assert.match(front, new RegExp('^effort: ' + effort + '$', 'm'), name);
+    // The description names the same effort as the setting, so the agent list does not say the old one.
+    assert.doesNotMatch(front.match(/^description: .*$/m)[0], new RegExp('\\bat (?!' + effort + '\\b)\\w+ effort\\b'), name);
     assert.match(front, /^disallowedTools: .*\bWrite\b.*\bEdit\b/m, name);
   }
+});
+
+// The tools that print a launch line name the agent file of their role, so the role runs at its own effort.
+test('the second look, the note check and the re-check launch their own agent files', async () => {
+  const scripts = path.join(canonicalRoot, 'gate/scripts');
+  const url = (f) => require('node:url').pathToFileURL(path.join(scripts, f)).href;
+  const siblings = await import(url('siblings.mjs'));
+  const noteCheck = await import(url('note-check.mjs'));
+  const brief = await import(url('review-brief.mjs'));
+  assert.match(siblings.launchLine('C:/n/siblings-brief.md'), /^LAUNCH: Agent second-look · prompt: Seat: Sibling check/);
+  assert.match(noteCheck.launchLine('C:/n/note-check-brief.md'), /^LAUNCH: Agent note-checker · prompt: Seat: Note check/);
+  assert.match(noteCheck.launchLine('C:/n/note-check-brief.md', false), /^LAUNCH: Agent note-checker · /);
+  assert.match(brief.buildRecheckLaunch({ brief: 'C:/n/b.md', repo: 'C:/r', round: 2, risk: {} }), /Agent recheck-reviewer/);
+  const bigWhole = brief.buildLaunch({ brief: 'C:/n/b.md', fresh: 'C:/n/f.md', repo: 'C:/r', branch: 'x', size: 'big' }).split('\n').find((l) => l.startsWith('## Whole diff (Claude)'));
+  assert.equal(bigWhole, '## Whole diff (Claude) — Agent routine-reviewer, run_in_background');
 });
 // 2026-11-12: the loop is one short page. It had grown to 63 KB in 18 dated layers with rules that
 // contradicted each other, and rules written there were skipped. These lines keep it one page: the six

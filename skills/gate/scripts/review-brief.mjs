@@ -12,9 +12,9 @@
 //   launch.md      the exact launch lines for the designer and the reviewers, next to <out>: four
 //                  reviewers on a big change (or a size not known): the Claude fresh eyes, the risk files
 //                  with their trace list, the whole diff and the Codex fresh eyes (the risk files 2026-11-15);
-//                  on a tiny, small or medium change only the Claude fresh eyes (tiny and small 2026-11-11;
-//                  medium 2026-11-12, user-approved sizes). A medium change keeps the full brief, and its one
-//                  review gets the checklist sentence.
+//                  on a tiny or small change only the Claude fresh eyes (2026-11-11); on a medium change the
+//                  task's fresh eyes and the other engine's fresh eyes, together (2026-11-25, owner). A medium
+//                  change keeps the full brief, and its own fresh eyes gets the checklist sentence.
 //                  2026-11-17 (audit S4): on a big change the Test designer runs before code and its cases
 //                  become the tests, so its line is left out once its report is saved in the notes folder (or
 //                  with --designer-done); launched again after the proof, it repeated the planning.
@@ -525,12 +525,22 @@ function knownFresh({ touched = [], other = [], decided = [], decisions = [], fi
 // checks each Check line's test mechanically, the job the small whole-diff pass had. 2026-11-12 (user-approved
 // sizes: Small and Medium get one fresh-eyes review, only Big the full round): a medium change gets the same
 // one review, with the full brief and the checklist sentence the whole-diff pass carried.
+// 2026-11-25 (owner): a medium change also gets the other engine's fresh eyes, launched together with the task's own
+// fresh eyes. Small keeps one review; Big keeps the full round.
 const WHOLE_DIFF_FULL = 'Fill the coverage checklist lines that apply (CLIENT STATE, NEW BLOCKS, FAILURES / LOCALES, USERS FOUND BY SEARCH, TESTS CAN FAIL).';
 const ONE_REVIEW = {
   tiny: '(A tiny or small change: only this one review, user rule 2026-11-11.)',
   small: '(A tiny or small change: only this one review, user rule 2026-11-11.)',
-  medium: '(A medium change: one review, with the full brief; user-approved sizes 2026-11-12.)',
 };
+const TWO_REVIEWS = {
+  medium: '(A medium change: fresh eyes with the full brief and the other engine, launched together; owner decision 2026-11-25.)',
+};
+// The seats of a full round, by size: what --pin saves and what launch.md holds.
+export function reviewSeats(size) {
+  if (ONE_REVIEW[size]) return ['fresh eyes'];
+  if (TWO_REVIEWS[size]) return ['fresh eyes', 'other engine'];
+  return ['fresh eyes', 'risk files', 'whole diff', 'other engine'];
+}
 
 // The risk-files reviewer's trace list (2026-11-15: loop.md and CLAUDE.md give a Big change a risk reviewer on the
 // risk files with a trace list, and launch.md had no such line, so its prompt was typed by hand). One fixed
@@ -678,29 +688,33 @@ function codexRun({ repo, out, log, prompt, role, codexHome }) {
   return ['```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shq(out)}"${flag} "${shq(prompt)}" < /dev/null > "${shq(log)}" 2>&1`, '```', '', ...note];
 }
 function buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone, codexHome }) {
-  const one = ONE_REVIEW[size];
+  const one = ONE_REVIEW[size], two = TWO_REVIEWS[size];
   const dir = path.posix.dirname(String(brief).replace(/\\/g, '/'));
   // The designer's report is saved under the name designerReport() accepts, so its line leaves after it ran (finding 5).
   const run = (name, prompt) => codexRun({ repo, out: `${dir}/${name === 'designer' ? DESIGNER_REPORTS[0] : `codex-${name}.md`}`, log: `${dir}/codex-${name}.log`, prompt, role: CODEX_ROLE[name], codexHome });
   const tail = 'Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.';
+  // The other engine: the Claude fresh eyes. The Agent tool is Claude Code's; a Codex host runs a shell line (finding 4).
+  // `claude -p` prints the report on stdout; plan mode keeps it read-only, and the independent-reviewer agent file bars
+  // Write and Edit.
+  const claudeFresh = [
+    '## Fresh eyes (Claude) — Bash, run_in_background (claude -p)', '',
+    '```bash', `cd "${shq(repo)}" && claude -p --agent independent-reviewer --permission-mode plan "${shq(`You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shq(`${dir}/claude-fresh.md`)}" 2> "${shq(`${dir}/claude-fresh.log`)}"`, '```', '',
+  ];
   return [
     '# Launch lines (copy as they are)', '',
     'Engine: Codex — the reviewers below are Codex launches (codex exec, read-only, xhigh)' + (one ? '.' : '; Claude is the one other engine.'), '',
     ...(sizeNote ? [sizeNote, ''] : []),
-    ...(one ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Bash, run_in_background (Codex sanad-practical-expert)', '',
+    ...(one || two ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Bash, run_in_background (Codex sanad-practical-expert)', '',
       ...run('designer', `Seat: Test designer. ${roleSentence(CODEX_ROLE.designer)} Read your role guide too: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. ${areaLine(changed)} Deliver per your guide.`),
       DESIGNER_AGAIN, '']),
     '## Fresh eyes (Codex) — Bash, run_in_background', '',
     ...run('fresh', `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.fresh)} ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}${tail}`),
-    ...(one ? [one, ''] : [
+    ...(one ? [one, ''] : two ? [...claudeFresh, two, ''] : [
       '## Risk files (Codex) — Bash, run_in_background', '',
       ...run('risk', [`You are the independent reviewer — risk files pass (Pass A). Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.risk)} Review the risk files below with their callers and writers: answer each trace question for each file by following real inputs through the changed code. ${SEAT_QUESTION.risk} ${tail}`, ...riskBody({ facts, changed })].join('\n')),
       '## Whole diff (Codex) — Bash, run_in_background', '',
       ...run('whole', `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.whole)} ${WHOLE_DIFF_FULL} ${SEAT_QUESTION.whole} ${tail}`),
-      // The Agent tool is Claude Code's; a Codex host runs a shell line (finding 4). `claude -p` prints the report on
-      // stdout; plan mode keeps it read-only, and the independent-reviewer agent file bars Write and Edit.
-      '## Fresh eyes (Claude) — Bash, run_in_background (claude -p)', '',
-      '```bash', `cd "${shq(repo)}" && claude -p --agent independent-reviewer --permission-mode plan "${shq(`You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shq(`${dir}/claude-fresh.md`)}" 2> "${shq(`${dir}/claude-fresh.log`)}"`, '```', '',
+      ...claudeFresh,
     ]),
   ].join('\n');
 }
@@ -709,26 +723,29 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
   if (!ENGINES.includes(engine)) throw new Error('--engine must be one of ' + ENGINES.join(', '));
   if (engine === 'codex') return buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone, codexHome });
   const freshModel = codexModel(CODEX_ROLE.fresh, codexHome);
-  const one = ONE_REVIEW[size];
+  const one = ONE_REVIEW[size], two = TWO_REVIEWS[size];
+  // -m comes from the fresh-eyes role's settings file (codexRoleModel), read when the plan is written.
+  // 2026-11-18 (audit finding 5): every value goes through shq, as in the Codex plan. The folder is escaped first and
+  // joined after, so an ordinary path keeps the separators it had.
+  const codexFresh = [
+    '## Fresh eyes (Codex) — Bash, run_in_background', '',
+    '```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shqPath(path.join(path.dirname(brief), 'codex-review.md'))}"${freshModel.flag} "${shq(`You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shqPath(path.join(path.dirname(brief), 'codex.log'))}" 2>&1`, '```', '', ...freshModel.note,
+  ];
   return [
     '# Launch lines (copy as they are)', '',
     'Engine: Claude — the reviewers below are Claude agents' + (one ? '.' : '; Codex is the one other engine.'), '',
     ...(sizeNote ? [sizeNote, ''] : []),
     // The Test designer is a Big-task seat (loop-rare-cases.md, the expert panel); a tiny, small or medium change
     // listed it too, and the line looked like a step to run (2026-11-13).
-    ...(one ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
+    ...(one || two ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
     `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. ${areaLine(changed)} Deliver per your guide.`, '', DESIGNER_AGAIN, '']),
     '## Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', '',
     `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}Read-only: no builds, no tests, no edits.`, '',
-    ...(one ? [one, ''] : [
+    ...(one ? [one, ''] : two ? [...codexFresh, two, ''] : [
       ...riskLaunch({ brief, facts, changed }),
       '## Whole diff (Claude) — Agent routine-reviewer, run_in_background', '',
       `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${WHOLE_DIFF_FULL} ${SEAT_QUESTION.whole} Read-only: no builds, no tests, no edits.`, '',
-      // -m comes from the fresh-eyes role's settings file (codexRoleModel), read when the plan is written.
-      '## Fresh eyes (Codex) — Bash, run_in_background', '',
-      // 2026-11-18 (audit finding 5): every value goes through shq, as in the Codex plan. The folder is escaped first and
-      // joined after, so an ordinary path keeps the separators it had.
-      '```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shqPath(path.join(path.dirname(brief), 'codex-review.md'))}"${freshModel.flag} "${shq(`You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shqPath(path.join(path.dirname(brief), 'codex.log'))}" 2>&1`, '```', '', ...freshModel.note,
+      ...codexFresh,
     ]),
   ].join('\n');
 }
@@ -930,7 +947,7 @@ export function buildRecheckLaunch({ brief, repo, round, engine = 'claude', risk
     ...(engine === 'codex'
       ? ['## Re-check, whole diff (Codex) — Bash, run_in_background', '', ...codex('', `${whole} ${roleSentence(CODEX_ROLE.whole)}${tail}`, CODEX_ROLE.whole),
         ...(withRisk ? ['## Re-check, risk files (Codex) — Bash, run_in_background', '', ...codex('-risk', [`${riskPrompt[0]} ${roleSentence(CODEX_ROLE.risk)}${tail}`, ...riskPrompt.slice(1)].join('\n'), CODEX_ROLE.risk)] : [])]
-      : ['## Re-check, whole diff (Claude) — Agent routine-reviewer, run_in_background', '', whole, '',
+      : ['## Re-check, whole diff (Claude) — Agent recheck-reviewer, run_in_background', '', whole, '',
         ...(withRisk ? ['## Re-check, risk files (Claude) — Agent independent-reviewer, run_in_background', '', ...riskPrompt, ''] : [])]),
   ].join('\n');
 }
@@ -1178,9 +1195,10 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     // reviewers read. When it cannot be made, the pinned diff stays and one NOTE line says so.
     let pinLines = '', copy = '';
     if (pinning) {
-      const one = Boolean(ONE_REVIEW[chosen.size]);
+      // The read-only copy is for Big only (the round the author may fix during); a medium round has two seats and no copy.
+      const one = Boolean(ONE_REVIEW[chosen.size] || TWO_REVIEWS[chosen.size]);
       await guardRound('full');
-      const pin = { kind: 'full', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: one ? ['fresh eyes'] : ['fresh eyes', 'risk files', 'whole diff', 'other engine'], frozen: '', signals: signalKeys, noteCount: await noteCount() };
+      const pin = { kind: 'full', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: reviewSeats(chosen.size), frozen: '', signals: signalKeys, noteCount: await noteCount() };
       let saved = addPin(notesDir, pin);
       pinLines = keepPin(saved.round);
       if (!one && !o['no-frozen']) {

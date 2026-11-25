@@ -219,7 +219,7 @@ test('a K brief is launched with a prompt the guards do not count as the note ch
   const session = write([...reviewerRun('rev1', REPORT_1, 1), ...checkerRun('chk', 'BRIEF 12345678\nREFUTED K2 — tests/list.test.ts:40 renders the empty page already', 8, prompt)]);
   assert.deepEqual(scan.scanTranscript(session).reviewRefutable, []);
   const g = run(['--brief', '--notes', f.notes, '--reports', f.report, '--transcript', f.transcript]);
-  assert.match(g.stdout, /^LAUNCH: Agent braintrust-expert · prompt: Seat: Note check, before any fix\./m);
+  assert.match(g.stdout, /^LAUNCH: Agent note-checker · prompt: Seat: Note check, before any fix\./m);
 });
 
 // Every answer shape: the printed line appears exactly when the guards, given that same answer, hold note 2 as refutable.

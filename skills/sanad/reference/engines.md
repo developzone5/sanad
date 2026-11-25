@@ -17,9 +17,12 @@ These assignments control all Sanad roles. Claude retains its existing setup. **
 | Main executor | existing Claude session; Opus (newest) for behavior code | current Codex-family session / xhigh; a new launch runs on the default of `~/.codex/config.toml` |
 | Boss / extra gap reviewer | `routing-boss`: Fable (newest) / xhigh | `sanad-boss`: Astra / xhigh |
 | Pass A, risk files | `independent-reviewer`: Opus (newest) / xhigh | `sanad-risk-reviewer`: Astra / xhigh |
-| Pass B, whole diff and re-check | `routine-reviewer`: Sonnet (newest) / xhigh | `sanad-reviewer`: Sol / xhigh |
+| Pass B, whole diff (Big) | `routine-reviewer`: Sonnet (newest) / xhigh | `sanad-reviewer`: Sol / xhigh |
+| Re-check after a fix | `recheck-reviewer`: Sonnet (newest) / high | `sanad-reviewer`: Sol / xhigh |
+| Second look (`siblings.mjs`) | `second-look`: Opus (newest) / high | `sanad-expert`: Astra / xhigh |
+| Note check (`note-check.mjs`) | `note-checker`: Opus (newest) / high | `sanad-expert`: Astra / xhigh |
 | Deep-risk expert (Architect, Skeptic, Database, Security, Authenticity, Client state, added domain) | `braintrust-expert`: Opus (newest) / xhigh | `sanad-expert`: Astra / xhigh |
-| Practical expert (Pragmatist, Performance, Product, Test designer) | `braintrust-expert-sonnet`: Sonnet (newest) / xhigh | `sanad-practical-expert`: Sol / xhigh |
+| Practical expert (Pragmatist, Performance, Product, Test designer) | `braintrust-expert-sonnet`: Sonnet (newest) / high | `sanad-practical-expert`: Sol / xhigh |
 | Mechanical worker / test-only items / narrow fact or evidence chore | `sonnet-worker`: Sonnet (newest) / medium | `sanad-worker`: Sol / xhigh |
 
 The Codex column names a model family, never a version (2026-11-19): the exact model of each role is the `model` line of its `~/.codex/agents/<role>.toml`, and the default for a new session is the `model` line of `~/.codex/config.toml`. A new Codex model is an edit of those settings and nothing else.

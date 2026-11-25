@@ -1123,7 +1123,7 @@ const REVIEW_RE = /^REVIEW:\s*(PASS|FAIL)\b/gm;
 const REVIEWER_PROMPT = /^\s*You are the independent reviewer\b/i;
 // The expert seats (2026-11-16): launched without that marker, a run of one is an expert run. Its report gives
 // only its questions for the user as notes, and it never counts as a reviewer run.
-const EXPERT_AGENTS = new Set(['braintrust-expert', 'braintrust-expert-sonnet', 'routing-boss']);
+const EXPERT_AGENTS = new Set(['braintrust-expert', 'braintrust-expert-sonnet', 'routing-boss', 'second-look', 'note-checker']);
 // The seat of a run (2026-11-17, review score): several reviewers run per task and nobody measured which
 // one earns its time. Each note keeps the seat that wrote it (res.reviewNoteSeats, same index as the note),
 // so skills/gate/scripts/review-score.mjs can count, per seat, the notes that led to a change.

@@ -10,7 +10,7 @@
 #                        code         writes or fixes code              opus
 #                        risk-review  risk files / fresh whole-PR review opus
 #                        review       whole-diff review                 sonnet
-#                        recheck      re-check of changed lines         sonnet
+#                        recheck      re-check of changed lines         sonnet, high effort
 #                        chore        tests, logs, data, design compare sonnet
 #                        tests        adds tests, changes no product code sonnet
 #                        judge       final judgement over reports      fable
@@ -36,6 +36,10 @@ case "$ENGINE" in
   codex) echo "REFUSED: remote launches support Claude tasks only; this task's engine is Codex, so nothing was started"; exit 2 ;;
   *) echo "REFUSED: unknown engine '$ENGINE' (claude)"; exit 2 ;;
 esac
+# 2026-11-25 (owner, effort by role): the re-check runs at high, as its agent file does (recheck-reviewer); every other
+# role stays xhigh.
+EFFORT=xhigh
+[ "$ROLE" = recheck ] && EFFORT=high
 case "$ROLE" in
   code | risk-review) MODEL_ID=opus; MODEL_NAME='Opus' ;;
   review | recheck | chore | tests) MODEL_ID=sonnet; MODEL_NAME='Sonnet' ;;
@@ -77,7 +81,7 @@ PART=""
 [ "$ROLE" = tests ] && PART=" You add tests for code that already works. Change no product code. A new test that fails may be a real bug: do not fix it and do not commit it; write it and its failure in your report."
 PROMPT="Engine: Claude (already chosen; do not ask). Read the brief at $BRIEF and follow it exactly.${NOTE:+ $NOTE}${PART} Nobody can answer a permission prompt here, so never run a command that asks for one: no package or tool installs, no rm -rf (use a new folder name instead), no git checkout -- / restore / reset / clean / stash on changed files (commit or copy instead), no low-level git commands or git environment settings (update-index, read-tree, commit-tree, GIT_INDEX_FILE). To prove a test against broken code, use red-proof.mjs --break. Do not push."
 OUT="$(timeout 120 orca agent launch --environment "$ENV" --agent claude --worktree "path:$WT" \
-  --model "$MODEL_ID" --effort xhigh --prompt "$PROMPT" 2>&1)" || {
+  --model "$MODEL_ID" --effort "$EFFORT" --prompt "$PROMPT" 2>&1)" || {
   echo "LAUNCH FAILED:"; echo "$OUT" | tail -5; exit 1
 }
 HANDLE="$(echo "$OUT" | sed -n 's/^handle: *//p' | head -1 | tr -d '\r')"
@@ -93,9 +97,9 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     BANNER="$(echo "$SCREEN" | grep -o -m1 '[A-Z][a-z]* [0-9.]* with [a-z]* effort' || true)"
     # Any version of the role's family is right (the alias picks the newest); only the family and effort are checked.
     case "$BANNER" in
-      "$MODEL_NAME "[0-9]*" with xhigh effort") echo "LAUNCHED $HANDLE (engine $ENGINE, $ROLE: $BANNER)"; exit 0 ;;
-      "") echo "LAUNCHED $HANDLE (engine $ENGINE, $ROLE: banner not seen; expected $MODEL_NAME xhigh)"; exit 0 ;;
-      *) echo "MODEL MISMATCH $HANDLE (role $ROLE wants $MODEL_NAME xhigh, banner says: $BANNER)"; exit 5 ;;
+      "$MODEL_NAME "[0-9]*" with $EFFORT effort") echo "LAUNCHED $HANDLE (engine $ENGINE, $ROLE: $BANNER)"; exit 0 ;;
+      "") echo "LAUNCHED $HANDLE (engine $ENGINE, $ROLE: banner not seen; expected $MODEL_NAME $EFFORT)"; exit 0 ;;
+      *) echo "MODEL MISMATCH $HANDLE (role $ROLE wants $MODEL_NAME $EFFORT, banner says: $BANNER)"; exit 5 ;;
     esac
   fi
 done

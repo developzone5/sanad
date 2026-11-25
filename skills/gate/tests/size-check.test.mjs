@@ -243,10 +243,10 @@ test('a query change is medium with a database seat only where a database is use
   const q = size(change({ 'Api/S.cs': svc }, { 'Api/S.cs': svc.replace('_context.Items.ToList()', '_context.Items.Where(i => i.Active).OrderBy(i => i.Id).ToList()') }));
   assert.equal(q.size, 'medium');
   // 2026-11-12 (three sizes, user-approved): Medium gets ONE review with the full brief; the boss and the
-  // full round are for Big.
-  assert.equal(q.roles[0], 'one review: fresh eyes, full brief');
+  // full round are for Big. 2026-11-25 (owner): Medium adds the other engine's review, launched together.
+  assert.equal(q.roles[0], 'two reviews together: fresh eyes (full brief) and the other engine');
   assert.match(q.roles.join(' '), /Database expert/);
-  assert.doesNotMatch(q.roles.join(' '), /boss|other engine|whole-diff/, 'the boss and the full round are for big');
+  assert.doesNotMatch(q.roles.join(' '), /boss|whole-diff|risk reviewer/, 'the boss and the full round are for big');
   const mem = 'public class M {\n  public int Get(List<int> xs) { return xs.Count; }\n}\n';
   assert.equal(size(change({ 'Api/M.cs': mem }, { 'Api/M.cs': mem.replace('xs.Count', 'xs.Where(x => x > 0).Count()') })).size, 'small', 'in-memory LINQ is not a query');
 });

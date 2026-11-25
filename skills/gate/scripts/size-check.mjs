@@ -1494,13 +1494,14 @@ export function decide(found, callerRows, files, { plan = false } = {}) {
 // The reviewers each size gets are the ones review-brief.mjs writes into launch.md: a tiny or small change
 // gets ONE review, the Claude fresh eyes (user rule 2026-11-11). 2026-11-12: these lines still said "no
 // reviewer" for tiny and three reviewers for small. 2026-11-12 (three sizes, user-approved): Medium also
-// gets one review, with the full brief; the boss, the panel and the full round are for Big.
+// gets one review, with the full brief; the boss, the panel and the full round are for Big. 2026-11-25 (owner):
+// Medium adds the other engine's review, launched together with the fresh eyes.
 export function roles(size, found) {
   const seats = [...new Set([...found.keys()].map(k => SIGNALS[k].seat))];
   // 2026-11-18: no engine seat is named (a task runs on Claude or on Codex): "fresh eyes", "the other engine".
   const reviewers = 'reviewers: whole-diff, fresh eyes, the other engine';
   if (size === 'tiny' || size === 'small') return ['one review: fresh eyes', ...seats.map(s => '+ ' + s)];
-  if (size === 'medium') return ['one review: fresh eyes, full brief', ...seats.map(s => '+ ' + s)];
+  if (size === 'medium') return ['two reviews together: fresh eyes (full brief) and the other engine', ...seats.map(s => '+ ' + s)];
   return ['boss + expert panel before code (Pragmatist + a seat per open question)', ...seats.map(s => '+ ' + s), 'risk reviewer on the risk files', reviewers];
 }
 

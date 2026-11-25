@@ -72,9 +72,12 @@ Follow the selected task engine in [engines.md](engines.md). Every Codex role us
 |---|---|---|
 | `routing-boss` | Fable (newest) / xhigh, read-only | route uncertain or sensitive work; review expert reports; final design call |
 | `independent-reviewer` | Opus (newest) / xhigh, read-only | Pass A review of risk files with a trace list |
-| `routine-reviewer` | Sonnet (newest) / xhigh, read-only | Pass B whole-diff review and every re-check after fixes |
+| `routine-reviewer` | Sonnet (newest) / xhigh, read-only | Pass B whole-diff review of a Big task |
+| `recheck-reviewer` | Sonnet (newest) / high, read-only | every re-check after fixes |
+| `second-look` | Opus (newest) / high, read-only | the second look before code (`siblings.mjs`) |
+| `note-checker` | Opus (newest) / high, read-only | the note check (`note-check.mjs`) |
 | `braintrust-expert` | Opus (newest) / xhigh, read-only | deep-risk seats (Architect, Skeptic, Database, Security, Authenticity, added domain) |
-| `braintrust-expert-sonnet` | Sonnet (newest) / xhigh, read-only | practical seats (Pragmatist, Performance, Product) |
+| `braintrust-expert-sonnet` | Sonnet (newest) / high, read-only | practical seats (Pragmatist, Performance, Product) |
 | `sonnet-worker` | Sonnet (newest) / medium | `direct`-route mechanical edits; test-only items; evidence chores (run named tests, condense output, read logs) |
 
 The Agent tool sets a model but not effort; the pinned agent files carry the effort. Verify actual run metadata; a settings edit does not switch a running session. Spawn a helper only when delegation saves work, never one per command; use direct local reads for small lookups.

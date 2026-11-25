@@ -228,15 +228,20 @@ test('the larger of the routed and the measured size is used, and a difference i
 
 // 2026-11-12 (user-approved sizes): Small and Medium get one fresh-eyes review; only Big gets the full round.
 // The focused budget stays for tiny and small: a medium change keeps the full brief and the checklist sentence.
-test('a medium change gets one review, the Claude fresh eyes with the full brief; a big change keeps every launch line', () => {
+// 2026-11-25 (owner): a medium change also gets the other engine's fresh eyes, launched together.
+test('a medium change gets the Claude fresh eyes with the full brief and the Codex fresh eyes; a big change keeps every launch line', () => {
   const args = { brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b' };
   const reviewers = text => text.split('\n').filter(l => l.startsWith('You are the independent reviewer'));
+  const headings = text => text.split(/^## /m).slice(1).map(s => s.split('\n')[0]);
   const medium = buildLaunch({ ...args, size: 'medium' });
-  assert.match(medium, /^\(A medium change: one review, with the full brief; user-approved sizes 2026-11-12\.\)$/m);
+  assert.match(medium, /^\(A medium change: fresh eyes with the full brief and the other engine, launched together; owner decision 2026-11-25\.\)$/m);
   assert.equal(reviewers(medium).length, 1);
   assert.match(reviewers(medium)[0], /FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
-  assert.match(reviewers(medium)[0], /Fill the coverage checklist lines that apply/, 'the one review fills the checklist the whole-diff pass filled');
-  assert.doesNotMatch(medium, /whole-diff pass|codex exec|A tiny or small change/);
+  assert.match(reviewers(medium)[0], /Fill the coverage checklist lines that apply/, 'the Claude fresh eyes fills the checklist the whole-diff pass filled');
+  assert.deepEqual(headings(medium), ['Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', 'Fresh eyes (Codex) — Bash, run_in_background'], 'two seats in one plan: launched together');
+  assert.equal((medium.match(/codex exec -s read-only/g) || []).length, 1, 'one other-engine review');
+  assert.match(medium, /^Engine: Claude — the reviewers below are Claude agents; Codex is the one other engine\.$/m);
+  assert.doesNotMatch(medium, /whole-diff pass|risk files pass|A tiny or small change/);
   assert.doesNotMatch(medium, /Test designer/, 'the designer is a Big-task seat (2026-11-13)');
   assert.match(buildLaunch({ ...args, size: 'big' }), /## Test designer/, 'a big change keeps the designer line');
   const mediumFacts = { ...facts, size: 'SIZE: medium (diff) — the shared API contract (src/api/x.ts)' };
@@ -350,7 +355,7 @@ test('the command gives a big change its risk-files line from the size check, as
   assert.match(launch, /Area: the changed files Api\/Controllers\/FilesController\.cs\. Deliver per your guide\./);
 });
 
-test('the command gives a change measured medium one review, with the full brief', () => {
+test('the command gives a change measured medium the fresh eyes with the full brief, and the other engine', () => {
   const repo = fs.mkdtempSync(path.join(root, 'repo-'));
   const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   git('init', '-q', '-b', 'main'); git('config', 'user.name', 'F'); git('config', 'user.email', 'f@example.invalid');
@@ -366,9 +371,10 @@ test('the command gives a change measured medium one review, with the full brief
   assert.equal(r.status, 0, r.stderr);
   assert.match(fs.readFileSync(out, 'utf8'), /^SIZE: medium /m, 'the fixture measures medium');
   const launch = fs.readFileSync(path.join(notes, 'launch.md'), 'utf8');
-  assert.match(launch, /A medium change: one review, with the full brief/);
+  assert.match(launch, /A medium change: fresh eyes with the full brief and the other engine, launched together/);
   assert.equal(launch.split('\n').filter(l => l.startsWith('You are the independent reviewer')).length, 1);
-  assert.doesNotMatch(launch, /codex exec/);
+  assert.equal((launch.match(/codex exec -s read-only/g) || []).length, 1, 'the other engine reviews a medium change too');
+  assert.doesNotMatch(launch, /whole-diff pass|risk files pass/);
   for (const name of ['brief.md', 'brief-fresh.md']) assert.doesNotMatch(fs.readFileSync(path.join(notes, name), 'utf8'), /## Focused brief/, name);
 });
 
@@ -642,11 +648,12 @@ const stripEngine = t => t.replace(/^Engine: [^\n]*\n\n/m, '');
 
 // MUST NOT CHANGE (fails only on the engine line on the old code): the Claude plan is byte for byte today's.
 test('the Claude plan is unchanged except its engine line', () => {
-  const gold = { small: 'e63e00d983b7d592c25f66b326c13151bef8daebcc6dd02d892f86b4e8d90caf', medium: 'f14462e6112ef3469d1bab02d8f4c97d456fd358f5f43662e9bf072e9db6a09a', big: '382c90e7fde2b895c7023137f50b5b64b2e968d553451bb16563ba30f9df98d7' };
+  const gold = { small: 'e63e00d983b7d592c25f66b326c13151bef8daebcc6dd02d892f86b4e8d90caf', medium: '00ea58022c234baf316d7607cb991573fa324b64f820b7c6edc3dfac98b80179', big: '382c90e7fde2b895c7023137f50b5b64b2e968d553451bb16563ba30f9df98d7' };
   // 2026-11-19 (the pinned-review release): the big hash was updated on purpose. The Big plan's risk and whole-diff
   // seats each got their own question, and the trace list with no signal named holds the after-save question.
   // 2026-11-19: small and medium hashes are untouched (those plans hold no Codex line). The big hash was updated once: it is
   // built with an EMPTY codex home, and the Big plan's Codex line then carries the "no model setting found" note line.
+  // 2026-11-25 (owner): the medium hash was updated on purpose: a medium plan now holds the Codex fresh eyes too.
   for (const size of ['small', 'medium', 'big']) {
     assert.equal(sha(stripEngine(buildLaunch({ ...engArgs, size, engine: 'claude', codexHome: EMPTY_HOME }))), gold[size], size);
     assert.equal(buildLaunch({ ...engArgs, size, codexHome: EMPTY_HOME }), buildLaunch({ ...engArgs, size, engine: 'claude', codexHome: EMPTY_HOME }), size + ': claude is the default');
@@ -662,8 +669,8 @@ test('every launch file says in its first lines which engine it was built for', 
   }
 });
 
-test('a Codex task: small and medium get one Codex fresh-eyes review and no Claude agent', () => {
-  for (const size of ['tiny', 'small', 'medium']) {
+test('a Codex task: small gets one Codex fresh-eyes review and no Claude agent; medium adds the Claude fresh eyes', () => {
+  for (const size of ['tiny', 'small']) {
     const launch = buildLaunch({ ...engArgs, size, engine: 'codex' });
     assert.deepEqual(seats(launch), ['Fresh eyes (Codex) — Bash, run_in_background'], size);
     assert.doesNotMatch(launch, /Agent independent-reviewer|Agent routine-reviewer|Agent braintrust|Fresh eyes \(Claude\)/, size);
@@ -674,7 +681,12 @@ test('a Codex task: small and medium get one Codex fresh-eyes review and no Clau
     assert.match(launch, /Read and follow only the brief at C:\/n\/brief-fresh\.md/, size);
     assert.equal((launch.match(/"You are the independent reviewer/g) || []).length, 1, size);
   }
-  assert.match(buildLaunch({ ...engArgs, size: 'medium', engine: 'codex' }), /Fill the coverage checklist lines that apply/);
+  const medium = buildLaunch({ ...engArgs, size: 'medium', engine: 'codex' });
+  assert.deepEqual(seats(medium), ['Fresh eyes (Codex) — Bash, run_in_background', 'Fresh eyes (Claude) — Bash, run_in_background (claude -p)']);
+  assert.match(medium, /claude -p --agent independent-reviewer --permission-mode plan "You are the independent reviewer — FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
+  assert.match(medium, /^Engine: Codex — [^\n]*; Claude is the one other engine\.$/m);
+  assert.doesNotMatch(medium, /Agent routine-reviewer|Agent braintrust|risk files pass|whole-diff pass|Test designer/);
+  assert.match(medium, /Fill the coverage checklist lines that apply/);
   assert.doesNotMatch(buildLaunch({ ...engArgs, size: 'small', engine: 'codex' }), /Fill the coverage checklist/);
 });
 
@@ -1008,7 +1020,7 @@ test('a Codex plan: every launch line carries the model of its own role, and a c
   assert.ok(lineOf(big2, 'codex-risk.md').includes(' -m "m-sanad-risk-reviewer-a" '));
 });
 
-test('the Claude Big plan Codex line carries the fresh-eyes role model; small and medium Claude plans hold no Codex line', () => {
+test('the Claude Big and medium plans Codex line carries the fresh-eyes role model; small Claude plans hold no Codex line', () => {
   const home = codexHomeWith(modelsA);
   const big = buildLaunch({ ...engArgs, size: 'big', engine: 'claude', codexHome: home });
   const lines = codexLines(big);
@@ -1017,7 +1029,10 @@ test('the Claude Big plan Codex line carries the fresh-eyes role model; small an
   assert.doesNotMatch(big, /no model setting found/);
   const home2 = codexHomeWith({ ...modelsA, 'sanad-risk-reviewer': 'new-one' });
   assert.ok(codexLines(buildLaunch({ ...engArgs, size: 'big', codexHome: home2 }))[0].includes(' -m "new-one" '));
-  for (const size of ['small', 'medium']) assert.equal(codexLines(buildLaunch({ ...engArgs, size, codexHome: home })).length, 0, size);
+  assert.equal(codexLines(buildLaunch({ ...engArgs, size: 'small', codexHome: home })).length, 0, 'small');
+  const medium = codexLines(buildLaunch({ ...engArgs, size: 'medium', codexHome: home }));
+  assert.equal(medium.length, 1, 'medium: one Codex line, the other engine');
+  assert.ok(medium[0].includes(' -m "m-sanad-risk-reviewer-a" '), medium[0]);
 });
 
 test('with an empty codex home no Codex line has -m, and each seat carries the one plain note line for its role', () => {

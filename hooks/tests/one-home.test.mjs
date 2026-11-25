@@ -217,8 +217,8 @@ test('the option reader: a made-up option is found and reported', () => {
   assert.equal(hasOption('usage: --close <file> --set "…"', '--set'), true);
 });
 
-test('both reviewer agent files and both Codex role files point to the checklist and hold no item list', () => {
-  for (const name of ['claude/agents/independent-reviewer.md', 'claude/agents/routine-reviewer.md', 'codex/agents/sanad-reviewer.toml', 'codex/agents/sanad-risk-reviewer.toml']) {
+test('the reviewer agent files and both Codex role files point to the checklist and hold no item list', () => {
+  for (const name of ['claude/agents/independent-reviewer.md', 'claude/agents/routine-reviewer.md', 'claude/agents/recheck-reviewer.md', 'codex/agents/sanad-reviewer.toml', 'codex/agents/sanad-risk-reviewer.toml']) {
     // The Codex role files are machine-local: a machine without them has nothing to compare.
     if (name.startsWith('codex/') && !files.has(name)) continue;
     const text = files.get(name);

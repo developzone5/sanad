@@ -1,7 +1,7 @@
 ---
 name: braintrust
 effort: xhigh
-description: Convene independent specialists and a separate boss using the task's selected Claude or Codex engine. Use for a Sanad-selected panel or an explicit braintrust request. All Codex roles and panel advisors use xhigh; the deliberation dial selects seat count and risk coverage, not runtime effort.
+description: Convene independent specialists and a separate boss using the task's selected Claude or Codex engine. Use for a Sanad-selected panel or an explicit braintrust request. All Codex roles and panel advisors use xhigh, except the Claude practical seats (high); the deliberation dial selects seat count and risk coverage, not runtime effort.
 argument-hint: "<question> [engine=claude|codex] [effort=low|medium|high|xhigh|max] [advisors=N]"
 ---
 

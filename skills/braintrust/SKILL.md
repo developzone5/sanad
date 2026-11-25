@@ -1,7 +1,7 @@
 ---
 name: braintrust
 effort: xhigh
-description: Convene independent specialists and a separate boss using the task's selected Claude or Codex engine. Use for a Sanad-selected panel or an explicit braintrust request. All Codex roles and panel advisors use xhigh; the deliberation dial selects seat count and risk coverage, not runtime effort.
+description: Convene independent specialists and a separate boss using the task's selected Claude or Codex engine. Use for a Sanad-selected panel or an explicit braintrust request. All Codex roles and panel advisors use xhigh, except the Claude practical seats (high); the deliberation dial selects seat count and risk coverage, not runtime effort.
 argument-hint: "<question> [engine=claude|codex] [effort=low|medium|high|xhigh|max] [advisors=N]"
 ---
 
@@ -38,11 +38,11 @@ After the boss selects a panel, choose the medium deliberation size for non-sens
 
 Add a seat above the cap only for a named coverage gap, stated in one line.
 
-**Installed effort preference (2026-09-21):** this deliberation skill uses xhigh effort through its frontmatter; set each advisor model using the expert choices below, with xhigh effort. Claude teaching/explanation uses medium outside this skill; Codex remains xhigh. There is no global forced-max environment variable. The dial controls specialist count and risk coverage, not extra review rounds or the session default; xhigh model effort alone never requests extra seats or rounds.
+**Installed effort preference (2026-09-21):** this deliberation skill uses xhigh effort through its frontmatter; set each advisor model using the expert choices below, with xhigh effort (the Claude practical seats: high, from their agent file). Claude teaching/explanation uses medium outside this skill; Codex remains xhigh. There is no global forced-max environment variable. The dial controls specialist count and risk coverage, not extra review rounds or the session default; xhigh model effort alone never requests extra seats or rounds.
 
 ### Expert model choices
 
-Use [engines.md](../sanad/reference/engines.md) as the single role/model map. Deep-risk seats: Architect, Skeptic, Database, Security, Authenticity and added domain specialists. Practical seats: Pragmatist, Performance and Product. Every panel role uses xhigh. Panel size never changes model assignments. A seated auditor never replaces the design voice the question needs.
+Use [engines.md](../sanad/reference/engines.md) as the single role/model map. Deep-risk seats: Architect, Skeptic, Database, Security, Authenticity and added domain specialists. Practical seats: Pragmatist, Performance and Product. Every panel role uses xhigh, except the Claude practical seats, which use high. Panel size never changes model assignments. A seated auditor never replaces the design voice the question needs.
 
 An explicit `model=` override affects specialists only and must remain within the selected engine; the boss changes only on an explicit boss-model instruction. Verify the requested model and effort in runtime metadata; never silently substitute or lower effort. The separate boss reviews every report after the specialists, reusing its routing assessment. Standalone braintrust creates one separate boss. `advisors=N` changes only the specialist count. If the question is missing or too vague, ask one clarifying question before convening.
 
@@ -118,7 +118,7 @@ Spawn the K advisors **concurrently** — one native subagent call per advisor (
   - `CONFIDENCE:` high / medium / low, with the one fact that would change their mind.
   - **Seated auditors add their sweep field** — the Database optimizer appends `DB SWEEP:`, the Security auditor appends `SEC SWEEP:` (per Step 2), one line per dimension marked `✓ cleared` / `→ finding` / `? unchecked`. This field is required for those two seats and must not be dropped for brevity.
 
-Launch each advisor with its engine-mapped deep-risk or practical agent type, xhigh and read-only. Name the seat and its role guide in the prompt. Use the host's real runtime controls for a supported explicit user model override. After collecting the specialist reports, resume the separate selected-engine boss for Step 6 at every panel size.
+Launch each advisor with its engine-mapped deep-risk or practical agent type, at its engines.md effort and read-only. Name the seat and its role guide in the prompt. Use the host's real runtime controls for a supported explicit user model override. After collecting the specialist reports, resume the separate selected-engine boss for Step 6 at every panel size.
 
 Every specialist's linked guide defines its **signature deliverable** (the Skeptic's ranked failure list, the Architect's one-way door, Performance's numbers, the DB optimizer's exact indexes, the Security auditor's written attack…). A return missing its signature deliverable — or delivering it as vague generalities — is off-template.
 
