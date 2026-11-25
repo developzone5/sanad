@@ -303,7 +303,11 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
   const logs = (sides.length ? sides : [{ name: 'tests' }]).map((s) => at(`proof-${s.name}.log`));
   const progress = logs.map((l) => readJson(l + '.progress.json')).filter(Boolean);
 
-  const size = readText(at('size.txt')).trim();
+  // Review (2026-11-25): a size typed into size.txt below the size the size check saved (size.json) is no size: the larger
+  // one is used, so a hand-typed `small` never sends a `big` task's suite to CI. Sizing down goes through `sanad.mjs size --down`.
+  const sizeRec = readJson(at(SIZE_RECORD));
+  const typed = readText(at('size.txt')).trim();
+  const size = sizeRec && SIZE_ORDER.includes(sizeRec.saved) && SIZE_ORDER.indexOf(sizeRec.saved) > SIZE_ORDER.indexOf(typed) ? sizeRec.saved : typed;
   // 2026-11-20: the tests-only lane is judged on the code as it is now, each time. A saved size.json label is
   // never trusted: with product code in the diff the proof is on the required list again.
   // 2026-11-20: a saved `tiny` (the text path) is judged again on the code as it is now, and so is the tests-only
@@ -343,7 +347,7 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
   if (deep || (receipt || ci) && pinAtHead) { const up = git(top, ['rev-parse', '--verify', '-q', '@{u}']); pushed = Boolean(up && head[1] && up === head[1]); }
 
   return {
-    top, notesDir: dir, task, lane, size, last, base,
+    top, notesDir: dir, task, lane, size, typedSize: typed, last, base, sizeRecord: sizeRec,
     testsOnly, textProof,
     switches: { stopRound: sw.stopround, testsOnlyLane: on(sw.testsonlylane), designChoice: on(sw.designchoice), lateCheckLines: String(sw.latechecklines || '').trim().toLowerCase() !== 'false', remoteHost: sw.remotehost || '' },
     stop: stopRound(sw.stopround), switchHits,
@@ -393,6 +397,9 @@ export function nextLines(f) {
   const out = [`NEXT — size ${f.size || 'not set (the small path until size.txt exists)'} · round ${f.round} · tree ${f.git.tree ? f.git.tree.slice(0, 10) : 'uncommitted work'}`];
   if (f.git.foreign) out.push(foreignLine(f));
   out.push(...switchLines(f));
+  // 2026-11-25 (owner, run 3): a size the size check did not save is said, with the way to save it.
+  const rec = f.sizeRecord && typeof f.sizeRecord === 'object' ? f.sizeRecord : null;
+  if (f.typedSize && (!rec || rec.saved !== f.typedSize)) out.push(`SIZE NOT FROM THE SIZE CHECK: size.txt says ${f.typedSize}${rec ? `, the size check saved ${rec.saved}` : ', and the size check saved none'}; save it with the size step (${q(`${GATE_DIR}/sanad.mjs`)} size --files PLANNED-FILES --names NAMES, and --up <size> --fact "<the fact it missed>" to size up)`);
   if (!steps.length) out.push('NEXT: nothing is due.');
   return [...out, ...render(steps, context(f), f)];
 }
@@ -481,7 +488,7 @@ export async function statusLines(f) {
 function parse(argv) {
   const o = { cmd: argv[0] || '', repo: '.', notes: '', sideCommand: [] };
   const flags = new Set(['--last', '--server']);
-  const known = new Set(['--repo', '--notes', '--base', '--engine', '--ticket', '--suite', '--suite-ci', '--side', '--cwd', '--fix-files', '--out', '--receipts', '--found']);
+  const known = new Set(['--repo', '--notes', '--base', '--engine', '--ticket', '--suite', '--suite-ci', '--side', '--cwd', '--fix-files', '--out', '--receipts', '--found', '--files', '--names', '--up', '--fact', '--down', '--words']);
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') { o.sideCommand = argv.slice(i + 1); break; }
@@ -492,7 +499,7 @@ function parse(argv) {
   return o;
 }
 
-export const USAGE = 'Usage: sanad.mjs start --repo <repo> --notes <dir> [--base <ref>] [--engine claude|codex] [--ticket <file>] [--suite <words>] [--suite-ci <job>] [--receipts <dir>] [--side <name> [--cwd <dir>] [--server] [--fix-files <a,b>] -- <test command>]\n       sanad.mjs next|status|ready|owed|pr-body [--repo <repo>] [--notes <dir>] [--last] [--out <file>]\n       sanad.mjs self-read [--repo <repo>] [--notes <dir>] --found <what you found and fixed, or none>';
+export const USAGE = 'Usage: sanad.mjs start --repo <repo> --notes <dir> [--base <ref>] [--engine claude|codex] [--ticket <file>] [--suite <words>] [--suite-ci <job>] [--receipts <dir>] [--side <name> [--cwd <dir>] [--server] [--fix-files <a,b>] -- <test command>]\n       sanad.mjs next|status|ready|owed|pr-body [--repo <repo>] [--notes <dir>] [--last] [--out <file>]\n       sanad.mjs self-read [--repo <repo>] [--notes <dir>] --found <what you found and fixed, or none>\n       sanad.mjs size [--repo <repo>] [--notes <dir>] --files <planned files> [--names <names>] [--up <size> --fact "<the fact the size check missed>" | --down <size> --words "<the owner\'s words>"]';
 
 // 2026-11-22 (owner, PR 3 item 1): the author reads its own diff against the "Every change" lines of review-checklist.md
 // and fixes what it finds before the checks, the proof and the review. The record holds the commit read, so a later
@@ -505,6 +512,44 @@ function selfRead(f, found, print) {
   if (said.length < 4) { print('SELF-READ: not recorded — --found needs what you found and fixed, or "none"'); return 2; }
   fs.writeFileSync(path.join(f.notesDir, SELF_READ), JSON.stringify({ commit: f.git.head, found: said, at: new Date().toISOString() }, null, 2) + '\n');
   print(`SELF-READ: recorded for commit ${f.git.head.slice(0, 10)} — ${said}`);
+  return 0;
+}
+
+// 2026-11-25 (owner, run 3: the size check said Small twice, the builder wrote Medium, and the full suite ran for nothing):
+// the size check saves the size, and the printed steps carry it (size.txt, which every step and review-brief.mjs read, and
+// size.json, the record of what the tool said). The builder types none. To size up, the builder names the fact the tool
+// missed in one line the owner sees; sizing down needs the owner's words. It is the step printer's record: no guard reads it.
+export const SIZE_RECORD = 'size.json';
+const SIZE_ORDER = ['tiny', 'small', 'medium', 'big'];
+const MIN_FACT = 12, MIN_WORDS = 8;
+function saveSize(f, o, print) {
+  if (!f.notesDir) { print('SANAD: no task for this work tree — run start first'); return 3; }
+  if (typeof sizeTool?.sizeTask !== 'function') { print('SIZE: not saved — size-check.mjs could not be loaded'); return 3; }
+  const list = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const files = list(o.files), names = list(o.names);
+  if (!files.length) { print('SIZE: not saved — give --files <the planned files, comma-separated>: the size check sizes the plan before code'); return 2; }
+  if (o.up && o.down) { print('SIZE: not saved — give --up or --down, not both'); return 2; }
+  const r = sizeTool.sizeTask({ repo: f.top, files, names: names.length ? names : null });
+  const tool = r.size, at = SIZE_ORDER.indexOf(tool);
+  let saved = tool, up = null, down = null;
+  if (o.up) {
+    const fact = String(o.fact || '').replace(/\s+/g, ' ').trim();
+    if (SIZE_ORDER.indexOf(o.up) <= at) { print(`SIZE: not saved — --up needs a size above the size check's ${tool} (${SIZE_ORDER.slice(at + 1).join(', ') || 'none'})`); return 2; }
+    if (fact.length < MIN_FACT) { print(`SIZE: not saved — --up needs --fact "<the fact the size check missed>" (at least ${MIN_FACT} characters), in one line the owner sees`); return 2; }
+    saved = o.up; up = { to: o.up, fact };
+  }
+  if (o.down) {
+    const words = String(o.words || '').replace(/\s+/g, ' ').trim();
+    if (SIZE_ORDER.indexOf(o.down) < 0 || SIZE_ORDER.indexOf(o.down) >= at) { print(`SIZE: not saved — --down needs a size below the size check's ${tool} (${SIZE_ORDER.slice(0, Math.max(0, at)).join(', ') || 'none'})`); return 2; }
+    if (words.length < MIN_WORDS) { print(`SIZE: not saved — sizing down needs the owner's words: --words "<the owner's words>" (at least ${MIN_WORDS} characters)`); return 2; }
+    saved = o.down; down = { to: o.down, words };
+  }
+  fs.writeFileSync(path.join(f.notesDir, 'size.txt'), saved + '\n');
+  fs.writeFileSync(path.join(f.notesDir, SIZE_RECORD), JSON.stringify({ tool, saved, mode: r.mode, ...(up ? { up } : {}), ...(down ? { down } : {}), files, names, at: new Date().toISOString() }, null, 2) + '\n');
+  if (typeof sizeTool.format === 'function') print(sizeTool.format(r));
+  print(up ? `SIZE UP: ${tool} → ${saved} — the fact the size check missed: ${up.fact}`
+    : down ? `SIZE DOWN: ${tool} → ${saved} — the owner's words: "${down.words}"`
+      : `SIZE SAVED: ${saved} — the size check's own answer; the printed steps carry it`);
   return 0;
 }
 
@@ -543,7 +588,7 @@ function start(o) {
 export async function main(argv, print = (line) => process.stdout.write(line + '\n'), { sessionNotes } = {}) {
   let o;
   try { o = parse(argv); } catch (error) { process.stderr.write(`SANAD: ${error.message}\n${USAGE}\n`); return 2; }
-  if (!['start', 'next', 'status', 'ready', 'owed', 'pr-body', 'self-read'].includes(o.cmd)) { process.stderr.write(USAGE + '\n'); return 2; }
+  if (!['start', 'next', 'status', 'ready', 'owed', 'pr-body', 'self-read', 'size'].includes(o.cmd)) { process.stderr.write(USAGE + '\n'); return 2; }
   try {
     if (o.cmd === 'start') { for (const l of [...start(o), ...nextLines(readFacts({ repo: o.repo, notes: path.resolve(o.notes) }))]) print(l); return 0; }
     const ask = { repo: path.resolve(o.repo), notes: o.notes ? path.resolve(o.notes) : '', last: Boolean(o.last), deep: o.cmd !== 'next', ...(sessionNotes ? { sessionNotes } : {}) };
@@ -553,6 +598,7 @@ export async function main(argv, print = (line) => process.stdout.write(line + '
     if (!ask.deep && !sessionNotes && f.pins.length) { await loadNotesTools(); f = readFacts(ask); }
     if (o.cmd === 'next') { for (const l of nextLines(f)) print(l); return 0; }
     if (o.cmd === 'self-read') return selfRead(f, o.found, print);
+    if (o.cmd === 'size') return saveSize(f, o, print);
     if (!f.notesDir) { print('SANAD: no task for this work tree — run start first'); return 3; }
     if (o.cmd === 'status') { for (const l of await statusLines(f)) print(l); return 0; }
     if (o.cmd === 'ready') {

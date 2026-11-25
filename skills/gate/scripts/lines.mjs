@@ -16,6 +16,10 @@
 //   --drop T3 --words "<the user's words>" --out <notes>/lines.md (or --notes <dir>)
 //       Rewrites that one line in place as `T3. [dropped by the user: "<words>"] <the line>`. No line gets a new
 //       number. Refused: words under 8 characters, a line that is dropped already, the last line that is left.
+//   --drop T2 --go "<the owner's go, quoted>" --out <notes>/lines.md
+//       2026-11-25 (owner, test 4: a line of background had no check line and failed two checks): a sentence that is only
+//       background is shown in the plan as `T2: background, no check`, and the owner's go on that plan is the words that
+//       drop it: `[dropped by the user: "background, no check; the owner's go on the plan: <go>"]`. No extra question.
 //   --seed-check <notes>/check.md [--out <notes>/lines.md | --notes <dir>]   (or: --seed-check --notes <dir>)
 //       Writes a first check file, one `- [T<n>] <the line>` per ticket line that is not dropped. Each one is then
 //       rewritten as the result the change must prove. A check file that exists is never overwritten.
@@ -32,11 +36,49 @@ import { readLines, droppedOf } from './check-ticket-lines.mjs';
 
 const MIN_WORDS = 8;
 
-// The ticket's lines, in order: blank lines dropped, a heading or bullet mark taken off, the words untouched.
+// The ticket's lines, in order: one per sentence, a heading or bullet mark taken off, the words untouched.
+// 2026-11-25 (owner, run 3): a ticket sentence wrapped over four lines became T2 to T4, each cut mid-sentence. A line
+// break inside a paragraph is no longer a new line: the paragraph is read as sentences. A heading, a bullet or a numbered
+// item, a blank line, a table row and a fenced code line still end a line; a sentence ends at . ! ? … or ؟ (closing quotes
+// and brackets kept with it) before a space and a capital letter, a digit, an opening quote or a letter with no case
+// (Arabic). After a short abbreviation (e.g., i.e., etc., vs., Dr.) or a one-letter initial it does not end.
+const ABBREVIATION = /(?:^|[\s(])(?:e\.g|i\.e|etc|vs|cf|approx|Mr|Mrs|Ms|Dr|St|No|[A-Za-z])\.$/i;
+export function sentencesOf(paragraph) {
+  const text = String(paragraph).replace(/\s+/g, ' ').trim();
+  const out = [];
+  let from = 0;
+  for (const m of text.matchAll(/[.!?…؟]+["'”’»)\]]*(?= (?=[\p{Lu}\p{Lo}\p{N}"'“‘«(\[]))/gu)) {
+    const end = m.index + m[0].length;
+    // A numbered item's own number (`1. Press Next`) is no sentence.
+    if (ABBREVIATION.test(text.slice(from, m.index + 1)) || /^\d+\.$/.test(text.slice(from, m.index + 1).trim())) continue;
+    // Inside an open double quote (a quoted message of two sentences) the sentence goes on.
+    if ((text.slice(from, end).match(/["“”]/g) || []).length % 2) continue;
+    out.push(text.slice(from, end).trim());
+    from = end;
+  }
+  out.push(text.slice(from).trim());
+  return out.filter(Boolean);
+}
 export function ticketLines(text) {
-  return String(text).split(/\r?\n/)
-    .map(l => l.trim().replace(/^#{1,6}\s+/, '').replace(/^[-*•]\s+/, '').trim())
-    .filter(Boolean);
+  const out = [];
+  let para = [];
+  const flush = () => { if (para.length) out.push(...sentencesOf(para.join(' '))); para = []; };
+  for (const raw of String(text).split(/\r?\n/)) {
+    const l = raw.trim();
+    if (!l) { flush(); continue; }
+    if (/^#{1,6}\s+/.test(l)) { flush(); out.push(l.replace(/^#{1,6}\s+/, '').trim()); continue; }
+    if (/^(?:\||```|~~~)/.test(l)) { flush(); out.push(l); continue; }
+    if (/^(?:[-*•]|\d+[.)])\s+/.test(l)) { flush(); para.push(l.replace(/^[-*•]\s+/, '').trim()); }
+    // Install suite (2026-11-25): a title with no stop ("Fix the title") joined the next line. A line goes on the one
+    // before it only when it starts with a small letter, as a wrapped sentence does; anything else starts a new line.
+    else if (para.length && /^\p{Ll}/u.test(l)) para.push(l);
+    else { flush(); para.push(l); }
+    // Review (2026-11-25): a line that ends with . ! ? … or ؟ (closing quotes and brackets after it) ends its sentence,
+    // whatever word stands before it ("Part A.", "etc."): only a line broken mid-sentence joins the next one.
+    if (/[.!?…؟]["'”’»)\]]*$/.test(l)) flush();
+  }
+  flush();
+  return out.filter(Boolean);
 }
 
 export function renderLines(lines, { noTicket = false, date = new Date() } = {}) {
@@ -112,7 +154,12 @@ function main(argv) {
       process.stdout.write(`CHECK LINES: ${made.count} seeded (${made.numbers.map((n) => 'T' + n).join(', ')}) — ${path.resolve(seed)}; rewrite each as the result the change must prove\n`);
       return;
     }
-    const dropped = dropLine(text, opt('--drop'), opt('--words'));
+    const go = argv.includes('--go') ? String(opt('--go') ?? '').replace(/\s+/g, ' ').trim() : null;
+    if (go !== null && argv.includes('--words')) throw new Error('give --words or --go, not both');
+    if (go !== null && (!go || go.startsWith('--'))) throw new Error("--go needs the owner's go on the plan, quoted");
+    // Review (2026-11-25): `--go "No."` closed a ticket line. The quoted go must say yes: go, yes, ok, okay or approved.
+    if (go !== null && !/(?<![\p{L}])(?:go|yes|ok|okay|approved?)(?![\p{L}])/iu.test(go)) throw new Error(`--go "${go}" holds no go (go, yes, ok or approved): only the owner's go on the plan closes a background sentence`);
+    const dropped = dropLine(text, opt('--drop'), go !== null ? `background, no check; the owner's go on the plan: ${go}` : opt('--words'));
     fs.writeFileSync(file, dropped.text);
     process.stdout.write(`LINES: T${dropped.n} dropped by the user: "${dropped.words}" — ${path.resolve(file)}; no line has a new number\n`);
     return;
@@ -130,6 +177,7 @@ function main(argv) {
   if (path.resolve(from) !== path.resolve(ticket)) fs.writeFileSync(ticket, text);
   const branch = noTicket ? markNoTicket(path.resolve(repo)) : '';
   process.stdout.write(`LINES: ${lines.length} line(s) T1..T${lines.length} — ${path.resolve(out)}; ticket text in ${ticket}\n`);
+  process.stdout.write(`BACKGROUND: a sentence with nothing to prove goes in the plan as "T<n>: background, no check"; after the owner's go on that plan: node ${path.resolve(process.argv[1] || 'lines.mjs').split(path.sep).join('/')} --drop T<n> --go "<the owner's go, quoted>" --out ${out}\n`);
   // No ticket ID in the text and no --no-ticket: tell the author how to mark a task that has no ticket.
   if (!noTicket && !/\b[A-Z][A-Z0-9]+-\d+\b/.test(text)) {
     const me = path.resolve(process.argv[1] || 'lines.mjs').split(path.sep).join('/');
@@ -144,6 +192,7 @@ if (isMain(import.meta.url)) {
   catch (error) {
     process.stderr.write('LINES: ' + error.message + '\nUsage: node lines.mjs --from <ticket text file> --out <notes>/lines.md [--no-ticket --repo <path>]\n' +
       '       node lines.mjs --drop T<n> --words "<the user\'s words>" --out <notes>/lines.md\n' +
+      '       node lines.mjs --drop T<n> --go "<the owner\'s go on the plan, quoted>" --out <notes>/lines.md\n' +
       '       node lines.mjs --seed-check <notes>/check.md [--out <notes>/lines.md]\n');
     process.exitCode = 2;
   }

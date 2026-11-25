@@ -91,6 +91,22 @@ test('--brief writes the brief from the ticket lines, the check lines and the pl
   assert.ok(r.stdout.includes(`--record ${slash(path.join(notes, 'siblings-report.md'))} --notes ${slash(notes)}`), 'the next step is printed:\n' + r.stdout);
 });
 
+// 2026-11-25 (owner, test 4): the Settings badges and the view-as strip showed the same role value by another path, and the
+// review found them two rounds later. The brief asks one direct question, and names the data the places list searched.
+test('--brief asks one direct question: where else is this value read or shown (with the data names when the list has them)', () => {
+  const f = fixture();
+  let r = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const ask = /^## Where else is this value read or shown\?\n\nAnswer it directly: where else is the value this change touches read or shown, by another path than the names above: another screen, a badge, a strip, a list, an export, a second word list for the same value\? Each such place not on the list is a SIBLING line\.$/m;
+  assert.match(fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8').replace(/\r\n/g, '\n'), ask);
+  f.write('src/Topbar.tsx', 'export function Topbar({ user }) {\n  return <b>{user.roles[0]}</b>;\n}\n');
+  const made = spawnSync(process.execPath, [path.join(scripts, 'places.mjs'), '--repo', f.repo, '--names', 'focusFirstError', '--data', 'user.roles', '--out', f.places], { encoding: 'utf8', windowsHide: true });
+  assert.equal(made.status, 0, made.stdout + made.stderr);
+  r = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8'), /^Answer it directly: where else is the value this change touches \(user\.roles\) read or shown, by another path/m);
+});
+
 test('--brief refuses a notes folder that lacks one of its three sources, a file that is not a places list, and a missing --repo', () => {
   const f = fixture();
   const { repo, notes, places } = f;

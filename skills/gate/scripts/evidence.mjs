@@ -172,6 +172,20 @@ export function remoteTarget(executable, args, toplevel) {
   return { host, repo, sshArgs: args.slice(0, at + 1) };
 }
 const hostName = h => String(h).replace(/^.*@/, '').toLowerCase();
+// The remote line with the pinned Node's folder first on its path (2026-11-25), as red-proof.mjs builds its remote command:
+// cmd.exe on a Windows clone (`set "PATH=<dir>;%PATH%" && …`), a POSIX shell otherwise. `args` unchanged when no folder is
+// pinned (a bare `node`), or when the folder holds a sign the shell reads.
+export function withPinnedNode(args, remote, remoteNode, say = () => {}) {
+  const node = String(remoteNode || '');
+  const dir = /[\\/]/.test(node) ? path.posix.dirname(node.replace(/\\/g, '/')) : '';
+  if (!dir) return args;
+  if (/["'%&|<>^`$!;\r\n]/.test(dir)) { say(`NOTE: the pinned Node's folder (${dir}) holds a sign the shell reads, so it is not put first on the path of the test machine`); return args; }
+  const at = remote.sshArgs.length;
+  if (at >= args.length) return args;
+  const windows = /^[A-Za-z]:[\\/]/.test(String(remote.repo));
+  const first = windows ? `set "PATH=${dir.replace(/\//g, '\\')};%PATH%" && ` : `PATH='${dir}':"$PATH"; `;
+  return [...args.slice(0, at), first + args[at], ...args.slice(at + 1)];
+}
 const flatPath = text => String(text).replace(/\\/g, '/').toLowerCase();
 // True when the last cd / chdir / pushd of a remote line (cmd.exe) ends in `repo` or a folder inside it. A relative
 // cd is read from the folder before it; with no cd, or an unreadable one (a variable), the line is not in the clone.
@@ -466,7 +480,14 @@ export async function runCommand({ executable, args = [], cwd, outputRoot, timeo
       } catch { refused = `Cannot read the code on the test machine (${remote.host}) before the check.`; }
       if (refused) { freeMachine(); return refuse(refused); }
     }
-    const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    // 2026-11-25 (owner, test 4: a command on the test machine ran its own Node 26, not the pinned Node 20): the pinned
+    // Node's folder (sanad.remoteNode) goes first on the path of the remote line, so `node`, `npm` and every program the
+    // suite starts find it first. No new refusal: a folder with a sign the shell reads is left off, and said. The receipt
+    // keeps the command as the spec wrote it.
+    const tell = (line) => { if (typeof note === 'function') { try { note(redactCommand(line, secrets)); } catch { /* a note never fails the check */ } } };
+    const runArgs = remote ? withPinnedNode(args, remote, configValue(source.toplevel, 'sanad.remoteNode'), tell) : args;
+    if (runArgs !== args) receipt.remote.pinnedNodeFirst = true;
+    const child = spawn(executable, runArgs, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let failure = null, fallback;
     let finish;
     const abort = reason => {

@@ -209,7 +209,11 @@ function remoteLine(remote, rel, words) {
   const windows = /^[A-Za-z]:\//.test(remote.repo);
   const dir = remote.repo + (rel && rel !== '.' ? '/' + rel : '');
   const q = (a) => (/[\s"&|<>^()]/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a);
-  return windows ? `cd /d ${q(dir.replace(/\//g, '\\'))} && ${words.map(q).join(' ')}` : `cd '${dir}' && ${words.map(q).join(' ')}`;
+  // 2026-11-25 (owner, test 4): the pinned Node's folder goes first on the path too, so a program the check starts
+  // (npx, npm, a child node) finds the pinned Node, not the machine's own. A folder with a sign the shell reads is left off.
+  const nodeDir = /[\\/]/.test(remote.node || '') ? path.posix.dirname(String(remote.node).replace(/\\/g, '/')) : '';
+  const first = !nodeDir || /["'%&|<>^`$!;\r\n]/.test(nodeDir) ? '' : windows ? `set "PATH=${nodeDir.replace(/\//g, '\\')};%PATH%" && ` : `PATH='${nodeDir}':"$PATH"; `;
+  return windows ? `${first}cd /d ${q(dir.replace(/\//g, '\\'))} && ${words.map(q).join(' ')}` : `${first}cd '${dir}' && ${words.map(q).join(' ')}`;
 }
 const sshArgs = (remote, line) => ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=30', remote.host, line];
 

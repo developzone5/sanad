@@ -40,7 +40,8 @@ function flagsByTool() {
 
 test('the table prints a command for every tool of the loop', () => {
   const tools = [...flagsByTool().keys()];
-  for (const name of ['lines.mjs', 'places.mjs', 'siblings.mjs', 'size-check.mjs', 'pre-review.mjs', 'breaks.mjs', 'red-proof.mjs', 'review-brief.mjs', 'notes.mjs', 'pr-watch.mjs', 'review-score.mjs', 'check-pr-body.mjs', 'sanad.mjs']) assert.ok(tools.includes(name), name);
+  // 2026-11-25 (owner, run 3): the size step runs the size check through `sanad.mjs size`, which saves its size.
+  for (const name of ['lines.mjs', 'places.mjs', 'siblings.mjs', 'pre-review.mjs', 'breaks.mjs', 'red-proof.mjs', 'review-brief.mjs', 'notes.mjs', 'pr-watch.mjs', 'review-score.mjs', 'check-pr-body.mjs', 'sanad.mjs']) assert.ok(tools.includes(name), name);
   assert.equal(new Set(STEPS.map((s) => s.id)).size, STEPS.length);
 });
 

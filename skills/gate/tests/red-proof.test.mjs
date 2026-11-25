@@ -641,6 +641,38 @@ test('--show-remote: the env file (flag, or git config sanad.remoteTestEnv) and 
   assert.doesNotMatch(vitest.stdout, /--test-env/);
 });
 
+// 2026-11-25 (owner, test 4): a command on the test machine ran its own Node 26, not the pinned Node 20 (sanad.remoteNode).
+// The pinned Node's folder goes first on the path of the whole remote command, so `npm`, `npx` and every program the tests
+// start find it first, not only a bare `node`.
+test('--show-remote: the pinned Node comes first on the path of the test machine command, for npm too', () => {
+  const { repo, breaks } = breakFixture();
+  writeBreaks(breaks, ['saves nothing']);
+  const config = (k, v) => execFileSync('git', ['config', k, v], { cwd: repo });
+  config('sanad.remoteHost', 'pc-test'); config('sanad.remoteRepo', 'C:/r/repo');
+  const show = (...command) => run(['--repo', repo, '--base', 'HEAD', '--breaks', breaks, '--show-remote', '--', ...command]);
+  // No pinned Node: the command is as before.
+  let r = show('npm', 'test');
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /this runs: node C:\/r\/repo\/\.git\/sanad-proof\/red-proof\.mjs /);
+  config('sanad.remoteNode', 'C:/tools/node-v20/node.exe');
+  r = show('npm', 'test');
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /this runs: set "PATH=C:\\tools\\node-v20;%PATH%" && C:\/tools\/node-v20\/node\.exe C:\/r\/repo\/\.git\/sanad-proof\/red-proof\.mjs /);
+  assert.match(r.stdout, / -- npm test$/m, 'npm is found on the path, where the pinned Node now comes first');
+  r = show('node', 'node_modules/vitest/vitest.mjs', 'run');
+  assert.match(r.stdout, /set "PATH=C:\\tools\\node-v20;%PATH%" && .* -- C:\/tools\/node-v20\/node\.exe node_modules\/vitest\/vitest\.mjs run$/m);
+  // A test machine with a POSIX shell.
+  config('sanad.remoteRepo', '/home/t/repo'); config('sanad.remoteNode', '/opt/node20/bin/node');
+  r = show('npx', 'vitest', 'run');
+  assert.match(r.stdout, /this runs: PATH='\/opt\/node20\/bin':"\$PATH" \/opt\/node20\/bin\/node \/home\/t\/repo\/\.git\/sanad-proof\/red-proof\.mjs /);
+  // A folder with a sign the shell reads is not put on the path, and the run says so; nothing stops.
+  config('sanad.remoteRepo', 'C:/r/repo'); config('sanad.remoteNode', 'C:/to%ls/node.exe');
+  r = show('npm', 'test');
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /holds a sign the shell reads, so it is not put first on the path/);
+  assert.doesNotMatch(r.stdout, /set "PATH=/);
+});
+
 // 2026-11-09: nothing limited a run's time, so a hang was silent. Each run now has a limit (15 minutes
 // unless --timeout-min says otherwise); a run past it is stopped with every process it started.
 function hangFixture() {
