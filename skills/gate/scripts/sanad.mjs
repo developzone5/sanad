@@ -30,7 +30,7 @@ import path from 'node:path';
 import { isMain } from './is-main.mjs';
 import { parseSiblings, jobOpenReason } from './siblings.mjs';
 import { requestStart, report as timerReport } from './sanad-timer.mjs';
-import { readRecord, codeFingerprint, recordKey } from './proof-record.mjs';
+import { readRecord, codeFingerprint, recordKey, oldEntries } from './proof-record.mjs';
 import { foreignLine as foreignText } from './change-set.mjs';
 import { beforeProofPassed, notesInputs, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
 import { due, render, switchLines, stopRound, askOwner, pathFor, GATE_DIR, q } from './steps.mjs';
@@ -291,11 +291,23 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
       && (k === key || (Array.isArray(e.command) && e.command.join('\0') === s.testCommand.join('\0') && String(e.cwd || '') === cwd)));
   };
   const missingSides = sides.length >= 2 && !foreign && today ? sides.filter((s) => !sideProved(s)).map((s) => s.name) : [];
-  const proofDone = proved.length > 0 && ents.every((e) => e.ok === true) && Boolean(today) && proved.every((e) => e.code === today) && !missingSides.length;
+  // 2026-11-25 (owner, old proof entries; run 3: one more proof run, test 4: two, with no code change): an entry that is
+  // not ok on today's code blocks until each test it named is proved by a newer passing entry on today's code, or is no
+  // longer in the tree (proof-record.mjs oldEntries). Never by its age, and never because another entry passed.
+  const old = today && !foreign ? oldEntries(top, record, today) : new Map();
+  const current = Object.values(record?.entries || {}).filter((e) => e && e.ok === true && e.code && e.code === today);
+  // Review (2026-11-25): an ok entry with no code id (the format before 2026-11-17) proves nothing today, so it blocks too.
+  const blocking = Object.entries(record?.entries || {}).filter(([k, e]) => e && !(e.ok === true && e.code && e.code === today) && !old.get(k)?.released);
+  const proofDone = current.length > 0 && Boolean(today) && !blocking.length && !missingSides.length;
+  const oldBlocking = blocking.map(([k, e]) => ({ command: Array.isArray(e.command) ? e.command.join(' ') : '', why: old.get(k)?.why || (old.get(k)?.files || []).filter((x) => !x.released).map((x) => `${x.file}: ${x.why}`).join('; ') || 'not proved on today\'s code' }));
   const logs = (sides.length ? sides : [{ name: 'tests' }]).map((s) => at(`proof-${s.name}.log`));
   const progress = logs.map((l) => readJson(l + '.progress.json')).filter(Boolean);
 
-  const size = readText(at('size.txt')).trim();
+  // Review (2026-11-25): a size typed into size.txt below the size the size check saved (size.json) is no size: the larger
+  // one is used, so a hand-typed `small` never sends a `big` task's suite to CI. Sizing down goes through `sanad.mjs size --down`.
+  const sizeRec = readJson(at(SIZE_RECORD));
+  const typed = readText(at('size.txt')).trim();
+  const size = sizeRec && SIZE_ORDER.includes(sizeRec.saved) && SIZE_ORDER.indexOf(sizeRec.saved) > SIZE_ORDER.indexOf(typed) ? sizeRec.saved : typed;
   // 2026-11-20: the tests-only lane is judged on the code as it is now, each time. A saved size.json label is
   // never trusted: with product code in the diff the proof is on the required list again.
   // 2026-11-20: a saved `tiny` (the text path) is judged again on the code as it is now, and so is the tests-only
@@ -335,7 +347,7 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
   if (deep || (receipt || ci) && pinAtHead) { const up = git(top, ['rev-parse', '--verify', '-q', '@{u}']); pushed = Boolean(up && head[1] && up === head[1]); }
 
   return {
-    top, notesDir: dir, task, lane, size, last, base,
+    top, notesDir: dir, task, lane, size, typedSize: typed, last, base, sizeRecord: sizeRec,
     testsOnly, textProof,
     switches: { stopRound: sw.stopround, testsOnlyLane: on(sw.testsonlylane), designChoice: on(sw.designchoice), lateCheckLines: String(sw.latechecklines || '').trim().toLowerCase() !== 'false', remoteHost: sw.remotehost || '' },
     stop: stopRound(sw.stopround), switchHits,
@@ -350,7 +362,7 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
     pins, lastPin, pinAtHead, round: pins.filter((p) => p && !p.short).length, reviewReported: pinAtHead && reviewReported(lastPin, read.reviews, reports, reportFiles), reviewSeats: reviewProgress(lastPin, read.reviews, reports, reportFiles),
     // 2026-11-20 (timed task): every proof log of the folder (proof*.log), so the review step names them all.
     proofLogs: dir ? (() => { try { return fs.readdirSync(dir).filter((n) => /^proof.*\.log$/i.test(n)).sort().map((n) => at(n)); } catch { return []; } })() : [],
-    proof: { done: proofDone, missingSides, entries: ents.length, breaks: proved.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
+    proof: { done: proofDone, missingSides, entries: ents.length, oldBlocking: current.length ? oldBlocking : [], breaks: current.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
     // beforeProof (2026-11-23): the last whole `pre-review --before-proof` run passed on the work tree as it is now.
     checks: { code: undefined, all: undefined, beforeProof: !foreign && ahead > 0 && dir ? beforeProofPassed(top, undefined, notesInputs(BEFORE_PROOF_FILES.map((n) => at(n))), base) : false },
     suite: { done: Boolean(receipt || ci), receipt, ci, mark: task.suite || '' },
@@ -385,6 +397,9 @@ export function nextLines(f) {
   const out = [`NEXT — size ${f.size || 'not set (the small path until size.txt exists)'} · round ${f.round} · tree ${f.git.tree ? f.git.tree.slice(0, 10) : 'uncommitted work'}`];
   if (f.git.foreign) out.push(foreignLine(f));
   out.push(...switchLines(f));
+  // 2026-11-25 (owner, run 3): a size the size check did not save is said, with the way to save it.
+  const rec = f.sizeRecord && typeof f.sizeRecord === 'object' ? f.sizeRecord : null;
+  if (f.typedSize && (!rec || rec.saved !== f.typedSize)) out.push(`SIZE NOT FROM THE SIZE CHECK: size.txt says ${f.typedSize}${rec ? `, the size check saved ${rec.saved}` : ', and the size check saved none'}; save it with the size step (${q(`${GATE_DIR}/sanad.mjs`)} size --files PLANNED-FILES --names NAMES, and --up <size> --fact "<the fact it missed>" to size up)`);
   if (!steps.length) out.push('NEXT: nothing is due.');
   return [...out, ...render(steps, context(f), f)];
 }
@@ -399,7 +414,7 @@ export async function readyItems(f) {
   add('review', f.pinAtHead && f.reviewReported, f.pinAtHead ? (f.reviewReported ? `round ${f.round} is pinned to HEAD and a reviewer has reported` : f.reviewSeats && f.reviewSeats.need > 1 && f.reviewSeats.have > 0 ? `round ${f.round} is pinned to HEAD, but only ${f.reviewSeats.have} of ${f.reviewSeats.need} reviewer seats have a finished report after the pin` : `round ${f.round} is pinned to HEAD, but no completed reviewer run after the pin is on record`) : f.lastPin ? `the last review read ${String(f.lastPin.commit || '').slice(0, 10)}, HEAD is ${f.git.head.slice(0, 10)}: no re-check of the fix` : 'no pinned review');
   add('notes', f.notes.known && !f.notes.open.length, !f.notes.known ? 'the notes list could not be read' : f.notes.open.length ? `${f.notes.open.length} note(s) open: ${f.notes.open.map((n) => n.n).join(', ')}` : 'every note answered');
   // On the tests-only lane (switch on and tests only) no PROVED proof entry is asked for.
-  if (!noProof && !light) add('proof', f.proof.done, f.proof.done ? `${f.proof.breaks} break(s) caught on this tree` : f.git.foreign ? 'not read: too many untracked files' : f.proof.missingSides.length ? `no proof of the side(s): ${f.proof.missingSides.join(', ')}` : f.proof.entries ? 'the proof record is not for this tree, or a run did not end PROVED (a partial run is no proof)' : 'no proof record');
+  if (!noProof && !light) add('proof', f.proof.done, f.proof.done ? `${f.proof.breaks} break(s) caught on this tree` : f.git.foreign ? 'not read: too many untracked files' : f.proof.missingSides.length ? `no proof of the side(s): ${f.proof.missingSides.join(', ')}` : f.proof.oldBlocking?.length ? `an older proof entry still blocks: ${f.proof.oldBlocking.slice(0, 2).map((o) => `\`${o.command.slice(0, 100)}\` (${o.why.slice(0, 200)})`).join('; ')}${f.proof.oldBlocking.length > 2 ? ` and ${f.proof.oldBlocking.length - 2} more` : ''}: run that proof again on this tree` : f.proof.entries ? 'the proof record is not for this tree, or a run did not end PROVED (a partial run is no proof)' : 'no proof record');
   add('suite', f.suite.done, f.suite.ci ? `left to CI: ${f.suite.ci}` : f.suite.receipt ? `passed on this tree (${f.suite.receipt.runId || 'receipt'})` : !f.git.tree ? 'uncommitted or untracked work: no receipt can be for this tree' : !f.suite.mark ? 'no suite command named (start --suite)' : 'no passing full-suite receipt for this tree');
   add('ticket lines', f.has.lines && (text || (f.has.check && (light || (f.has.places && !f.open.places && !f.open.siblings)))), !f.has.lines ? 'no lines file' : text ? 'lines file kept' : !f.has.check ? 'no check lines' : light ? 'tests-only: lines and check lines kept' : `${f.open.places} place(s) and ${f.open.siblings} second-look line(s) open`);
   add('one commit', f.git.ahead === 1 && f.git.clean, `${f.git.ahead} commit(s) on ${f.base}${f.git.clean ? '' : ', with uncommitted or untracked work'}`);
@@ -473,7 +488,7 @@ export async function statusLines(f) {
 function parse(argv) {
   const o = { cmd: argv[0] || '', repo: '.', notes: '', sideCommand: [] };
   const flags = new Set(['--last', '--server']);
-  const known = new Set(['--repo', '--notes', '--base', '--engine', '--ticket', '--suite', '--suite-ci', '--side', '--cwd', '--fix-files', '--out', '--receipts', '--found']);
+  const known = new Set(['--repo', '--notes', '--base', '--engine', '--ticket', '--suite', '--suite-ci', '--side', '--cwd', '--fix-files', '--out', '--receipts', '--found', '--files', '--names', '--up', '--fact', '--down', '--words']);
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') { o.sideCommand = argv.slice(i + 1); break; }
@@ -484,7 +499,7 @@ function parse(argv) {
   return o;
 }
 
-export const USAGE = 'Usage: sanad.mjs start --repo <repo> --notes <dir> [--base <ref>] [--engine claude|codex] [--ticket <file>] [--suite <words>] [--suite-ci <job>] [--receipts <dir>] [--side <name> [--cwd <dir>] [--server] [--fix-files <a,b>] -- <test command>]\n       sanad.mjs next|status|ready|owed|pr-body [--repo <repo>] [--notes <dir>] [--last] [--out <file>]\n       sanad.mjs self-read [--repo <repo>] [--notes <dir>] --found <what you found and fixed, or none>';
+export const USAGE = 'Usage: sanad.mjs start --repo <repo> --notes <dir> [--base <ref>] [--engine claude|codex] [--ticket <file>] [--suite <words>] [--suite-ci <job>] [--receipts <dir>] [--side <name> [--cwd <dir>] [--server] [--fix-files <a,b>] -- <test command>]\n       sanad.mjs next|status|ready|owed|pr-body [--repo <repo>] [--notes <dir>] [--last] [--out <file>]\n       sanad.mjs self-read [--repo <repo>] [--notes <dir>] --found <what you found and fixed, or none>\n       sanad.mjs size [--repo <repo>] [--notes <dir>] --files <planned files> [--names <names>] [--up <size> --fact "<the fact the size check missed>" | --down <size> --words "<the owner\'s words>"]';
 
 // 2026-11-22 (owner, PR 3 item 1): the author reads its own diff against the "Every change" lines of review-checklist.md
 // and fixes what it finds before the checks, the proof and the review. The record holds the commit read, so a later
@@ -497,6 +512,44 @@ function selfRead(f, found, print) {
   if (said.length < 4) { print('SELF-READ: not recorded — --found needs what you found and fixed, or "none"'); return 2; }
   fs.writeFileSync(path.join(f.notesDir, SELF_READ), JSON.stringify({ commit: f.git.head, found: said, at: new Date().toISOString() }, null, 2) + '\n');
   print(`SELF-READ: recorded for commit ${f.git.head.slice(0, 10)} — ${said}`);
+  return 0;
+}
+
+// 2026-11-25 (owner, run 3: the size check said Small twice, the builder wrote Medium, and the full suite ran for nothing):
+// the size check saves the size, and the printed steps carry it (size.txt, which every step and review-brief.mjs read, and
+// size.json, the record of what the tool said). The builder types none. To size up, the builder names the fact the tool
+// missed in one line the owner sees; sizing down needs the owner's words. It is the step printer's record: no guard reads it.
+export const SIZE_RECORD = 'size.json';
+const SIZE_ORDER = ['tiny', 'small', 'medium', 'big'];
+const MIN_FACT = 12, MIN_WORDS = 8;
+function saveSize(f, o, print) {
+  if (!f.notesDir) { print('SANAD: no task for this work tree — run start first'); return 3; }
+  if (typeof sizeTool?.sizeTask !== 'function') { print('SIZE: not saved — size-check.mjs could not be loaded'); return 3; }
+  const list = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const files = list(o.files), names = list(o.names);
+  if (!files.length) { print('SIZE: not saved — give --files <the planned files, comma-separated>: the size check sizes the plan before code'); return 2; }
+  if (o.up && o.down) { print('SIZE: not saved — give --up or --down, not both'); return 2; }
+  const r = sizeTool.sizeTask({ repo: f.top, files, names: names.length ? names : null });
+  const tool = r.size, at = SIZE_ORDER.indexOf(tool);
+  let saved = tool, up = null, down = null;
+  if (o.up) {
+    const fact = String(o.fact || '').replace(/\s+/g, ' ').trim();
+    if (SIZE_ORDER.indexOf(o.up) <= at) { print(`SIZE: not saved — --up needs a size above the size check's ${tool} (${SIZE_ORDER.slice(at + 1).join(', ') || 'none'})`); return 2; }
+    if (fact.length < MIN_FACT) { print(`SIZE: not saved — --up needs --fact "<the fact the size check missed>" (at least ${MIN_FACT} characters), in one line the owner sees`); return 2; }
+    saved = o.up; up = { to: o.up, fact };
+  }
+  if (o.down) {
+    const words = String(o.words || '').replace(/\s+/g, ' ').trim();
+    if (SIZE_ORDER.indexOf(o.down) < 0 || SIZE_ORDER.indexOf(o.down) >= at) { print(`SIZE: not saved — --down needs a size below the size check's ${tool} (${SIZE_ORDER.slice(0, Math.max(0, at)).join(', ') || 'none'})`); return 2; }
+    if (words.length < MIN_WORDS) { print(`SIZE: not saved — sizing down needs the owner's words: --words "<the owner's words>" (at least ${MIN_WORDS} characters)`); return 2; }
+    saved = o.down; down = { to: o.down, words };
+  }
+  fs.writeFileSync(path.join(f.notesDir, 'size.txt'), saved + '\n');
+  fs.writeFileSync(path.join(f.notesDir, SIZE_RECORD), JSON.stringify({ tool, saved, mode: r.mode, ...(up ? { up } : {}), ...(down ? { down } : {}), files, names, at: new Date().toISOString() }, null, 2) + '\n');
+  if (typeof sizeTool.format === 'function') print(sizeTool.format(r));
+  print(up ? `SIZE UP: ${tool} → ${saved} — the fact the size check missed: ${up.fact}`
+    : down ? `SIZE DOWN: ${tool} → ${saved} — the owner's words: "${down.words}"`
+      : `SIZE SAVED: ${saved} — the size check's own answer; the printed steps carry it`);
   return 0;
 }
 
@@ -535,7 +588,7 @@ function start(o) {
 export async function main(argv, print = (line) => process.stdout.write(line + '\n'), { sessionNotes } = {}) {
   let o;
   try { o = parse(argv); } catch (error) { process.stderr.write(`SANAD: ${error.message}\n${USAGE}\n`); return 2; }
-  if (!['start', 'next', 'status', 'ready', 'owed', 'pr-body', 'self-read'].includes(o.cmd)) { process.stderr.write(USAGE + '\n'); return 2; }
+  if (!['start', 'next', 'status', 'ready', 'owed', 'pr-body', 'self-read', 'size'].includes(o.cmd)) { process.stderr.write(USAGE + '\n'); return 2; }
   try {
     if (o.cmd === 'start') { for (const l of [...start(o), ...nextLines(readFacts({ repo: o.repo, notes: path.resolve(o.notes) }))]) print(l); return 0; }
     const ask = { repo: path.resolve(o.repo), notes: o.notes ? path.resolve(o.notes) : '', last: Boolean(o.last), deep: o.cmd !== 'next', ...(sessionNotes ? { sessionNotes } : {}) };
@@ -545,6 +598,7 @@ export async function main(argv, print = (line) => process.stdout.write(line + '
     if (!ask.deep && !sessionNotes && f.pins.length) { await loadNotesTools(); f = readFacts(ask); }
     if (o.cmd === 'next') { for (const l of nextLines(f)) print(l); return 0; }
     if (o.cmd === 'self-read') return selfRead(f, o.found, print);
+    if (o.cmd === 'size') return saveSize(f, o, print);
     if (!f.notesDir) { print('SANAD: no task for this work tree — run start first'); return 3; }
     if (o.cmd === 'status') { for (const l of await statusLines(f)) print(l); return 0; }
     if (o.cmd === 'ready') {

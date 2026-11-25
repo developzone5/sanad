@@ -132,6 +132,10 @@ export function buildBrief({ repo, ticket, checks, list, dropped = [], design = 
     `Names the author searched (whole words): ${list.names.join(', ')}`, '',
     '## What to do', '',
     INSTRUCTIONS, '',
+    // 2026-11-25 (owner, test 4): the Settings badges and the view-as strip showed the same role value by another path,
+    // and the review found them two rounds later. One direct question, asked every time.
+    '## Where else is this value read or shown?', '',
+    `Answer it directly: where else is the value this change touches${list.names.some((x) => x.startsWith('data:')) ? ` (${list.names.filter((x) => x.startsWith('data:')).map((x) => x.slice(5)).join(', ')})` : ''} read or shown, by another path than the names above: another screen, a badge, a strip, a list, an export, a second word list for the same value? Each such place not on the list is a SIBLING line.`, '',
     '`<file>` is relative to the repo above.', '',
     '## Ticket lines', '',
     ...ticket.map((t, i) => (typeof t === 'string' ? `- T${i + 1}. ${t}` : `- T${t.n}. ${t.text}`)),

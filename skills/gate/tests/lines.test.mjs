@@ -141,3 +141,65 @@ test('--seed-check alone with --notes <dir> writes check.md of that folder (the 
   assert.equal(drop.status, 2, 'a drop names its lines file');
   assert.match(drop.stderr, /give the lines file: --out <notes>\/lines\.md or --notes <dir>/);
 });
+
+// 2026-11-25 (owner, run 3): a ticket sentence wrapped over four lines became T2 to T4, each cut mid-sentence. The ticket is
+// read as sentences, not line breaks. The run 3 ticket text, as it was saved:
+const RUN3 = 'In the members window of a section (GroupMembersModal), only the first 50 students of the section are listed.\n'
+  + 'A section with more than 50 students shows 50 rows while the header shows the full count, and student 51 and later\n'
+  + 'can be reached only by typing in the search box. The window must let the admin see and manage every student of the\n'
+  + 'section.\n';
+test('a wrapped sentence is one line, and two sentences on one line are two lines (run 3)', () => {
+  assert.deepEqual(ticketLines(RUN3), [
+    'In the members window of a section (GroupMembersModal), only the first 50 students of the section are listed.',
+    'A section with more than 50 students shows 50 rows while the header shows the full count, and student 51 and later can be reached only by typing in the search box.',
+    'The window must let the admin see and manage every student of the section.']);
+  // The lines file reads back as the same three lines, so a check line names T1..T3, each a whole sentence.
+  assert.deepEqual(readLines(renderLines(ticketLines(RUN3))).map((l) => l.replace(/^T\d+: /, '')), ticketLines(RUN3));
+});
+
+test('a heading, a bullet, a numbered item, a table row and a blank line still end a line; a quote, an abbreviation and Arabic are read whole', () => {
+  const text = '## Steps\n- Open the exam and wait\n  for Part 1 to end.\n1. Press Next\n2) Press Back\n| a | b |\n\n'
+    + 'Expected: "Part 1 ended. Moved to Part 2." Then the timer stops.\nUse a short form, e.g. the code, for the name.\n'
+    + 'Wait for the end, i.e. Part 2. Done means the list shows it.\nانتهى وقت الجزء الأول. يبدأ الجزء الثاني؟ نعم.\n';
+  assert.deepEqual(ticketLines(text), ['Steps', 'Open the exam and wait for Part 1 to end.', '1. Press Next', '2) Press Back', '| a | b |',
+    'Expected: "Part 1 ended. Moved to Part 2."', 'Then the timer stops.', 'Use a short form, e.g. the code, for the name.',
+    'Wait for the end, i.e. Part 2.', 'Done means the list shows it.', 'انتهى وقت الجزء الأول.', 'يبدأ الجزء الثاني؟', 'نعم.']);
+});
+
+// 2026-11-25 (owner, test 4: a line of background had no check line and failed two checks): the plan shows it as
+// "background, no check", and the owner's go on that plan is the words that drop it. No extra question.
+test('--drop T<n> --go "<the owner\'s go>" drops a background sentence with the go quoted; the command prints how', () => {
+  const dir = fs.mkdtempSync(path.join(root, 'background-'));
+  const from = path.join(dir, 'ticket.txt');
+  fs.writeFileSync(from, 'The role must show in the page language.\nEvery other word of the top bar is in Arabic, so this line looks broken.\n');
+  const out = path.join(dir, 'lines.md');
+  const made = run(['--from', from, '--out', out]);
+  assert.equal(made.status, 0, made.stderr);
+  assert.match(made.stdout, /^BACKGROUND: a sentence with nothing to prove goes in the plan as "T<n>: background, no check"; after the owner's go on that plan: node \S*lines\.mjs --drop T<n> --go "<the owner's go, quoted>" --out /m);
+  const r = run(['--drop', 'T2', '--go', 'Go.', '--out', out]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(fs.readFileSync(out, 'utf8'), /^T2\. \[dropped by the user: "background, no check; the owner's go on the plan: Go\."\] Every other word/m);
+  assert.deepEqual(droppedLines(fs.readFileSync(out, 'utf8')), [2], 'the ticket check reads it as dropped');
+  assert.equal(run(['--drop', 'T1', '--go', '', '--out', out]).status, 2, 'an empty go is refused');
+  const both = run(['--drop', 'T1', '--go', 'Go.', '--words', 'the owner said so', '--out', out]);
+  assert.equal(both.status, 2);
+  assert.match(both.stderr, /give --words or --go, not both/);
+  // Review (2026-11-25): `--go "No."` closed a ticket line. A go must say yes.
+  const no = run(['--drop', 'T1', '--go', 'No.', '--out', out]);
+  assert.equal(no.status, 2);
+  assert.match(no.stderr, /holds no go/);
+  assert.doesNotMatch(fs.readFileSync(out, 'utf8'), /^T1\. \[dropped/m);
+});
+
+// Review (2026-11-25): a line that ends a sentence with a one-letter word or a short form ("Part A.", "etc.") merged with
+// the next line; the old copy kept them apart.
+// Install suite (2026-11-25): a title with no stop joined the next line ("Fix the title Expected: once").
+test('a line with no stop joins the next one only when that line starts with a small letter', () => {
+  assert.deepEqual(ticketLines('Fix the title\nExpected: once\n'), ['Fix the title', 'Expected: once']);
+  assert.deepEqual(ticketLines('Members window\nshows 50 rows\nلا يظهر الدور\nبالعربية\n'), ['Members window shows 50 rows', 'لا يظهر الدور', 'بالعربية']);
+});
+
+test('a line that ends a sentence with a one-letter word or etc. still ends the line', () => {
+  assert.deepEqual(ticketLines('The student finishes Part A.\nThe timer of Part B must start at once.\nList the roles, names, etc.\nThe page must sort them by name.\n'),
+    ['The student finishes Part A.', 'The timer of Part B must start at once.', 'List the roles, names, etc.', 'The page must sort them by name.']);
+});

@@ -1052,3 +1052,95 @@ export function proofHint(own) {
   if (own.skipped) return `test ${names} is skipped: it never runs, so no break can make it fail`;
   return `its test ${names} is named by no caught break: a break of that test's rule whose mustFail names it (${JSON.stringify(own.titles[0])}) would prove it`;
 }
+
+// ---- Old entries (2026-11-25, owner: "an old entry blocks the ready check after the code or the test command moved on") ----
+//
+// Run 3 and test 4: a proof of one test file stayed in the record after a wider proof passed on today's code, and the ready
+// check (sanad.mjs) refused it until the old command ran again, with no code change. The promise: the ready check says
+// "proof done" only when every test that still exists and that any entry ever proved is proved, by a passing entry, on
+// the code as it is now. Read only: nothing here writes the record, and no other reader changes.
+//
+// An entry that is not ok on today's code stops blocking only when EACH test file it named is released:
+// - the file is no longer in the tree; or
+// - the file is the one the entry saw (same hash): each test it named, by its line and title, is in a NEWER passing entry
+//   on today's code that saw the file as it is now; or
+// - the file changed: each test the file declares today (testSpans), by its line and title (provenHas), is in such newer
+//   entries, and each test the old entry named with a printed name has that printed name among them too. The printed name
+//   only ever blocks: it never releases a test by itself.
+// And one newer passing entry, run in the same folder, holds every word of the old entry's command, so it ran every test
+// file and folder the old one ran. A newer passing entry counts as provenTests counts an entry: ok, at least one break,
+// today's code id, every break target as it was. An entry that is not ok (a failed or stopped proof) names no test, so nothing but a passing run of its own
+// command (which replaces it) clears it: another proof's pass never does. An entry that names no test never stops blocking.
+// Returns Map { <entry key> → { released, files: [{ file, released, why }], why? } } for every entry not ok on today's code.
+export function oldEntries(top, record = readRecord(top), today = codeFingerprint(top)) {
+  const out = new Map();
+  const all = Object.entries(record?.entries || {}).filter(([, e]) => e && typeof e === 'object');
+  const time = (e) => Date.parse(e.at || '') || 0;
+  const counts = (e) => Boolean(today) && e.ok === true && e.breaks >= 1 && e.code === today && e.caught && typeof e.caught === 'object'
+    && e.files && typeof e.files === 'object' && e.targets && typeof e.targets === 'object' && Object.keys(e.targets).length > 0
+    && Object.entries(e.targets).every(([f, h]) => hashOrNull(top, f) === h);
+  const live = all.filter(([, e]) => counts(e));
+  for (const [key, old] of all) {
+    if (old.ok === true && today && old.code === today) continue;
+    const named = old.ok === true && old.caught && typeof old.caught === 'object' && !Array.isArray(old.caught) ? old.caught : {};
+    const files = Object.keys(named).filter((f) => Array.isArray(named[f]) && named[f].length);
+    if (!files.length) {
+      out.set(key, { released: false, files: [], why: old.ok === true ? 'it names no test' : 'its last run did not end PROVED: only a passing run of its own command clears it' });
+      continue;
+    }
+    // Review (2026-11-25): a renamed test file is not gone. A file counts as no longer in the tree only when git, comparing the
+    // old entry's code tree with today's, reads it as deleted (with rename detection). Any doubt keeps the entry blocking.
+    let changes = null;
+    const deleted = (file) => {
+      if (changes === null) {
+        changes = new Map();
+        try {
+          const outText = execFileSync('git', ['diff-tree', '-r', '-M', '--name-status', '-z', String(old.code || ''), String(today)], { cwd: top, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+          const parts = outText.split('\0');
+          for (let i = 0; i + 1 < parts.length;) {
+            const status = parts[i];
+            if (!status) { i++; continue; }
+            if (/^[RC]/.test(status)) { changes.set(parts[i + 1], status[0]); i += 3; } else { changes.set(parts[i + 1], status[0]); i += 2; }
+          }
+        } catch { changes = new Map([['\0failed', 'X']]); }
+      }
+      return changes.get(file) === 'D';
+    };
+    // A test the old entry named with its printed name needs that printed name, with the same title, in a newer passing
+    // entry (review: two rows of one test table share a line and a title). It only ever blocks.
+    const printedIn = (t, newer) => !(t.ran !== undefined && t.ran !== null && String(t.ran)) || newer.some((n) => String(n.ran ?? '') === String(t.ran) && n.title === t.title);
+    const rows = files.map((file) => {
+      if (!fs.existsSync(path.join(top, file))) {
+        return deleted(file) ? { file, released: true, why: 'no longer in the tree' } : { file, released: false, why: 'it is not here, and git does not read it as deleted since that proof (renamed, or not known)' };
+      }
+      const now = hashOrNull(top, file);
+      // The newer passing entries that saw this file as it is now: their tests' lines are today's lines.
+      const newer = live.filter(([k, e]) => k !== key && time(e) > time(old) && now && objOf(e.files)[file] === now)
+        .flatMap(([, e]) => (Array.isArray(e.caught[file]) ? e.caught[file] : []).filter((t) => t && Number.isInteger(t.line) && typeof t.title === 'string'));
+      const tests = named[file].filter((t) => t && typeof t === 'object');
+      if (now && objOf(old.files)[file] === now) {
+        const missing = tests.filter((t) => !newer.some((n) => n.line === t.line && n.title === t.title && (!(t.ran !== undefined && t.ran !== null && String(t.ran)) || String(n.ran ?? '') === String(t.ran))));
+        return missing.length ? { file, released: false, why: `${missing.length} of its tests are in no newer passing entry on today's code` } : { file, released: true, why: 'each of its tests is in a newer passing entry' };
+      }
+      let text;
+      try { text = fs.readFileSync(path.join(top, file), 'utf8'); } catch { return { file, released: false, why: 'the file cannot be read' }; }
+      const spans = testSpans(text, file);
+      const unproved = spans.filter((s) => !provenHas(newer, s));
+      if (unproved.length) return { file, released: false, why: `the file changed, and ${unproved.length} of its ${spans.length} tests today are in no newer passing entry` };
+      const gone = tests.filter((t) => !printedIn(t, newer));
+      if (gone.length) return { file, released: false, why: `the file changed, and ${gone.length} of the tests it named by their printed name are in no newer passing entry` };
+      return { file, released: true, why: 'the file changed, and every test it has today is in a newer passing entry' };
+    });
+    // Owner case 1: a rerun of one test file must not release a proof whose command also ran a folder. The tests an entry
+    // ran are more than the tests it names, so a newer passing entry on today's code, run in the same folder, must hold
+    // every word of the old entry's command (`node --test a.test.js more/` ⊄ `node --test a.test.js`), and add only test
+    // files to it (review: an added `--exclude more/**` ran less). This only blocks.
+    const words = Array.isArray(old.command) ? old.command.map(String) : [];
+    const ranAll = words.length > 0 && live.some(([k, e]) => k !== key && time(e) > time(old) && String(e.cwd || '') === String(old.cwd || '')
+      && Array.isArray(e.command) && words.every((w) => e.command.map(String).includes(w))
+      && e.command.map(String).every((w) => words.includes(w) || (TEST_FILE.test(w) && !w.startsWith('-'))));
+    if (!ranAll) { out.set(key, { released: false, files: rows, why: 'no newer passing entry on today\'s code ran every part of its command (a test file or a folder it named)' }); continue; }
+    out.set(key, { released: rows.every((r) => r.released), files: rows });
+  }
+  return out;
+}

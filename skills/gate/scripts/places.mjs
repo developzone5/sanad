@@ -28,6 +28,10 @@
 //       label is never followed to another line: a place with one is kept only while nothing moved. A place of an older list keeps its number and outcome while it
 //       is still exactly one declaration; when it was two, it is `(gone)` with its outcome left on its line,
 //       both declarations are new and open, and each OPEN line says so.
+//   node places.mjs --repo <path> --names <...> --data <owner.field,...> --out <places.md>
+//       2026-11-25: besides the names, the data the change touches (a field or property, as `user.roles`; a text key's
+//       last two parts, as `enums.roles`): every function that shows or writes it is a place (searchData, below); the
+//       other reads are one folded `read only` line that names every file. Stored as `data:<owner>.<field>` in Names.
 //   node places.mjs --refresh <places.md> [--repo <path>]
 //       The stored search again, in the stored repo (or in --repo: a task's worktree of it), as above.
 //   node places.mjs --check <places.md> [--check-lines <check.md>]
@@ -119,6 +123,101 @@ export function searchName(repo, name, { skip = '' } = {}) {
     product.get(file).push(line);
   }
   return { product, tests: [...tests].sort() };
+}
+
+// 2026-11-25 (owner, test 4): the list missed the Settings badges and the view-as strip, which showed the same role value
+// by another path than the function names searched. A data name, `data:<owner>.<field>` (from --data user.roles), lists
+// the places that read the value: `<owner>.<field>` on any receiver whose name ends in the owner word (`user`,
+// `currentUser`, `state.user?.`, the owner's first letter in either case), outside test files. A read is an open place
+// only when its function shows or writes the value: the read is on a JSX line (`{…}` or a `<tag`) or inside t(…); it is
+// written (`= …`); or it is kept in a name that the function shows (`{name`, `${name`). A value passed into a call counts
+// when the function shows what the call gives back (`const a = f(user.roles)` … `{a`). Every other read (a yes/no check
+// such as `.includes(`, a value kept and never shown) is folded: one `read only` line with every file named, all in the
+// folded file, `--unfold F<n>` lists them as open places. The whole-word search of --names is unchanged.
+export const DATA = /^data:([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)$/;
+// Whether the end of `prefix` (the start of one line) is inside a quoted text: '…', "…" or `…`, but not inside a `${…}` hole
+// of a template, which is code. One line only: a text that opened on a line above is not seen.
+function insideText(prefix) {
+  let quote = null;
+  const holes = [];
+  for (let i = 0; i < prefix.length; i++) {
+    const c = prefix[i];
+    if (quote) {
+      if (c === '\\') { i++; continue; }
+      if (quote === '`' && c === '$' && prefix[i + 1] === '{') { holes.push(0); quote = null; i++; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (holes.length && c === '{') { holes[holes.length - 1]++; continue; }
+    if (holes.length && c === '}') { if (holes[holes.length - 1]) holes[holes.length - 1]--; else { holes.pop(); quote = '`'; } continue; }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+  }
+  return quote !== null;
+}
+// A yes/no check of the value. Review (2026-11-25): `.length` is no check, since `{user.roles.length}` shows a count.
+const CHECK_CALL = /^\s*(?:\?\.|\.)\s*(?:includes|some|every|indexOf)\b/;
+export function searchData(repo, name, { skip = '' } = {}) {
+  const [, owner, field] = DATA.exec(name);
+  // Either case of the first letter, for the owner word and for the field (review 2026-11-25: a C# `user.Roles`).
+  const cased = (w) => `[${w[0].toLowerCase()}${w[0].toUpperCase()}]${escapeRe(w.slice(1))}`;
+  const ownerRe = `[\\w$]*${cased(owner)}`, fieldRe = cased(field);
+  // A plain extended pattern for git (no Perl patterns on every git build): every line that holds the owner word and the
+  // field word; the exact read, destructuring or write is told below.
+  const ere = (w) => `[${w[0].toLowerCase()}${w[0].toUpperCase()}]${w.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`;
+  const r = spawnSync('git', ['-c', 'core.quotepath=off', 'grep', '-n', '-I', '-E', '--untracked', '-z', '-e', ere(owner), '--and', '-e', ere(field)],
+    { cwd: repo, encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024 });
+  if (r.error) throw usage(`git grep failed in ${repo}: ${r.error.message}`);
+  if (r.status !== 0 && r.status !== 1) throw usage(`git grep failed in ${repo}: ${String(r.stderr).trim() || 'exit ' + r.status}`);
+  const skips = [].concat(skip).filter(Boolean);
+  const product = new Map(), tests = new Set(), folded = new Map();
+  // A read: `user.roles`, `user?.roles`, `user['roles']`, `user?.['roles']` (review 2026-11-25: the bracket form was missed).
+  const read = new RegExp(`${ownerRe}(?:[?!]?\\s*\\.\\s*${fieldRe}(?![\\w$])|\\s*(?:\\?\\.)?\\s*\\[\\s*(['"\`])${fieldRe}\\1\\s*\\])`, 'g');
+  // Destructuring from the owner (`const { roles } = user`, `{ roles: r } = currentUser`): the name it keeps.
+  const unpack = new RegExp(`\\{([^{}]*)\\}\\s*=\\s*(?:await\\s+)?[\\w$.?]*${ownerRe}(?![\\w$])`);
+  // A write inside an object built from the owner (`{ ...user, roles: next }`).
+  const spread = new RegExp(`\\.\\.\\.\\s*[\\w$.?]*${ownerRe}(?![\\w$])[^}]*(?<![\\w$])${fieldRe}\\s*:`);
+  const texts = new Map();
+  const linesOf = (file) => { if (!texts.has(file)) { let t = null; try { t = fs.readFileSync(path.join(repo, file), 'utf8').split(/\r?\n/); } catch { /* gone */ } texts.set(file, t); } return texts.get(file); };
+  for (const row of String(r.stdout).split('\n')) {
+    const a = row.indexOf('\0'), b = a < 0 ? -1 : row.indexOf('\0', a + 1);
+    if (b < 0) continue;
+    const file = row.slice(0, a), line = Number(row.slice(a + 1, b)), text = row.slice(b + 1);
+    if (skips.some(s => same(path.join(repo, file), s))) continue;
+    if (TEST_FILE.test(file)) { tests.add(file); continue; }
+    const code = codeOnly(text);
+    const add = (map) => { if (!map.has(file)) map.set(file, []); if (!map.get(file).includes(line)) map.get(file).push(line); };
+    // The line as written, with its comment taken off (a comment line, a `// …` tail): a match there is no read.
+    const live = text.replace(/\r$/, '').replace(/^\s*(?:\/\/|\/\*|\*).*$/, '').replace(/(?:^|\s)\/\/\s.*$/, '');
+    const reads = [...live.matchAll(read)];
+    const lines = linesOf(file);
+    const bodyOf = () => { const span = lines && typeof sizeCheck.functionSpan === 'function' ? sizeCheck.functionSpan(lines, line - 1) : null; return lines ? (span ? lines.slice(span.start, span.end + 1) : lines).join('\n') : ''; };
+    // Shown: a kept name inside the braces of a JSX line (also passed into a call there: `{renderBadge(roles)}`, review
+    // 2026-11-25), or inside a `${…}` hole.
+    const shows = (keptName) => {
+      const word = `(?<![\\w$.])${escapeRe(keptName)}(?![\\w$])`, body = bodyOf();
+      return body.split('\n').some((l) => /^\s*[{)]|<[A-Za-z/]/.test(l) && new RegExp(`\\{[^{}]*${word}`).test(l)) || new RegExp(`\\$\\{[^}]*${word}`).test(body);
+    };
+    if (!reads.length) {
+      if (spread.test(codeOnly(live))) { add(product); continue; }
+      const u = unpack.exec(codeOnly(live));
+      const entry = u && u[1].split(',').map((s) => s.trim()).find((s) => new RegExp(`^${fieldRe}(?![\\w$])`).test(s));
+      if (!entry) continue;
+      const alias = /:\s*([A-Za-z_$][\w$]*)/.exec(entry);
+      add(shows(alias ? alias[1] : entry.split(/[\s=]/)[0]) ? product : folded);
+      continue;
+    }
+    // A match inside a quoted text (not inside a `${…}` hole): a text key (`t(\`users.enums.roles.${r}\`)`), read to be shown.
+    if (reads.some(m => insideText(live.slice(0, m.index)))) { add(product); continue; }
+    const tail = (m) => live.slice(m.index + m[0].length);
+    if (reads.some(m => /^\s*=(?!=)/.test(tail(m)))) { add(product); continue; }
+    if (reads.every(m => CHECK_CALL.test(tail(m).replace(/^\s*\?\.\s*\[[^\]]*\]/, '')))) { add(folded); continue; }
+    if (/^\s*\{|<[A-Za-z]/.test(text) || /\bt\(/.test(code)) { add(product); continue; }
+    const kept = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/.exec(code);
+    // A value kept in a name: open when the function shows that name. A value passed on (returned, a call's argument, an
+    // array's item: `displayList(user.roles.map(…))`, review 2026-11-25) can be shown by what gets it: open.
+    add(!kept || shows(kept[1]) ? product : folded);
+  }
+  return { product, tests: [...tests].sort(), folded };
 }
 
 // 2026-11-17 (audit, "distinct methods collapse into a single place"): hits were grouped by the bare name
@@ -517,8 +616,12 @@ export function typeFamily(repo, type, member = '') {
 // The folded uses of a list sit beside it: places.md → places.folded.md.
 export const foldedPath = (out) => path.resolve(out).replace(/\.md$/i, '') + '.folded.md';
 // "F1 · RoleService.UpdateAsync · other type · 377 use(s) in 212 file(s) · e.g. a.cs, b.cs, c.cs"
-const FOLD = /^F(\d+) · (.+?) · other type · (\d+) use\(s\) in (\d+) file\(s\)/;
-export const foldLine = (f) => `F${f.n} · ${f.name} · other type · ${f.uses} use(s) in ${f.files} file(s)${f.samples && f.samples.length ? ' · e.g. ' + f.samples.join(', ') : ''}`;
+// 2026-11-25: a data name's line reads `read only` and names every file: "F2 · data:user.roles · read only · 92 use(s) in
+// 60 file(s) · files: a.tsx, b.tsx, …".
+const FOLD = /^F(\d+) · (.+?) · (other type|read only) · (\d+) use\(s\) in (\d+) file\(s\)/;
+export const foldLine = (f) => f.kind === 'read only'
+  ? `F${f.n} · ${f.name} · read only · ${f.uses} use(s) in ${f.files} file(s)${f.samples && f.samples.length ? ' · files: ' + f.samples.join(', ') : ''}`
+  : `F${f.n} · ${f.name} · other type · ${f.uses} use(s) in ${f.files} file(s)${f.samples && f.samples.length ? ' · e.g. ' + f.samples.join(', ') : ''}`;
 
 // "P3 (new) · name · file · function · lines 12, 40 → outcome"; the older shape has no function part and
 // reads as the file's own place. The outcome is all text after the first arrow that follows the lines field,
@@ -535,7 +638,7 @@ export function parsePlaces(text) {
     const m = PLACE.exec(row);
     if (m) places.push({ n: Number(m[1]), mark: m[2] || '', name: m[3], file: m[4], fn: m[5] || FILE_PART, lines: m[6].trim(), outcome: m[7].trim() });
     const f = m ? null : FOLD.exec(row);
-    if (f) folded.push({ n: Number(f[1]), name: f[2], uses: Number(f[3]), files: Number(f[4]), samples: (/ · e\.g\. (.*)$/.exec(row) || ['', ''])[1].split(', ').filter(Boolean) });
+    if (f) folded.push({ n: Number(f[1]), name: f[2], uses: Number(f[4]), files: Number(f[5]), samples: (/ · (?:e\.g\.|files:) (.*)$/.exec(row) || ['', ''])[1].split(', ').filter(Boolean), ...(f[3] === 'read only' ? { kind: f[3] } : {}) });
   }
   // `Uses:` place number → hash of its use lines; a list of an older release has none, and keeps every outcome.
   let uses = {};
@@ -574,7 +677,7 @@ export function renderPlaces({ repo, names, searched, places, tests, uses = {}, 
 
 // The folded uses, every one: a file per line with its line numbers. The reviewer reads this file.
 function renderFolded(list, out) {
-  const rows = ['# Folded uses — the same member word in files that do not name the type', '',
+  const rows = ['# Folded uses — the same member word in files that do not name the type, and reads of a data name that do not show or write it', '',
     `List: ${path.resolve(out).replace(/\\/g, '/')}`,
     'places.mjs writes this file on each run. `places.mjs --refresh <list> --unfold F<n>` lists a group again as open places.', ''];
   for (const f of list.folded) {
@@ -616,7 +719,11 @@ export function writePlaces({ repo, names = [], out, now = new Date(), unfold = 
     // A name that was folded and whose type is gone (renamed) has nothing to fold by: its uses are places again.
     if (tm && !family && wasFolded && !unfolded.has(name)) { unfolded.add(name); reopened.push(name); }
     const byMember = Boolean(tm && (family || unfolded.has(name)));
-    const hit = searchName(top, byMember ? tm[2] : name, { skip });
+    // 2026-11-25: a data name (data:<owner>.<field>) lists the functions that show or write the value; the other reads fold.
+    const data = DATA.test(name) ? searchData(top, name, { skip }) : null;
+    if (data && unfolded.has(name)) for (const [file, lines] of data.folded) data.product.set(file, [...new Set([...(data.product.get(file) || []), ...lines])].sort((a, b) => a - b));
+    else if (data && data.folded.size) folds.set(name, { kind: 'read only', rows: [...data.folded].map(([file, lines]) => ({ file, lines })).sort((a, b) => (a.file < b.file ? -1 : 1)), tests: [] });
+    const hit = data ? { product: data.product, tests: data.tests } : searchName(top, byMember ? tm[2] : name, { skip });
     if (byMember && family && family.extension) extensions.push(name);
     if (byMember && family && !family.extension && !unfolded.has(name)) {
       // A file stays when it names the type, a derived type or its interface; a file that cannot be read stays.
@@ -697,7 +804,8 @@ export function writePlaces({ repo, names = [], out, now = new Date(), unfold = 
     const f = folds.get(name);
     if (!f) continue;
     const had = old && old.folded.find(x => x.name === name);
-    folded.push({ n: had ? had.n : nextF++, name, uses: f.rows.reduce((n, r) => n + r.lines.length, 0), files: f.rows.length, samples: f.rows.slice(0, 3).map(r => r.file), rows: f.rows, tests: f.tests });
+    // A data name's folded line names every file of its other reads (2026-11-25, owner: none is hidden).
+    folded.push({ n: had ? had.n : nextF++, name, uses: f.rows.reduce((n, r) => n + r.lines.length, 0), files: f.rows.length, samples: (f.kind ? f.rows : f.rows.slice(0, 3)).map(r => r.file), rows: f.rows, tests: f.tests, ...(f.kind ? { kind: f.kind } : {}) });
   }
   const list = { repo: top, names: all, searched: now.toISOString(), places, tests, wide, uses, folded, unfolded: [...unfolded], reopened, extensions };
   if (dry) return list;
@@ -877,7 +985,7 @@ function liveCode(repo, p) {
   const nums = [...String(p.lines).matchAll(/\d+/g)].map(m => Number(m[0]));
   if (!nums.length || String(p.lines).includes('more')) return true;
   // A Type.Member name is searched by its member word (2026-11-19), so that word as code counts too.
-  const tm = TYPE_MEMBER.exec(p.name);
+  const tm = TYPE_MEMBER.exec(p.name) || DATA.exec(p.name);
   const re = new RegExp(`(?<![\\w$])(?:${escapeRe(p.name)}${tm ? '|' + escapeRe(tm[2]) : ''})(?![\\w$])`);
   return nums.some(n => n < 1 || n > lines.length || re.test(codeOnly(lines[n - 1])));
 }
@@ -919,7 +1027,7 @@ function parse(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--add-changed') { o['add-changed'] = true; continue; }
-    if (!['--repo', '--names', '--out', '--refresh', '--check', '--check-lines', '--close', '--set', '--unfold', '--base'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
+    if (!['--repo', '--names', '--data', '--out', '--refresh', '--check', '--check-lines', '--close', '--set', '--unfold', '--base'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
     if (k === '--set') {
       const v = argv[++i], eq = v.indexOf('=');
       if (eq < 1) throw usage('--set needs "<which>=<outcome>", e.g. --set "file:src/Other.tsx=none: another screen\'s own state"');
@@ -927,6 +1035,14 @@ function parse(argv) {
       continue;
     }
     o[k.slice(2)] = argv[++i];
+  }
+  // 2026-11-25: --data <owner.field,...> adds data names (data:<owner>.<field>) to --names.
+  if (o.data !== undefined) {
+    const items = o.data.split(',').map(s => s.trim()).filter(Boolean);
+    const bad = items.filter(s => !DATA.test('data:' + s));
+    if (!items.length || bad.length) throw usage(`--data: "${bad.join(', ') || o.data}" is not <owner>.<field> (the owner word and the field, e.g. user.roles)`);
+    o.names = [...(o.names ? o.names.split(',') : []), ...items.map(s => 'data:' + s)].join(',');
+    delete o.data;
   }
   if (o.close) {
     if (o.out || o.refresh || o.check || o.unfold || o['add-changed'] || o.base) throw usage('--close goes alone, with its --set options');
@@ -945,7 +1061,7 @@ function parse(argv) {
   return o;
 }
 
-const USAGE = 'Usage: node places.mjs --repo <path> --names <n1,n2,...> --out <places.md> [--add-changed --base <ref>]\n' +
+const USAGE = 'Usage: node places.mjs --repo <path> --names <n1,n2,...> [--data <owner.field,...>] --out <places.md> [--add-changed --base <ref>]\n' +
   '       node places.mjs --refresh <places.md> [--repo <path>] [--unfold <F1,F2>] [--add-changed --base <ref>] [--check <places.md> [--check-lines <check.md>]]\n' +
   '       node places.mjs --check <places.md> [--check-lines <check.md>]\n' +
   '       node places.mjs --close <places.md> --set "<P1,P2 | file:<path> | name:<name> | fn:<function>>=<C<n> | none: <reason>>" [--set ...]\n';

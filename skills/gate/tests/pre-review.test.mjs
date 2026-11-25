@@ -280,7 +280,8 @@ test('a package with no node_modules here: lint and types run in the clone on th
   assert.deepEqual(named('lint').map(c => c.name).sort(), ['lint app (1 file, on pc2)', 'lint web (1 file)'], 'the package with node_modules stays here');
   const [lint] = named('lint app'), [types] = named('types app');
   assert.equal(lint.cmd, 'ssh'); assert.equal(lint.remote, true);
-  const there = String.raw`cd /d "C:\r\My App\app" && C:/n/node.exe `;
+  // 2026-11-25 (owner, test 4): the pinned Node's folder comes first on the path, so a program the check starts finds it too.
+  const there = String.raw`set "PATH=C:\n;%PATH%" && cd /d "C:\r\My App\app" && C:/n/node.exe `;
   assert.deepEqual(lint.args.slice(-2), ['pc2', there + 'node_modules/eslint/bin/eslint.js src/b.ts']);
   assert.equal(types.name, 'types app (on pc2)');
   assert.ok(types.args.at(-1).startsWith(there + String.raw`node_modules/typescript/bin/tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile %TEMP%\sanad-tsc-`), types.args.at(-1));

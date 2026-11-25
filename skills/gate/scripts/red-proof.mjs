@@ -1522,7 +1522,15 @@ async function main() {
     // (sanad.remoteTestEnv, a database connection) goes only to `dotnet` runs; --test-env always applies.
     const dotnetRun = isDotnetCommand(command);
     const envFile = (opt('--test-env') || (dotnetRun ? gitText(['config', '--get', 'sanad.remoteTestEnv']) : '')).replace(/\\/g, '/');
-    const remoteCmd = [q(remoteNode), q(dir + '/red-proof.mjs'), '--repo', q(remoteRepo), '--local', '--plan', q(dir + '/' + planName),
+    // 2026-11-25 (owner, test 4): only a bare `node` became the pinned Node (sanad.remoteNode), so an `npm` or `npx` test
+    // command, and every program the tests start, took the test machine's own Node (26, not the pinned 20). The pinned
+    // Node's folder now goes first on the path of the whole remote command. A folder with a sign the shell reads is left
+    // off, and said: the run itself goes on as before.
+    const nodeDir = /[\\/]/.test(remoteNode) ? path.posix.dirname(remoteNode.replace(/\\/g, '/')) : '';
+    const plainDir = Boolean(nodeDir) && !/["'%&|<>^`$!;\r\n]/.test(nodeDir);
+    if (nodeDir && !plainDir) say(`RED-PROOF: the pinned Node's folder (${nodeDir}) holds a sign the shell reads, so it is not put first on the path of the test machine; only a bare \`node\` uses the pinned Node.`);
+    const pathFirst = !plainDir ? '' : windows ? `set "PATH=${nodeDir.replace(/\//g, '\\')};%PATH%" && ` : `PATH='${nodeDir}':"$PATH" `;
+    const remoteCmd = pathFirst + [q(remoteNode), q(dir + '/red-proof.mjs'), '--repo', q(remoteRepo), '--local', '--plan', q(dir + '/' + planName),
       ...(opt('--parallel') ? ['--parallel', String(parallel)] : []), '--timeout-min', String(timeoutMin), ...(envFile ? ['--test-env', q(envFile)] : []),
       '--base', 'HEAD', '--cwd', q(rel ? remoteRepo + '/' + rel : remoteRepo), '--log', q(dir + '/' + logName),
       '--', q(exe), ...command.slice(1).map(q)].join(' ');

@@ -141,7 +141,9 @@ export const STEPS = [
     ] },
   { id: 'places', loop: 'Step 1, item 4', lanes: CODE, light: true,
     done: (f) => f.has.places,
-    lines: (c) => [{ text: `${tool(c, 'places.mjs')} --repo ${p(c.repo)} --names NAMES --out ${note(c, 'places.md')}` }] },
+    lines: (c) => [{ text: `${tool(c, 'places.mjs')} --repo ${p(c.repo)} --names NAMES --data DATA --out ${note(c, 'places.md')}` },
+      // 2026-11-25 (owner, test 4): the same value shown by another path was missed; the data search lists it.
+      { text: 'DATA: the field, property or text key the change shows or writes, as <owner>.<field> (user.roles, enums.roles); leave --data out only when the change touches no data', plain: true }] },
   { id: 'check-lines', loop: 'Step 1, item 5', lanes: CODE, beside: 'second-look',
     done: (f) => f.has.check,
     lines: (c) => [{ text: `${tool(c, 'lines.mjs')} --seed-check --notes ${p(c.notes)}` }] },
@@ -163,7 +165,10 @@ export const STEPS = [
   { id: 'size', loop: 'Step 1, item 8', lanes: ALL,
     done: (f) => f.has.size,
     lines: (c) => [
-      { text: `${tool(c, 'size-check.mjs')} --repo ${p(c.repo)} --files PLANNED-FILES --names NAMES` },
+      // 2026-11-25 (owner, run 3: the size check said Small twice, the builder wrote Medium, and the full suite ran for
+      // nothing): the size check saves the size (size.txt and size.json), and every later step carries it.
+      { text: `${tool(c, 'sanad.mjs')} size --repo ${p(c.repo)} --notes ${p(c.notes)} --files PLANNED-FILES --names NAMES` },
+      { text: 'it runs the size check on the plan and saves its size; the builder types no size. To size up, add --up <size> --fact "<the fact the size check missed>" (the owner sees that line); sizing down needs the owner\'s words: --down <size> --words "<the owner\'s words>"', plain: true },
       { text: 'the size line; Medium and Big: the PR plan, then wait for the OK', plain: true },
     ] },
   { id: 'design-choice', loop: 'Step 2', lanes: ['big'], when: (f) => f.switches.designChoice,

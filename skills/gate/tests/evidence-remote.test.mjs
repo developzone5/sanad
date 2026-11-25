@@ -131,3 +131,30 @@ test('a local run passes; an ssh run outside the clone is not asked about the te
   assert.match(elsewhere.reason, /not bound to the test machine clone/);
   assert.equal(asked, 0);
 });
+
+// 2026-11-25 (owner, test 4): a suite on the test machine ran its own Node 26, not the pinned Node 20 (sanad.remoteNode).
+// The pinned Node's folder goes first on the path of the remote line; no new refusal; the receipt keeps the spec's command.
+test('a suite on the test machine runs with the pinned Node first on its path; the receipt keeps the command as written', async () => {
+  const { repo, git } = fixture();
+  git('config', 'sanad.remoteNode', 'C:/tools/node-v20/node.exe');
+  const tree = await localTree(repo);
+  const marker = path.join(root, 'ran-pinned');
+  const line = 'cd /d C:\\Users\\Tester\\source\\repos\\App\\web && node node_modules/vitest/vitest.mjs run';
+  const args = ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(-2)))`, 'pc2', line];
+  const result = await runCommand({ executable: ssh, args, cwd: repo, outputRoot: root, remoteProbe: () => ({ tree, dirty: '' }) });
+  assert.equal(result.status, 'passed', result.reason);
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker, 'utf8')), ['pc2', 'set "PATH=C:\\tools\\node-v20;%PATH%" && ' + line]);
+  assert.equal(result.args.at(-1), line, 'the receipt holds the spec\'s command');
+  assert.equal(result.remote.pinnedNodeFirst, true);
+});
+
+test('withPinnedNode: a POSIX clone, no pinned folder, and a folder with a shell sign', async () => {
+  const { withPinnedNode } = await import('../scripts/evidence.mjs');
+  const remote = { host: 'box', repo: '/srv/app', sshArgs: ['box'] };
+  assert.deepEqual(withPinnedNode(['box', 'cd /srv/app && npm test'], remote, '/opt/node20/bin/node'), ['box', "PATH='/opt/node20/bin':\"$PATH\"; cd /srv/app && npm test"]);
+  const same = ['box', 'cd /srv/app && npm test'];
+  assert.equal(withPinnedNode(same, remote, 'node'), same, 'a bare node: nothing to put first');
+  const told = [];
+  assert.equal(withPinnedNode(same, remote, '/opt/no%de/node', (l) => told.push(l)), same);
+  assert.match(told[0], /holds a sign the shell reads/);
+});

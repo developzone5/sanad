@@ -20,7 +20,7 @@ Loaded by the `sanad-implementation` stage. "Sanad Step N" anywhere means the st
 
 ## Size — the size check picks it
 
-Before code: `node <gate>/size-check.mjs --repo <repo> --files <planned files> --names <the places list names>`. It runs again on the real change inside `pre-review`. `SIZE GREW` means: add what the larger size needs, now.
+Before code: `node <gate>/sanad.mjs size --notes <notes> --files <planned files> --names <names>` saves the size; type none. `pre-review` reruns `size-check.mjs`; on `SIZE GREW` add `--up <size> --fact "<the missed fact>"`.
 
 - **Small** — one side (page or server) and no risk signal. No experts, no waiting. One quick review, started with the proof's first two runs. A slow suite is left to CI and the PR text says so.
 - **Medium** — both sides, a query, the shared API or another medium signal. The proof, fresh eyes and the other engine, the full suite.
