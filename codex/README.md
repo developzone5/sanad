@@ -19,7 +19,7 @@ For an existing setup, first copy the current files into an untouched base and a
 
 Keep the current task's repository instructions. If Codex does not already enter Sanad, explicitly invoke the Sanad skill or add a pointer to the canonical workflow in the project's instructions; do not overwrite an existing `AGENTS.md`.
 
-After the checks pass and the user approves, use the [versioned release installer](../scripts/workflow-install.sh). Use the bundled script path for a first installation, or the installed script for an update. Do not install by copying files over a live setup. The installer checks drift, backs up changed files and runs the suites. These relative wrappers assume the canonical resources live in `~/.claude`; a nondefault location needs corresponding reference changes in the candidate.
+After the checks pass and the user approves, use the [versioned release installer](../scripts/workflow-install.sh). Use the bundled script path for a first installation, or the installed script for an update. Do not install by copying files over a live setup; the one exception is a text-only change (kind 1 of Sanad Step 0), which is edited in the Sanad repo and the installed copy in the same step. The installer checks drift, backs up changed files and runs the suites. These relative wrappers assume the canonical resources live in `~/.claude`; a nondefault location needs corresponding reference changes in the candidate.
 
 ## Runtime and evidence
 
