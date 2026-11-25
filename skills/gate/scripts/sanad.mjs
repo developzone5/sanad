@@ -30,7 +30,7 @@ import path from 'node:path';
 import { isMain } from './is-main.mjs';
 import { parseSiblings, jobOpenReason } from './siblings.mjs';
 import { requestStart, report as timerReport } from './sanad-timer.mjs';
-import { readRecord, codeFingerprint, recordKey } from './proof-record.mjs';
+import { readRecord, codeFingerprint, recordKey, oldEntries } from './proof-record.mjs';
 import { foreignLine as foreignText } from './change-set.mjs';
 import { beforeProofPassed, notesInputs, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
 import { due, render, switchLines, stopRound, askOwner, pathFor, GATE_DIR, q } from './steps.mjs';
@@ -291,7 +291,15 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
       && (k === key || (Array.isArray(e.command) && e.command.join('\0') === s.testCommand.join('\0') && String(e.cwd || '') === cwd)));
   };
   const missingSides = sides.length >= 2 && !foreign && today ? sides.filter((s) => !sideProved(s)).map((s) => s.name) : [];
-  const proofDone = proved.length > 0 && ents.every((e) => e.ok === true) && Boolean(today) && proved.every((e) => e.code === today) && !missingSides.length;
+  // 2026-11-25 (owner, old proof entries; run 3: one more proof run, test 4: two, with no code change): an entry that is
+  // not ok on today's code blocks until each test it named is proved by a newer passing entry on today's code, or is no
+  // longer in the tree (proof-record.mjs oldEntries). Never by its age, and never because another entry passed.
+  const old = today && !foreign ? oldEntries(top, record, today) : new Map();
+  const current = Object.values(record?.entries || {}).filter((e) => e && e.ok === true && e.code && e.code === today);
+  // Review (2026-11-25): an ok entry with no code id (the format before 2026-11-17) proves nothing today, so it blocks too.
+  const blocking = Object.entries(record?.entries || {}).filter(([k, e]) => e && !(e.ok === true && e.code && e.code === today) && !old.get(k)?.released);
+  const proofDone = current.length > 0 && Boolean(today) && !blocking.length && !missingSides.length;
+  const oldBlocking = blocking.map(([k, e]) => ({ command: Array.isArray(e.command) ? e.command.join(' ') : '', why: old.get(k)?.why || (old.get(k)?.files || []).filter((x) => !x.released).map((x) => `${x.file}: ${x.why}`).join('; ') || 'not proved on today\'s code' }));
   const logs = (sides.length ? sides : [{ name: 'tests' }]).map((s) => at(`proof-${s.name}.log`));
   const progress = logs.map((l) => readJson(l + '.progress.json')).filter(Boolean);
 
@@ -350,7 +358,7 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
     pins, lastPin, pinAtHead, round: pins.filter((p) => p && !p.short).length, reviewReported: pinAtHead && reviewReported(lastPin, read.reviews, reports, reportFiles), reviewSeats: reviewProgress(lastPin, read.reviews, reports, reportFiles),
     // 2026-11-20 (timed task): every proof log of the folder (proof*.log), so the review step names them all.
     proofLogs: dir ? (() => { try { return fs.readdirSync(dir).filter((n) => /^proof.*\.log$/i.test(n)).sort().map((n) => at(n)); } catch { return []; } })() : [],
-    proof: { done: proofDone, missingSides, entries: ents.length, breaks: proved.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
+    proof: { done: proofDone, missingSides, entries: ents.length, oldBlocking: current.length ? oldBlocking : [], breaks: current.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
     // beforeProof (2026-11-23): the last whole `pre-review --before-proof` run passed on the work tree as it is now.
     checks: { code: undefined, all: undefined, beforeProof: !foreign && ahead > 0 && dir ? beforeProofPassed(top, undefined, notesInputs(BEFORE_PROOF_FILES.map((n) => at(n))), base) : false },
     suite: { done: Boolean(receipt || ci), receipt, ci, mark: task.suite || '' },
@@ -399,7 +407,7 @@ export async function readyItems(f) {
   add('review', f.pinAtHead && f.reviewReported, f.pinAtHead ? (f.reviewReported ? `round ${f.round} is pinned to HEAD and a reviewer has reported` : f.reviewSeats && f.reviewSeats.need > 1 && f.reviewSeats.have > 0 ? `round ${f.round} is pinned to HEAD, but only ${f.reviewSeats.have} of ${f.reviewSeats.need} reviewer seats have a finished report after the pin` : `round ${f.round} is pinned to HEAD, but no completed reviewer run after the pin is on record`) : f.lastPin ? `the last review read ${String(f.lastPin.commit || '').slice(0, 10)}, HEAD is ${f.git.head.slice(0, 10)}: no re-check of the fix` : 'no pinned review');
   add('notes', f.notes.known && !f.notes.open.length, !f.notes.known ? 'the notes list could not be read' : f.notes.open.length ? `${f.notes.open.length} note(s) open: ${f.notes.open.map((n) => n.n).join(', ')}` : 'every note answered');
   // On the tests-only lane (switch on and tests only) no PROVED proof entry is asked for.
-  if (!noProof && !light) add('proof', f.proof.done, f.proof.done ? `${f.proof.breaks} break(s) caught on this tree` : f.git.foreign ? 'not read: too many untracked files' : f.proof.missingSides.length ? `no proof of the side(s): ${f.proof.missingSides.join(', ')}` : f.proof.entries ? 'the proof record is not for this tree, or a run did not end PROVED (a partial run is no proof)' : 'no proof record');
+  if (!noProof && !light) add('proof', f.proof.done, f.proof.done ? `${f.proof.breaks} break(s) caught on this tree` : f.git.foreign ? 'not read: too many untracked files' : f.proof.missingSides.length ? `no proof of the side(s): ${f.proof.missingSides.join(', ')}` : f.proof.oldBlocking?.length ? `an older proof entry still blocks: ${f.proof.oldBlocking.slice(0, 2).map((o) => `\`${o.command.slice(0, 100)}\` (${o.why.slice(0, 200)})`).join('; ')}${f.proof.oldBlocking.length > 2 ? ` and ${f.proof.oldBlocking.length - 2} more` : ''}: run that proof again on this tree` : f.proof.entries ? 'the proof record is not for this tree, or a run did not end PROVED (a partial run is no proof)' : 'no proof record');
   add('suite', f.suite.done, f.suite.ci ? `left to CI: ${f.suite.ci}` : f.suite.receipt ? `passed on this tree (${f.suite.receipt.runId || 'receipt'})` : !f.git.tree ? 'uncommitted or untracked work: no receipt can be for this tree' : !f.suite.mark ? 'no suite command named (start --suite)' : 'no passing full-suite receipt for this tree');
   add('ticket lines', f.has.lines && (text || (f.has.check && (light || (f.has.places && !f.open.places && !f.open.siblings)))), !f.has.lines ? 'no lines file' : text ? 'lines file kept' : !f.has.check ? 'no check lines' : light ? 'tests-only: lines and check lines kept' : `${f.open.places} place(s) and ${f.open.siblings} second-look line(s) open`);
   add('one commit', f.git.ahead === 1 && f.git.clean, `${f.git.ahead} commit(s) on ${f.base}${f.git.clean ? '' : ', with uncommitted or untracked work'}`);
