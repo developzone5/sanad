@@ -179,7 +179,7 @@ test('--brief lists the notes of two reports once each, in order, under the fixe
   const launch = starting(r.stdout, 'LAUNCH:');
   assert.equal(launch.length, 1, 'one launch line:\n' + r.stdout);
   // The whole line: the words after the brief's path keep the agent read-only and its answer to the lines asked for.
-  assert.equal(launch[0], `LAUNCH: Agent braintrust-expert · prompt: Check each K note, before any fix. Read and follow only the brief at ${slash(f.brief)}. ` +
+  assert.equal(launch[0], `LAUNCH: Agent note-checker · prompt: Check each K note, before any fix. Read and follow only the brief at ${slash(f.brief)}. ` +
     'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the BRIEF line the brief gives, then the CONFIRMED, REFUTED and UNSURE lines, one per note.');
   // Never a reviewer prompt: the stop and push hooks count one as a finished review.
   assert.doesNotMatch(launch[0].replace(/^LAUNCH: Agent \S+ · prompt: /, ''), /^\s*You are the independent reviewer\b/i);

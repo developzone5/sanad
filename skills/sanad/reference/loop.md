@@ -23,7 +23,7 @@ Loaded by the `sanad-implementation` stage. "Sanad Step N" anywhere means the st
 Before code: `node <gate>/size-check.mjs --repo <repo> --files <planned files> --names <the places list names>`. It runs again on the real change inside `pre-review`. `SIZE GREW` means: add what the larger size needs, now.
 
 - **Small** — one side (page or server) and no risk signal. No experts, no waiting. One quick review, started with the proof's first two runs. A slow suite is left to CI and the PR text says so.
-- **Medium** — both sides, a database query, the shared API contract, or another medium signal. The proof, one full review, the full suite.
+- **Medium** — both sides, a query, the shared API or another medium signal. The proof, fresh eyes and the other engine, the full suite.
 - **Big** — access, money, a migration, concurrency, files or URLs, a dependency, or a function with more than 10 callers. The boss routes ([boss-routing.md](boss-routing.md)); experts plan first (`/braintrust`); then the full review round.
 - **Text only** (the check says tiny) — Small without rules 1 to 3: no list and no test. Lint, a look at the screen, one review.
 - **Tests only** (owner's yes; switch `sanad.testsOnlyLane`) — only tests change: no places list, no second look; the proof of each new or changed test, one review, the suite once.

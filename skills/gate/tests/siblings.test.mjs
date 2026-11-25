@@ -83,7 +83,7 @@ test('--brief writes the brief from the ticket lines, the check lines and the pl
   for (const l of placeLines) assert.ok(text.includes('\n- ' + l + '\n'), 'place in the brief: ' + l + '\n' + text);
   const launch = r.stdout.split(/\r?\n/).filter((l) => l.startsWith('LAUNCH:'));
   assert.equal(launch.length, 1, 'one launch line:\n' + r.stdout);
-  assert.ok(launch[0].startsWith('LAUNCH: Agent braintrust-expert · prompt: Seat: Sibling check, before code. '), launch[0]);
+  assert.ok(launch[0].startsWith('LAUNCH: Agent second-look · prompt: Seat: Sibling check, before code. '), launch[0]);
   // Never a reviewer prompt: the stop and push hooks count one as a finished review (2026-11-14).
   assert.doesNotMatch(launch[0].replace(/^LAUNCH: Agent \S+ · prompt: /, ''), /^\s*You are the independent reviewer\b/i);
   assert.ok(launch[0].includes(slash(brief)), 'the prompt names the brief: ' + launch[0]);

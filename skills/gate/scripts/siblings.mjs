@@ -25,7 +25,7 @@
 //   node siblings.mjs --brief --notes <dir> --repo <repo>
 //       Writes <notes>/siblings-brief.md from <notes>/lines.md (ticket lines), <notes>/check.md (check lines)
 //       and <notes>/places.md (the places, from places.mjs), with fixed instructions, and prints the one launch
-//       line for the Agent tool (braintrust-expert, a read-only planning seat; never a reviewer prompt, which
+//       line for the Agent tool (second-look, a read-only planning seat; never a reviewer prompt, which
 //       the hooks would count as a finished review). Its prompt names the brief only.
 //   node siblings.mjs --record <report file> --notes <dir>
 //       Reads the agent's report: its `SIBLING: <file>:<line> · <what> — <why>` lines, or `SIBLINGS: none`,
@@ -147,7 +147,7 @@ export function buildBrief({ repo, ticket, checks, list, dropped = [], design = 
 }
 
 export function launchLine(brief) {
-  return `LAUNCH: Agent braintrust-expert · prompt: ${PROMPT_START} Read and follow only the brief at ${slash(brief)}. ` +
+  return `LAUNCH: Agent second-look · prompt: ${PROMPT_START} Read and follow only the brief at ${slash(brief)}. ` +
     'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING, OUTSIDE PR and SAME JOB lines (or SIBLINGS: none and SAME JOB: none).';
 }
 

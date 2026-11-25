@@ -325,3 +325,31 @@ test('pinRefusal names a foreign folder with the shared FOREIGN? line', () => {
   assert.match(line, /^FOREIGN\? other\/ holds 300 untracked files: /);
   assert.equal(pinRefusal({ at: 'a'.repeat(40), uncommitted: ['notes.md'], untracked: ['x.log'], foreign: [] }), '');
 });
+
+// 2026-11-25 (owner): a medium round has two seats, the fresh eyes and the other engine, so the ready check waits for
+// both reports (sanad.mjs reads pin.seats). Only Big gets the read-only copy. The re-check runs on its own agent file
+// (recheck-reviewer, high); the whole diff of a Big task keeps routine-reviewer (xhigh).
+test('--pin on a medium change saves two seats, the fresh eyes and the other engine, and makes no copy', () => {
+  const f = fixture();
+  const r = f.run('--pin', '--size', 'medium');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const pins = readPins(f.notes);
+  assert.equal(pins.length, 1);
+  assert.deepEqual(pins[0].seats, ['fresh eyes', 'other engine']);
+  assert.equal(pins[0].frozen, '', 'the read-only copy is for Big only');
+  assert.equal((f.read('launch.md').match(/codex exec -s read-only/g) || []).length, 1);
+});
+
+test('the re-check launch names recheck-reviewer; the Big whole diff keeps routine-reviewer', () => {
+  const recheck = buildRecheckLaunch({ brief: 'C:/n/brief-recheck-2.md', repo: 'C:/r', round: 2, engine: 'claude', risk: {} });
+  assert.match(recheck, /^## Re-check, whole diff \(Claude\) — Agent recheck-reviewer, run_in_background$/m);
+  assert.doesNotMatch(recheck, /Agent routine-reviewer/);
+  const short = buildRecheckLaunch({ brief: 'C:/n/brief-recheck-2.md', repo: 'C:/r', round: 2, engine: 'claude', risk: {}, short: true });
+  assert.match(short, /Agent recheck-reviewer/, 'the short check after the last round is a re-check too');
+  // The risk reviewer of a re-check stays the xhigh independent-reviewer.
+  const withRisk = buildRecheckLaunch({ brief: 'C:/n/brief-recheck-2.md', repo: 'C:/r', round: 2, engine: 'claude', risk: { access: ['a.js'] }, files: [{ name: 'a.js' }] });
+  assert.match(withRisk, /^## Re-check, risk files \(Claude\) — Agent independent-reviewer, run_in_background$/m);
+  const big = buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b', size: 'big' });
+  assert.match(big, /^## Whole diff \(Claude\) — Agent routine-reviewer, run_in_background$/m);
+  assert.doesNotMatch(big, /recheck-reviewer/);
+});

@@ -286,3 +286,20 @@ test('the seat and class lists stay parallel to the notes with an unreadable FAI
   assert.deepEqual(r.reviewNoteSeats, ['fresh eyes', 'risk files', 'risk files']);
   assert.deepEqual(r.reviewNoteClasses, ['', 'CALLERS', 'TIME']);
 });
+
+// 2026-11-25 (owner, effort by role): the second look, the note check and the re-check run on their own agent files
+// at high. Each keeps the kind of the file it came from: the second look and the note check are expert seats (only
+// their questions are notes, never a reviewer run); the re-check is a reviewer run, by its prompt.
+test('the new agent files keep their kind: second-look and note-checker are expert seats, recheck-reviewer is a reviewer run', () => {
+  const ASKS = 'Two designs fit.\n- Keep one table or split it? You decide.';
+  const sibling = scanOf(run('sl', 1, { subagent_type: 'second-look', prompt: 'Seat: Sibling check, before code. Read and follow only the brief at C:/notes/siblings-brief.md.' }, ASKS));
+  assert.deepEqual(sibling.reviewNoteSeats, ['expert: sibling check']);
+  assert.equal(sibling.lastReviewerRun, -1, 'the second look is never a reviewer run');
+  // The note check's K prompt has no "Seat:" start: only its agent type makes it an expert run.
+  const k = scanOf(run('nc', 1, { subagent_type: 'note-checker', prompt: 'Check each K note, before any fix. Read and follow only the brief at C:/notes/note-check-brief.md.' }, ASKS));
+  assert.deepEqual(k.reviewNoteSeats, ['expert']);
+  assert.equal(k.lastReviewerRun, -1, 'the note check is never a reviewer run');
+  const recheck = scanOf(run('rc', 1, { subagent_type: 'recheck-reviewer', prompt: 'You are the independent reviewer — re-check (whole-diff pass on the fix only). Read and follow only the brief at C:/notes/brief-recheck-2.md.' }, 'RECOMMEND: FAIL\n- Bug — Upload.cs:3 — the size check is off by one'));
+  assert.deepEqual(recheck.reviewNoteSeats, ['re-check']);
+  assert.ok(recheck.lastReviewerRun > -1, 'the re-check is a reviewer run');
+});

@@ -22,7 +22,7 @@
 //       hash of the repo and the note lines), the repo when given, fixed instructions, the line the answer must
 //       start with (`BRIEF <id>`), then `K<n> · <kind> · from <report file name> · <note text>` per note. The
 //       hooks' parser cuts a long note (at 300 characters today): such a note gets a second, indented line with
-//       its whole text from the report. Prints the one launch line for the Agent tool (braintrust-expert, a
+//       its whole text from the report. Prints the one launch line for the Agent tool (note-checker, a
 //       read-only seat; never a reviewer prompt, which the hooks would count as a finished review); its prompt
 //       names the brief only. Then a THEN line with the --record command; a path with a space is in quotes.
 //       A new brief starts a new check: the last one's note-check-report.md and note-check.md are removed, and
@@ -620,7 +620,7 @@ export function briefIds(text) {
 }
 
 export function launchLine(brief, guard = true) {
-  return `LAUNCH: Agent braintrust-expert · prompt: ${guard ? PROMPT_START : PROMPT_START_K} Read and follow only the brief at ${slash(brief)}. ` +
+  return `LAUNCH: Agent note-checker · prompt: ${guard ? PROMPT_START : PROMPT_START_K} Read and follow only the brief at ${slash(brief)}. ` +
     'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the BRIEF line the brief gives, then the CONFIRMED, REFUTED and UNSURE lines, one per note.';
 }
 

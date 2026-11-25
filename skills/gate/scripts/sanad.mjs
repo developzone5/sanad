@@ -81,6 +81,19 @@ export function reviewProgress(pin, reviews, reports = [], reportFiles = []) {
   const need = Math.max(1, new Set(seats).size);
   const from = Date.parse(pin && pin.at);
   if (!Number.isFinite(from)) return { need, have: 0, matched: true };
+  // 2026-11-25 (owner): a medium round is the task's own fresh eyes and one review by the other engine. Each seat
+  // counts only its own engine: two runs of the task's engine never fill both seats. The other engine is a report
+  // file of the other prefix (`reports`); with no session scan, the task's own seat is a file of its own prefix
+  // (`reportFiles` holds both prefixes, so its own files are the ones `reports` does not hold).
+  const unique = [...new Set(seats)];
+  if (unique.length === 2 && unique.includes('fresh eyes') && unique.includes('other engine')) {
+    const newer = (list) => (Array.isArray(list) ? list : []).filter((t) => Number.isFinite(t) && t > from).length;
+    const other = newer(reports) > 0 ? 1 : 0;
+    const own = Array.isArray(reviews)
+      ? (reviews.some((r) => Date.parse(r.launchAt) >= from && Number.isFinite(Date.parse(r.doneAt))) ? 1 : 0)
+      : (newer(reportFiles) - newer(reports) > 0 ? 1 : 0);
+    return { need: 2, have: own + other, matched: true, ...(Array.isArray(reviews) ? {} : { fromFiles: newer(reportFiles) > 0 }) };
+  }
   if (!Array.isArray(reviews)) {
     // 2026-11-20: no session scan, so no run is known. A seat is reported when its report file is newer than the pin.
     const filed = (Array.isArray(reportFiles) ? reportFiles : []).filter((t) => Number.isFinite(t) && t > from).length;
