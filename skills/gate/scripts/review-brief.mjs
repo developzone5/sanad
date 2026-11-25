@@ -784,7 +784,7 @@ async function readSessionNotes(repo, notesDir, { taskOnly = false } = {}) {
 export function roundLimitRefusal({ round, stop, notes, since }) {
   if (!(Number(round) > Number(stop))) return '';
   const head = `ROUND LIMIT: round ${round} is past the owner's stop round ${stop} (git config sanad.stopRound; 3 when it is not set). No brief was written.`;
-  const tail = ' The open notes go to the owner in one list (notes.mjs ask): fix now, or a known limit in the PR text. Only an open Blocker, security note or ticket-line note, the fix of one found in the last round, or the owner\'s words on a note of the last round open another round; only the owner raises the limit.';
+  const tail = ' The open notes go to the owner in one list (notes.mjs ask): fix now, or a known limit in the PR text. Only an open Blocker, security note or ticket-line note, or the fix of one found in the last round, opens another round; the owner\'s words on a note of the last round open the short check (--recheck), not a round; only the owner raises the limit.';
   if (!notes || notes.failed || !Array.isArray(notes.list)) return `${head} The notes could not be read (${(notes && notes.failed) || 'no list'}), so no open Blocker, security note or ticket-line note can be shown.${tail}`;
   const lastRound = (n) => Number.isInteger(since) && Number(n.n) > since;
   const opens = (n) => {
@@ -795,6 +795,27 @@ export function roundLimitRefusal({ round, stop, notes, since }) {
   };
   return notes.list.some((n) => n && opens(n)) ? '' : head + tail;
 }
+
+// 2026-11-25 (owner, "the check fits the change"): past the stop round a fix gets a check of its own size. What the
+// next --recheck is: 'round' (a full re-check round: within the limit, or an open Blocker, security note or ticket-line
+// note, or the fix of one found in the last round), 'short' (the short check: only the owner's words on a note of the
+// last round opened it; it is no round) or the refusal text. The tool decides, never the author.
+export function nextCheck({ round, stop, notes, since }) {
+  if (!(Number(round) > Number(stop))) return 'round';
+  const refusal = roundLimitRefusal({ round, stop, notes, since });
+  if (refusal) return refusal;
+  const lastRound = (n) => Number.isInteger(since) && Number(n.n) > since;
+  // A Blocker, a security note or a ticket-line note of the last round opens a round however it was answered: fixed, or
+  // with the owner's words (review: "fix this Blocker now", recorded as `user`, got the short check).
+  const reopens = (n) => {
+    const state = n.state || 'open';
+    if (state === 'open') return reopensRound(n);
+    return lastRound(n) && (state === 'fixed' || state === 'user') && reopensRound(n);
+  };
+  return notes.list.some((n) => n && reopens(n)) ? 'round' : 'short';
+}
+// The rounds a task has had: its pins, but for the short checks (they are no round).
+export const countedRounds = (pins) => (pins || []).filter((p) => p && !p.short).length;
 
 // The files a pin refuses: code that is not in the pinned commit. A reviewer of that commit would never see them.
 export function pinRefusal(set) {
@@ -858,17 +879,23 @@ function noteRows(notes) {
 // `notes`: { list: [...] } from sessionNotes (notes.mjs), or { failed: <why> }. With no readable note the brief says
 // so and tells the reviewer where the reports are; it never shows an empty list as "no earlier notes".
 // `callers`: { text } from the size check's range form, or { failed }.
-export function buildRecheckBrief({ repo, branch, from, to, round, fromRound = '', files = [], callers = {}, notes = {}, decided = [], decisions = [], notesDir = '', code = [] }) {
+// `short` (2026-11-25): the short check after the last round, { afterRound, testsOnly, tooLarge }. It is no round.
+export function buildRecheckBrief({ repo, branch, from, to, round, fromRound = '', files = [], callers = {}, notes = {}, decided = [], decisions = [], notesDir = '', code = [], short = null }) {
   const list = Array.isArray(notes.list) ? notes.list : [];
   const why = notes.failed || (list.length ? '' : 'the notes reader gave no note for this task');
   return tidy([
     'You are a code reviewer on a re-check after a fix. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; or "no findings" and what you checked. ' + TEST_IN_NOTE + ' Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any.', '',
-    `Re-check, round ${round}. The round number is information only: report every finding you have.`, '',
+    ...(short ? [
+      `Short check after round ${short.afterRound}, the last review round: it is no new round. Report every finding you see, as always. Only a Blocker, a security note or a ticket-line note opens a new round; each Bug or Gap goes to the owner's end list, one line each.`,
+      ...(short.testsOnly ? ['Only test files changed in this fix: read each changed test and the product code it tests; can each changed test still fail?'] : []),
+      ...(short.tooLarge && short.tooLarge.length ? [`This fix is large (${short.tooLarge.join('; ')}): read every changed file whole.`] : []),
+    ] : [`Re-check, round ${round}. The round number is information only: report every finding you have.`]), '',
     `Repo: ${repo}, branch ${branch}. The fix is the change from commit ${from}${fromRound ? ` (round ${fromRound}, already reviewed)` : ''} to commit ${to}: \`git diff ${from} ${to}\`. Only these two commits count. When a file in the folder differs from the new commit, the commit counts: \`git show ${to}:<path>\`.`, '',
     '## Files the fix changed', '',
     ...(files.length ? files.map(f => `- ${f.name}${f.added ? ' (new in this fix: read the whole file)' : f.deleted ? ' (deleted by this fix)' : ` — ${f.lines} changed line(s)`}`) : ['- none']), '',
     '## Callers of the changed functions', '',
-    callers.failed ? `The size check gave no callers for this range (${callers.failed}). Find the callers of each changed function yourself, by search, before you pass a fix.`
+    callers.tests ? 'Only test files changed: no product function changed, so there is no caller to read.'
+      : callers.failed ? `The size check gave no callers for this range (${callers.failed}). Find the callers of each changed function yourself, by search, before you pass a fix.`
       : callers.text ? `Callers: ${callers.text}` : 'The size check found no caller of a changed function in this range. Search once yourself for a caller it misses.', '',
     '## Earlier notes and their answers', '',
     ...(why ? [`The earlier notes could not be read here (${why}). Read the reviewers' reports${notesDir ? ' in ' + notesDir : ' in the notes folder'} and the author's NOTE lines before you judge the fix; say in your report which notes you checked.`]
@@ -887,7 +914,7 @@ export function buildRecheckBrief({ repo, branch, from, to, round, fromRound = '
 // The re-check's launch lines. Every prompt starts with the reviewer words and holds "re-check", so the guards count
 // the run and give its notes the re-check seat (hooks/lib/transcript-scan.js REVIEWER_PROMPT, reviewerSeat).
 // `risk`: the fix's risk signals with their files (fixSignals); with one, the risk reviewer re-checks too.
-export function buildRecheckLaunch({ brief, repo, round, engine = 'claude', risk = {}, files = [], codexHome = '' }) {
+export function buildRecheckLaunch({ brief, repo, round, engine = 'claude', risk = {}, files = [], codexHome = '', short = false }) {
   if (!ENGINES.includes(engine)) throw new Error('--engine must be one of ' + ENGINES.join(', '));
   // `risk` null: the size check gave no signals, so the risk reviewer gets every changed file and every question.
   const withRisk = risk === null || Object.keys(risk).length > 0;
@@ -899,7 +926,7 @@ export function buildRecheckLaunch({ brief, repo, round, engine = 'claude', risk
   const codex = (name, prompt, role) => codexRun({ repo, out: `${dir}/codex-recheck-${round}${name}.md`, log: `${dir}/codex-recheck-${round}${name}.log`, prompt, role, codexHome });
   return [
     '# Launch lines (copy as they are)', '',
-    `Engine: ${engine === 'codex' ? 'Codex' : 'Claude'} — re-check, round ${round}: ${withRisk ? 'the whole-diff reviewer and the risk reviewer (a changed file carries a risk signal)' : 'the whole-diff reviewer'}.`, '',
+    `Engine: ${engine === 'codex' ? 'Codex' : 'Claude'} — ${short ? 'the short check after the last round (no new round)' : `re-check, round ${round}`}: ${withRisk ? 'the whole-diff reviewer and the risk reviewer (a changed file carries a risk signal)' : 'the whole-diff reviewer'}.`, '',
     ...(engine === 'codex'
       ? ['## Re-check, whole diff (Codex) — Bash, run_in_background', '', ...codex('', `${whole} ${roleSentence(CODEX_ROLE.whole)}${tail}`, CODEX_ROLE.whole),
         ...(withRisk ? ['## Re-check, risk files (Codex) — Bash, run_in_background', '', ...codex('-risk', [`${riskPrompt[0]} ${roleSentence(CODEX_ROLE.risk)}${tail}`, ...riskPrompt.slice(1)].join('\n'), CODEX_ROLE.risk)] : [])]
@@ -1014,16 +1041,21 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     // (`notes`), so the next check can tell the last round's notes.
     let taskList = null;
     const taskNotes = async () => (taskList ||= await readSessionNotes(repo, notesDir, { taskOnly: true }));
+    // 2026-11-25: it answers what the save is: 'round', or 'short' (the short check past the limit, no round; nextCheck).
+    // Rounds are counted without the short checks (countedRounds). A short check made twice at one commit stays one.
     const guardRound = async (kind) => {
       const pins = readPins(notesDir);
-      if (!pins.length) return;
+      if (!pins.length) return 'round';
       const last = pins[pins.length - 1];
       const again = last.kind === kind && last.commit === head && last.tree === git(repo, ['rev-parse', head + '^{tree}']);
-      const round = again ? last.round : pins.reduce((max, x) => Math.max(max, Number.isInteger(x.round) ? x.round : 0), 0) + 1;
+      if (again && last.short) return 'short';
+      const counted = countedRounds(pins);
+      const round = again ? counted : counted + 1;
       const stop = stopRound(git(repo, ['config', '--get', 'sanad.stopRound']));
-      if (round <= stop) return;
-      const refusal = roundLimitRefusal({ round, stop, notes: await taskNotes(), since: Number.isInteger(last.noteCount) ? last.noteCount : undefined });
-      if (refusal) throw new Error(refusal);
+      const next = nextCheck({ round, stop, notes: round > stop ? await taskNotes() : null, since: Number.isInteger(last.noteCount) ? last.noteCount : undefined });
+      if (next !== 'round' && next !== 'short') throw new Error(next);
+      if (next === 'short' && kind === 'full') throw new Error(`ROUND LIMIT: round ${round} is past the owner's stop round ${stop}. Past it, the owner's words on a note of the last round open the short check, not a new full round: commit the fix and run --recheck. No brief was written.`);
+      return next;
     };
     const noteCount = async () => { const got = await taskNotes(); return got.failed ? undefined : got.list.reduce((max, n) => Math.max(max, Number(n.n) || 0), 0); };
     const checks = checkLines(fs.readFileSync(o.check, 'utf8'));
@@ -1074,6 +1106,35 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
       const files = rangeFiles(repo, last.commit, head);
       const before = Array.isArray(last.signals) ? last.signals : null;
       const tooLarge = recheckTooLarge({ files, newSignals: before ? signalKeys.filter(k => !before.includes(k)) : [] });
+      // 2026-11-25 (owner): past the stop round, the tool picks the check from what changed (nextCheck). A short check
+      // is no round: one whole-diff reviewer on the fix (and the risk reviewer when a changed file carries a risk
+      // signal); a fix of test files only gets its changed test lines read. Every finding is still written.
+      const kindOfCheck = await guardRound('recheck');
+      if (kindOfCheck === 'short') {
+        // Test files only, judged on the two commits themselves (`git diff <last checked commit> HEAD`, the files above),
+        // never against a common ancestor (review: an amend that puts product code back to the base looked tests-only).
+        // And the size check's own tests-only rule on that same range: a test-named file that product code imports is
+        // product code (review: a fix of test/helpers.js, imported by a.js, looked tests-only). Unsure is product code.
+        let testsOnly = files.length > 0 && files.every((f) => TEST_FILE.test(f.name));
+        if (testsOnly) { try { testsOnly = sizeTask({ repo, range: { from: last.commit, at: head } }).testsOnly === true; } catch { testsOnly = false; } }
+        const range = testsOnly ? { rows: [], callers: '' } : sizeFacts(repo, base, { extra: ['--from', last.commit, '--at', head] });
+        const notes = await readSessionNotes(repo, notesDir);
+        const risk = testsOnly ? {} : facts.signals ? fixSignals(facts.signals, files) : null;
+        const withRisk = risk === null || Object.keys(risk).length > 0;
+        const afterRound = countedRounds(pins);
+        const saved = addPin(notesDir, { kind: 'recheck', short: true, testsOnly, commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: ['whole diff', ...(withRisk ? ['risk files'] : [])], frozen: '', signals: signalKeys, noteCount: await noteCount() });
+        const refNote = keepPin(saved.round);
+        const branchNow = git(repo, ['branch', '--show-current']) || '(detached)';
+        const briefFile = path.join(notesDir, `brief-short-${saved.round}.md`), launchFile = path.join(notesDir, 'launch.md');
+        const engineNow = resolveEngine(notesDir, o.engine);
+        fs.writeFileSync(briefFile, buildRecheckBrief({ repo, branch: branchNow, from: last.commit, to: head, code: codeBlock({ repo, mergeBase: last.commit, pin: head, rows: range.rows || [] }), round: saved.round, fromRound: last.round, files, callers: testsOnly ? { tests: true } : range.failed ? { failed: range.failed } : { text: range.callers }, notes, decided: outside.decided, decisions, notesDir: notesDir.replace(/\\/g, '/'), short: { afterRound, testsOnly, tooLarge } }));
+        fs.writeFileSync(launchFile, buildRecheckLaunch({ brief: briefFile.replace(/\\/g, '/'), repo, round: saved.round, engine: engineNow, risk, files, short: true }));
+        const code = files.filter(f => isCodeFile(f.name) && !TEST_FILE.test(f.name));
+        process.stdout.write(refNote + `ENGINE: ${engineNow}\n` +
+          `SHORT CHECK: after round ${afterRound}, the last round (no new round) · ${testsOnly ? 'test files only' : 'product code'} · git diff ${last.commit.slice(0, 12)} ${head.slice(0, 12)} · ${files.length} file(s), ${code.reduce((s, f) => s + f.lines, 0)} code line(s) · seats: ${saved.seats.join(', ')}\n` +
+          `BRIEF: ${briefFile}\nLAUNCH: ${launchFile}\n`);
+        return;
+      }
       if (tooLarge.length) {
         tooLargeLine = `Re-check too large (${tooLarge.join('; ')}): this is the full brief for the next round, from the pinned commit.`;
         // Not a re-check any more: the full briefs are written below, pinned to HEAD, as a new full round.
@@ -1085,7 +1146,6 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
         // With no signals (the size check failed) the risk reviewer re-checks too: nothing says the fix is free of risk.
         const risk = facts.signals ? fixSignals(facts.signals, files) : null;
         const withRisk = risk === null || Object.keys(risk).length > 0;
-        await guardRound('recheck');
         const saved = addPin(notesDir, { kind: 'recheck', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: ['whole diff', ...(withRisk ? ['risk files'] : [])], frozen: '', signals: signalKeys, noteCount: await noteCount() });
         const refNote = keepPin(saved.round);
         const branchNow = git(repo, ['branch', '--show-current']) || '(detached)';

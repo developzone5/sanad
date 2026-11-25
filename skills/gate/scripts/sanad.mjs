@@ -333,7 +333,8 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
     },
     open: { places: openCount(readText(at('places.md')), 'P'), siblings: openCount(readText(at('siblings.md')), 'SJ') + refusedJobs(readText(at('siblings.md')), dir) },
     git: { head: head[1] || '', headTree: head[2] || '', tree, clean, changed: tracked > 0 || untracked > 0, ahead, untracked, foreign, foreignDirs: foreign ? foreignDirs(loose) : [] },
-    pins, lastPin, pinAtHead, round: pins.length, reviewReported: pinAtHead && reviewReported(lastPin, read.reviews, reports, reportFiles), reviewSeats: reviewProgress(lastPin, read.reviews, reports, reportFiles),
+    // A short check after the last round is no round (review-brief.mjs nextCheck, 2026-11-25).
+    pins, lastPin, pinAtHead, round: pins.filter((p) => p && !p.short).length, reviewReported: pinAtHead && reviewReported(lastPin, read.reviews, reports, reportFiles), reviewSeats: reviewProgress(lastPin, read.reviews, reports, reportFiles),
     // 2026-11-20 (timed task): every proof log of the folder (proof*.log), so the review step names them all.
     proofLogs: dir ? (() => { try { return fs.readdirSync(dir).filter((n) => /^proof.*\.log$/i.test(n)).sort().map((n) => at(n)); } catch { return []; } })() : [],
     proof: { done: proofDone, missingSides, entries: ents.length, breaks: proved.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
@@ -413,7 +414,7 @@ export async function owedItems(f) {
 
 /** The evidence block of the PR text: every line from a record, between two lines that name the tree. */
 export function evidenceBlock(f) {
-  const kinds = f.pins.map((p) => p.kind || 'full').join(', ');
+  const kinds = f.pins.map((p) => (p.short ? 'short check' : p.kind || 'full')).join(', ');
   const answered = f.notes.all.filter((n) => !f.notes.open.includes(n));
   const by = (re) => answered.filter((n) => re.test(String(n.state || ''))).length;
   const noteNumbers = (d) => (Array.isArray(d.notes) ? d.notes : []).map((x) => Number(String(x).replace(/^\D+/, ''))).filter(Number.isFinite);
