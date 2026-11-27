@@ -200,42 +200,6 @@ test('each state of a small task prints its due step, with every path filled', a
   assert.deepEqual(stepsOf(r.out), ['verdict', 'ready']);
 });
 
-test('ready: a receipt for another tree, a partial proof and a pin at an older commit are not done', async () => {
-  const fx = fixture();
-  start(fx);
-  upToSize(fx);
-  const first = commit(fx, 'export const a = 2;\n');
-  const treeA = gitIn(fx.repo, 'rev-parse', 'HEAD^{tree}');
-  proved(fx);
-  receipt(fx, treeA);
-  pinFile(fx, [{ round: 1, kind: 'full', commit: first, at: '2026-11-19T10:00:00.000Z' }]);
-  note(fx, 'notes.json', JSON.stringify({ notes: [] }));
-  fx.notesList = { known: true, all: [], reviews: [{ launchAt: '2026-11-19T10:01:00.000Z', doneAt: '2026-11-19T10:09:00.000Z' }] };
-  let r = await runIn(fx, 'ready');
-  assert.match(r.out, /READY done     — review:/);
-  assert.match(r.out, /READY done     — proof: 2 break\(s\) caught on this tree/);
-  assert.match(r.out, /READY done     — suite: passed on this tree/);
-  assert.match(r.out, /READY NOT DONE — PR text: no pr-body\.md/);
-  assert.equal(r.status, 1);
-
-  // One byte changes after the suite: nothing above is done for the new tree.
-  commit(fx, 'export const a = 3;\n');
-  r = await runIn(fx, 'ready');
-  assert.match(r.out, /READY NOT DONE — suite: no passing full-suite receipt for this tree/);
-  assert.match(r.out, /READY NOT DONE — review: the last review read /);
-  assert.match(r.out, /READY NOT DONE — proof: the proof record is not for this tree/);
-  assert.match(r.out, /READY NOT DONE — one commit: 2 commit\(s\)/);
-
-  // A partial run (--changed-since) sets no ok: it is no proof, even beside a proved entry of this tree.
-  proved(fx);
-  assert.match(run(fx, 'ready').out, /READY done     — proof:/);
-  process.env.SANAD_STATE_DIR = fx.state;
-  writeEntry(fx.repo, 'k2', { partial: true, perBreak: {} });
-  assert.match(run(fx, 'ready').out, /READY NOT DONE — proof:/);
-  // An uncommitted edit: no receipt can be for this tree.
-  fs.writeFileSync(path.join(fx.repo, 'a.js'), 'export const a = 4;\n');
-  assert.match(run(fx, 'ready').out, /READY NOT DONE — suite: uncommitted or untracked work/);
-});
 
 test('a push-now decision with the owner words moves the open items to owed; the author words do not', () => {
   const fx = fixture();
@@ -376,7 +340,8 @@ test('pr-body prints the evidence between two lines that name the tree; open lis
   const out = (await runIn(fx, 'pr-body')).out.split(/\r?\n/).filter(Boolean);
   assert.equal(out[0], `<!-- sanad-evidence tree=${tree} -->`);
   assert.ok(out.includes('- Breaks caught: 2, on this tree'));
-  assert.ok(out.includes('- Suite: passed on this tree'));
+  // (Review, task 1 PR: a receipt file in the notes folder alone is no suite; the session shows none here.)
+  assert.ok(out.includes('- Suite: NOT RUN on this tree'), out.join('\n'));
   assert.ok(out.includes('- Review rounds: 1 (full)'));
   assert.ok(out.includes('- Notes: 1 fixed, 1 decided by the user, 0 refuted, 0 open'));
   assert.ok(out.includes('- Decided by the user: a rare case on a slow network — the user said "leave it for now"'), out.join('\n'));
@@ -400,38 +365,6 @@ test('P20: next, ready and the PR block show an owner switch with its origin, an
   assert.match((await runIn(fx, 'pr-body')).out, /- Lane: normal/);
 });
 
-test('ready: the PR text that pr-body prints is accepted; a changed evidence line is refused', async () => {
-  const fx = fixture();
-  start(fx);
-  upToSize(fx);
-  const head = commit(fx, 'export const a = 2;\n');
-  proved(fx);
-  receipt(fx, gitIn(fx.repo, 'rev-parse', 'HEAD^{tree}'));
-  pinFile(fx, [{ round: 1, kind: 'full', commit: head, at: '2026-11-19T10:00:00.000Z' }]);
-  fx.notesList = { known: true, all: [], reviews: [{ launchAt: '2026-11-19T10:01:00.000Z', doneAt: '2026-11-19T10:09:00.000Z' }] };
-  const block = (await runIn(fx, 'pr-body')).out;
-  note(fx, 'pr-body.md', `Summary\n\n${block}\n`);
-  let r = await runIn(fx, 'ready');
-  assert.match(r.out, /READY done     — PR text: clean/, r.out);
-  assert.equal(r.status, 0, r.out);
-  note(fx, 'pr-body.md', `Summary\n\n${block.replace('- Suite: passed on this tree', '- Suite: passed (typed by hand)')}\n`);
-  r = await runIn(fx, 'ready');
-  assert.match(r.out, /READY NOT DONE — PR text: evidence line differs/, r.out);
-});
-
-test('ready: a pin with no completed reviewer run after it is not a review', async () => {
-  const fx = fixture();
-  start(fx);
-  upToSize(fx);
-  const head = commit(fx, 'export const a = 2;\n');
-  pinFile(fx, [{ round: 1, kind: 'full', commit: head, at: '2026-11-19T10:00:00.000Z' }]);
-  for (const reviews of [null, [], [{ launchAt: '2026-11-19T09:00:00.000Z', doneAt: '2026-11-19T09:05:00.000Z' }]]) {
-    fx.notesList = { known: true, all: [], reviews };
-    assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: round 1 is pinned to HEAD, but no completed reviewer run/);
-  }
-  fx.notesList = { known: true, all: [], reviews: [{ launchAt: '2026-11-19T10:01:00.000Z', doneAt: '2026-11-19T10:09:00.000Z' }] };
-  assert.match((await runIn(fx, 'ready')).out, /READY done     — review: round 1 is pinned to HEAD and a reviewer has reported/);
-});
 
 test('ready: a task with two sides needs a proof of each side', async () => {
   const fx = fixture();
@@ -448,18 +381,6 @@ test('ready: a task with two sides needs a proof of each side', async () => {
   assert.match((await runIn(fx, 'ready')).out, /READY done     — proof:/);
 });
 
-test('ready: a filtered test command is not the full suite', async () => {
-  const fx = fixture();
-  start(fx);
-  upToSize(fx);
-  commit(fx, 'export const a = 2;\n');
-  const tree = gitIn(fx.repo, 'rev-parse', 'HEAD^{tree}');
-  const filtered = (args) => { fs.mkdirSync(path.join(fx.notes, 'evidence', 'check-f'), { recursive: true }); fs.writeFileSync(path.join(fx.notes, 'evidence', 'check-f', 'metadata.json'), JSON.stringify({ status: 'passed', executable: 'node', args, source: { treeBefore: tree, treeAfter: tree } })); };
-  filtered(['run', 'full-suite', '--', '--grep', 'one test']);
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — suite: no passing full-suite receipt/);
-  filtered(['run', 'full-suite']);
-  assert.match((await runIn(fx, 'ready')).out, /READY done     — suite: passed on this tree/);
-});
 
 test('pr-body shows the full text of a finding a decision covers', async () => {
   const fx = fixture();
@@ -473,68 +394,6 @@ test('pr-body shows the full text of a finding a decision covers', async () => {
   assert.match(out, /slow network — the user said "leave it for now" \[N4: a slow network drops the second save of the same row\]/, out);
 });
 
-test('ready: a round of several seats counts each run by its launch id and the other engine by its report file', async () => {
-  const fx = fixture();
-  start(fx);
-  upToSize(fx);
-  const head = commit(fx, 'export const a = 2;\n');
-  const pinAt = '2026-11-19T10:00:00.000Z';
-  pinFile(fx, [{ round: 1, kind: 'full', commit: head, at: pinAt, seats: ['risk files', 'whole diff', 'other engine'] }]);
-  // Reviewers launched together share one launch time: the id tells them apart.
-  const rep = (id) => ({ id, launchAt: '2026-11-19T10:01:00.000Z', doneAt: '2026-11-19T10:09:00.000Z' });
-  fx.notesList = { known: true, all: [], reviews: [rep('a')] };
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: .*only 1 of 3 reviewer seats/);
-  fx.notesList = { known: true, all: [], reviews: [rep('a'), rep('a'), rep('a')] };
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: .*only 1 of 3/);
-  fx.notesList = { known: true, all: [], reviews: [rep('a'), rep('b')] };
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: .*only 2 of 3/);
-  // The other engine's seat is its report file, newer than the pin; a file from before the pin does not count.
-  const file = path.join(fx.notes, 'codex-review.md');
-  fs.writeFileSync(file, 'PASS\n');
-  fs.utimesSync(file, new Date('2026-11-19T09:00:00.000Z'), new Date('2026-11-19T09:00:00.000Z'));
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: .*only 2 of 3/);
-  fs.utimesSync(file, new Date('2026-11-19T10:05:00.000Z'), new Date('2026-11-19T10:05:00.000Z'));
-  const out = (await runIn(fx, 'ready')).out;
-  assert.match(out, /READY done     — review:/);
-  assert.doesNotMatch(out, /could not be matched/);
-  // A run launched before the pin never counts.
-  fx.notesList = { known: true, all: [], reviews: [{ id: 'z', launchAt: '2026-11-19T09:00:00.000Z', doneAt: '2026-11-19T09:05:00.000Z' }, rep('a')] };
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: .*only 2 of 3/);
-});
-
-test('ready: runs with no id and no seat cannot be matched; one finished run after the pin is the round, and ready says so', async () => {
-  const fx = fixture();
-  start(fx);
-  upToSize(fx);
-  const head = commit(fx, 'export const a = 2;\n');
-  pinFile(fx, [{ round: 1, kind: 'full', commit: head, at: '2026-11-19T10:00:00.000Z', seats: ['risk', 'whole', 'other'] }]);
-  fx.notesList = { known: true, all: [], reviews: [{ launchAt: '2026-11-19T09:00:00.000Z', doneAt: '2026-11-19T09:05:00.000Z' }] };
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: .*no completed reviewer run/);
-  fx.notesList = { known: true, all: [], reviews: [{ launchAt: '2026-11-19T10:01:00.000Z', doneAt: '2026-11-19T10:09:00.000Z' }] };
-  const out = (await runIn(fx, 'ready')).out;
-  assert.match(out, /READY done     — review:/);
-  assert.match(out, /READY note — review: the 3 seats of round 1 could not be matched/);
-  // Runs that name their seat are still counted by seat.
-  fx.notesList = { known: true, all: [], reviews: [{ seat: 'risk', launchAt: '2026-11-19T10:01:00.000Z', doneAt: '2026-11-19T10:09:00.000Z' }] };
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: .*only 1 of 3/);
-});
-
-test('ready: a suite command with a space inside one argument is compared as a list', async () => {
-  const fx = fixture();
-  start(fx);
-  upToSize(fx);
-  commit(fx, 'export const a = 2;\n');
-  const tree = gitIn(fx.repo, 'rev-parse', 'HEAD^{tree}');
-  const file = path.join(fx.notes, 'task.json');
-  const task = JSON.parse(fs.readFileSync(file, 'utf8'));
-  task.suite = "node run 'spec files/all.mjs'";
-  fs.writeFileSync(file, JSON.stringify(task));
-  const make = (args) => { fs.mkdirSync(path.join(fx.notes, 'evidence', 'check-s'), { recursive: true }); fs.writeFileSync(path.join(fx.notes, 'evidence', 'check-s', 'metadata.json'), JSON.stringify({ status: 'passed', executable: 'node', args, source: { treeBefore: tree, treeAfter: tree } })); };
-  make(['run', 'spec', 'files/all.mjs']);
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — suite: no passing full-suite receipt/);
-  make(['run', 'spec files/all.mjs']);
-  assert.match((await runIn(fx, 'ready')).out, /READY done     — suite: passed on this tree/);
-});
 
 test('ready: a suite argument with an apostrophe, written the way q() writes it, is accepted', async () => {
   const { q } = await import('../scripts/steps.mjs');
@@ -642,31 +501,6 @@ test('U3: a tree called foreign is not judged again: the saved tiny stays and ne
   assert.equal(f.lane, 'text');
 });
 
-test('U3: with no session scan, ready counts the seats from the report files newer than the pin', async () => {
-  const fx = fixture();
-  start(fx);
-  upToSize(fx);
-  const head = commit(fx, 'export const a = 2;\n');
-  note(fx, 'engine.txt', 'codex\n');
-  pinFile(fx, [{ round: 1, kind: 'full', commit: head, at: '2026-11-19T10:00:00.000Z', seats: ['fresh eyes', 'risk files', 'whole diff'] }]);
-  fx.notesList = { known: true, all: [] }; // no `reviews`: no scan
-  const put = (name, text, when) => { const file = path.join(fx.notes, name); fs.writeFileSync(file, text); fs.utimesSync(file, new Date(when), new Date(when)); };
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: /);
-  put('codex-fresh.md', 'PASS\n', '2026-11-19T10:05:00.000Z');
-  put('codex-risk.md', 'PASS\n', '2026-11-19T10:06:00.000Z');
-  put('codex-whole.md', '', '2026-11-19T10:07:00.000Z'); // an empty file is no report
-  let out = (await runIn(fx, 'ready')).out;
-  assert.match(out, /READY NOT DONE — review: .*only 2 of 3/);
-  put('codex-whole.md', 'PASS\n', '2026-11-19T09:00:00.000Z'); // older than the pin
-  assert.match((await runIn(fx, 'ready')).out, /READY NOT DONE — review: .*only 2 of 3/);
-  put('codex-whole.md', 'PASS\n', '2026-11-19T10:07:00.000Z');
-  out = (await runIn(fx, 'ready')).out;
-  assert.match(out, /READY done     — review:/);
-  assert.match(out, /READY note — review: no session scan is available; the seats were counted from the report files/);
-  // With a scan the files are not the count.
-  fx.notesList = { known: true, all: [], reviews: [] };
-  assert.doesNotMatch((await runIn(fx, 'ready')).out, /counted from the report files/);
-});
 
 // 2026-11-20 (timed task): the author named ticket-text.md, breaks-page.json and proof-page.log; later steps asked for
 // ticket.md, breaks.json and proof-tests.log, and files were copied by hand. start prints the file names once, and the

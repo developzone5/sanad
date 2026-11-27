@@ -76,7 +76,8 @@ import { createRequire } from 'node:module';
 import { isMain } from './is-main.mjs';
 import { fileKind, format as formatSize, sizeTask } from './size-check.mjs';
 import { bashEnv, gitBash } from './git-bash.mjs';
-import { checkKey, claim, lookup, release, remember, runIdentity, runningNow, rememberBeforeProof, workTree, notesInputs, notesParts, inputsOf, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
+import { checkKey, claim, lookup, release, remember, runIdentity, runningNow, rememberBeforeProof, rememberFullRun, workTree, notesInputs, notesParts, inputsOf, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
+import { recordLine } from './trusted.mjs';
 import { changeSet, foreignLine } from './change-set.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -595,6 +596,11 @@ export async function preReview(opts) {
   // The base as a commit, read before the checks (last check, 2026-11-23: a base that moved during the run was saved).
   const baseAt = () => (opts.base ? git(opts.repo, ['rev-parse', '--verify', '--quiet', String(opts.base) + '^{commit}']) : '');
   const firstBase = firstTree ? baseAt() : '';
+  // The whole run's start, for its record (batch b task 1): the code, HEAD, base and list files before any check runs.
+  const fullStart = !opts.beforeProof && !opts.part && opts.notes
+    ? { tree: workTree(opts.repo), head: git(opts.repo, ['rev-parse', 'HEAD']), base: baseAt(), inputs: notesInputs(BEFORE_PROOF_FILES.filter((n) => n !== 'places.md').map((n) => path.join(opts.notes, n))) }
+    : { tree: '' };
+  let placesChecked = null;
   const { files, checks, remote, skipped, placesOwed, siblingsOwed } = planChecks({ ...opts, set });
   // Checks that passed on this exact code before are read, not run (pre-review-cache.mjs).
   const ident = opts.noCache ? null : runIdentity(opts.repo, opts.base);
@@ -705,6 +711,8 @@ export async function preReview(opts) {
       }
     }
     if (c.name === 'places') r = await withCallers(r, await sizeDone, c);
+    // Review (task 1 PR): places.md as the places check left it; the whole run's record is for that list only.
+    if (c.name === 'places' && opts.notes) placesChecked = JSON.stringify(notesParts([path.join(opts.notes, 'places.md')]));
     emit(r);
     if (c.name === 'size') owedResults.forEach(emit);
     return r;
@@ -752,6 +760,19 @@ export async function preReview(opts) {
     const sameHead = Boolean(firstHead) && firstHead === git(opts.repo, ['rev-parse', 'HEAD']);
     const sameBase = firstBase === baseAt();
     rememberBeforeProof(opts.repo, began, ok && steady && sameHead && sameBase && began === firstTree && began === workTree(opts.repo), inputsOf(parts), firstHead, firstBase);
+  }
+  // 2026-11-28 (owner, batch b task 1): a whole run that passed keeps its record by the tree, HEAD, base and list files it
+  // began on, and prints the record's line last, so the session log shows the run that wrote it (trusted.mjs). places.md
+  // is read at the end only: the places check rewrites it itself.
+  if (!opts.beforeProof && !opts.part && opts.notes && ok && fullStart.tree) {
+    const files = BEFORE_PROOF_FILES.map((n) => path.join(opts.notes, n));
+    const parts = notesParts(files);
+    // Review (task 1 PR): a places.md edited after its check (while slower checks ran) is a list no check read: no record.
+    const placesSteady = !checks.some((c) => c.name === 'places') || placesChecked === JSON.stringify(parts.filter(([name]) => name === 'places.md'));
+    const steady = fullStart.tree === workTree(opts.repo) && fullStart.head === git(opts.repo, ['rev-parse', 'HEAD']) && fullStart.base === baseAt()
+      && inputsOf(parts.filter(([name]) => name !== 'places.md')) === fullStart.inputs && placesSteady;
+    const record = steady ? rememberFullRun(opts.repo, { tree: fullStart.tree, head: fullStart.head, base: opts.base, inputs: inputsOf(parts) }) : null;
+    if (record) { const l = recordLine('pre-review', record.tree, record); lines.push(l); say(l); }
   }
   return { ok, text: lines.join('\n') };
 }

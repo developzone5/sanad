@@ -233,9 +233,14 @@ test('verdict --review prints the REVIEW line of the loop page with counted numb
   const untested = run(['verdict', '--review', '--notes', notes, '--untested', '1', '--transcript', done]);
   assert.equal(untested.status, 1);
   assert.equal(untested.stdout, 'REVIEW: FAIL — bugs 1/1, goals tested 2/3, untested 1, open: 1 untested goal(s)\n');
-  const ev = ['--build', 'ok: dotnet build 0 errors', '--attack', 'pass: null and empty cases', '--security', 'pass: 401 and 403 tests', '--ran', 'ok: ran the endpoint, 200'];
+  const ev = ['--build', 'pass: dotnet build 0 errors', '--attack', 'pass: null and empty cases', '--security', 'pass: 401 and 403 tests', '--ran', 'pass: ran the endpoint, 200'];
+  // 2026-11-28 (batch b task 1): every typed value passes, but no trusted record is there (no repository, no session
+  // receipt): the words alone never give PASS.
   const gate = run(['verdict', '--gate', '--notes', notes, '--tests', '412/412', ...ev, '--transcript', done]);
-  assert.equal(gate.stdout, 'GATE: PASS — build ✓, tests 412/412 ✓, attack tests ✓, security ✓, ran it ✓, review ✓, goals 3/3 ✓\n');
+  assert.equal(gate.status, 1, gate.stdout);
+  // (Hole 2: a log the caller names is never read for the records.)
+  assert.match(gate.stdout, /^GATE: INCOMPLETE — no record: a passing test receipt of this tree \(the gate reads its records only from this repository's own session log/);
+  assert.doesNotMatch(gate.stdout, /GATE: PASS/);
   assert.match(run(['verdict', '--gate', '--notes', notes, '--tests', '412/412', ...ev, '--transcript', open]).stdout, /^GATE: FAIL — review ✗, open: NOTE 2$/m);
 });
 
@@ -477,17 +482,41 @@ test('verdict --gate: a failed mark never gives PASS; an unclear one is INCOMPLE
   const notes = fs.mkdtempSync(path.join(root, 'notes-'));
   fs.writeFileSync(path.join(notes, 'lines.md'), '# Lines\n\nT1. one\n');
   const g = (ev) => run(['verdict', '--gate', '--notes', notes, '--transcript', done, '--tests', '5/5', ...ev]);
-  const base = { '--build': 'ok: dotnet build 0 errors', '--attack': 'ok', '--security': 'ok', '--ran': 'ok' };
+  const base = { '--build': 'pass: dotnet build 0 errors', '--attack': 'pass', '--security': 'pass', '--ran': 'passed' };
   const args = (over) => Object.entries({ ...base, ...over }).flat();
   const failedBuild = g(args({ '--build': 'build failed with 3 errors' }));
   assert.equal(failedBuild.status, 1);
-  assert.equal(failedBuild.stdout.split('\n')[0], 'GATE: FAIL — build ✗');
+  assert.equal(failedBuild.stdout.split('\n')[0], 'GATE: FAIL — build ✗ ("build failed with 3 errors")');
   assert.doesNotMatch(failedBuild.stdout, /PASS/);
-  assert.match(g(args({ '--attack': 'did not pass' })).stdout, /^GATE: FAIL — attack tests ✗$/m);
+  assert.match(g(args({ '--attack': 'did not pass' })).stdout, /^GATE: FAIL — attack tests ✗ \("did not pass"\)$/m);
   const unclear = g(args({ '--security': 'looked at it' }));
   assert.equal(unclear.status, 1);
-  assert.match(unclear.stdout, /^GATE: INCOMPLETE .*--security /);
-  assert.equal(g(args({})).status, 0);
+  assert.match(unclear.stdout, /^GATE: INCOMPLETE .*--security "looked at it" is not a pass word/);
+  // 2026-11-28 (owner, batch b task 1): the old words no longer pass, and the value is named.
+  for (const old of ['ok', 'green', 'clean', 'success', '✓', '0 errors']) assert.match(g(args({ '--ran': old })).stdout, new RegExp(`^GATE: INCOMPLETE .*--ran "${old}" is not a pass word \\(a ran it value starts with pass or passed\\)`, 'm'), old);
+  // Every typed value passes, and still no PASS without the trusted records.
+  const words = g(args({}));
+  assert.equal(words.status, 1);
+  assert.match(words.stdout, /^GATE: INCOMPLETE — no record: /m);
+});
+
+test('gateLine: PASS only with both trusted records; the typed words only ever block', async () => {
+  const { gateLine } = await import('../scripts/notes.mjs');
+  const ev = { build: 'pass', attack: 'pass: null cases', security: 'pass — 403 tests', ran: 'passed' };
+  const ok = { tests: { ok: true, command: 'node run full-suite' }, lines: { ok: true }, review: { ok: true }, proof: { ok: true } };
+  const g = (over = {}) => gateLine([], { goals: 2, tests: '9/9', evidence: ev, reviewed: true, trusted: ok, ...over });
+  assert.equal(g().line, 'GATE: PASS — build ✓, tests 9/9 ✓ (receipt: node run full-suite), attack tests ✓, security ✓, ran it ✓, review ✓, goals 2/2 ✓');
+  assert.equal(g({ trusted: undefined }).pass, false, 'no trusted records: no pass');
+  // Review (task 1 PR): the review record of HEAD and the proof record are records of the gate too.
+  assert.match(g({ trusted: { ...ok, review: { ok: false, why: 'no accepted REVIEW: PASS' } } }).line, /^GATE: INCOMPLETE — no record: the review record of HEAD \(no accepted REVIEW: PASS\)/);
+  assert.match(g({ trusted: { ...ok, proof: { ok: false, why: 'no PROVED entry' } } }).line, /^GATE: INCOMPLETE — no record: a proof of this tree \(no PROVED entry\)/);
+  assert.match(g({ trusted: { ...ok, tests: { ok: false, why: 'no passing evidence.mjs receipt of this tree is seen in the session' } } }).line, /^GATE: INCOMPLETE — no record: a passing test receipt of this tree \(no passing evidence\.mjs receipt/);
+  assert.match(g({ trusted: { ...ok, lines: { ok: false, why: 'the session does not show the pre-review run that wrote it' } } }).line, /^GATE: INCOMPLETE — no record: a whole pre-review run of this tree/);
+  // Words block even with both records.
+  assert.match(g({ evidence: { ...ev, security: 'not run' } }).line, /^GATE: FAIL — security ✗/);
+  assert.match(g({ untested: 1 }).line, /^GATE: FAIL — review ✗/);
+  assert.match(g({ tests: '8/9' }).line, /^GATE: FAIL — tests 8\/9/);
+  assert.match(g({ evidence: { ...ev, attack: '' } }).line, /^GATE: INCOMPLETE .*--attack "<attack tests: the real result, starting with pass>"/);
 });
 
 test('verdict --review and --gate: no finished reviewer run on record gives INCOMPLETE, never a pass', () => {
@@ -512,11 +541,12 @@ test('decide --kind design is refused when the session log cannot be read', { sk
   assert.equal(fs.existsSync(path.join(notes, 'decisions.json')), false);
 });
 
-test('markResult: a mark passes only for the closed list, a negation is a fail, the rest is unclear', async () => {
+test('markResult: only pass or passed, alone or with detail after a colon or a dash, is a pass; a negation is a fail; the rest is unclear', async () => {
   const { markResult } = await import('../scripts/notes.mjs');
-  for (const ok of ['pass', 'Passed', 'ok', 'green', 'clean', 'success', '✓', '0 errors', '0 failed', 'no errors', 'pass — 0 warnings', 'ok: 215 tests']) assert.equal(markResult(ok), 'pass', ok);
-  for (const bad of ['not successful', 'unsuccessful', 'did not pass', 'not ok', "didn't pass", 'never green', '3 errors', 'failed', '✗']) assert.equal(markResult(bad), 'fail', bad);
-  for (const other of ['ran the endpoint', '', 'looks fine', 'success and then more words']) assert.equal(markResult(other), 'unclear', other);
+  for (const ok of ['pass', 'Passed', 'pass — 0 warnings', 'pass: 215 tests', 'passed - 0 errors', 'PASS.']) assert.equal(markResult(ok), 'pass', ok);
+  for (const bad of ['not successful', 'unsuccessful', 'did not pass', 'not ok', "didn't pass", 'never green', '3 errors', 'failed', '✗', 'pass (vite build not run)']) assert.equal(markResult(bad), 'fail', bad);
+  // 2026-11-28 (owner, batch b task 1): the old pass words are unclear now.
+  for (const other of ['ran the endpoint', '', 'looks fine', 'success and then more words', 'ok', 'green', 'clean', 'success', '✓', '✔', '0 errors', '0 failed', 'no errors', 'ok: 215 tests', 'passing', 'pass, 3 tests', 'bypass']) assert.equal(markResult(other), 'unclear', other);
 });
 
 test('isRare: a grouped or bare ticket or check tag is never rare', async () => {

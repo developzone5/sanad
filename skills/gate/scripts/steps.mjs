@@ -291,7 +291,7 @@ export const STEPS = [
     lines: (c, f) => [...(f && (noProofStep(f) || f.proof.done) ? [{ text: preReview(c) }] : []), { text: `${tool(c, 'notes.mjs')} verdict --review --repo ${p(c.repo)}` }] },
   { id: 'gate', loop: 'Step 4', lanes: ALL, unknown: (f) => Boolean(f.suite.ci),
     done: (f) => Boolean(f.suite.receipt) || f.pushed === true,
-    lines: (c, f) => [{ text: '/gate   (the Definition of Done and the security list, each claim with its output)', plain: true }, ...suiteLines(c, f), { text: `${tool(c, 'notes.mjs')} verdict --gate --repo ${p(c.repo)} --notes ${p(c.notes)} --tests <passed>/<run> --build "<real result>" --attack "<real result>" --security "<real result>" --ran "<real result>"` }, { text: 'Each flag carries the real result of that check; without them the line is GATE: INCOMPLETE.', plain: true }] },
+    lines: (c, f) => [{ text: '/gate   (the Definition of Done and the security list, each claim with its output)', plain: true }, ...suiteLines(c, f), { text: `${tool(c, 'notes.mjs')} verdict --gate --repo ${p(c.repo)} --notes ${p(c.notes)} --tests <passed>/<run> --build "pass: <real result>" --attack "pass: <real result>" --security "pass: <real result>" --ran "pass: <real result>"` }, { text: 'Each flag carries the real result of that check; a passed check starts with pass or passed (pass: 0 errors), and any other word is not a pass; without them the line is GATE: INCOMPLETE. The PASS also needs a passing evidence receipt of this tree and a whole pre-review run of this tree, both seen in this session.', plain: true }] },
   { id: 'ready', loop: 'Step 5', lanes: ALL,
     done: (f) => f.pushed === true,
     lines: (c, f) => [

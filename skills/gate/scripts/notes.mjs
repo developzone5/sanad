@@ -280,10 +280,13 @@ export function reviewLine(list, { goals, untested = 0, reviewed = true }) {
 }
 export const NO_REVIEW = 'REVIEW: INCOMPLETE — no reviewer report on record';
 // What an evidence mark says: 'pass', 'fail' or 'unclear'. The one place that defines the accepted forms.
-// A mark passes ONLY when the whole value (trimmed, lower case) is one of a short closed list, or such a form followed by
-// plain detail after a separator ("pass - 0 warnings", "ok: 215 tests"). Any negation word anywhere is a fail. Else unclear.
-const PASS_FORMS = '(?:pass|passed|ok|green|clean|success|✓|✔|0 errors|0 failed|no errors)';
-const PASS_MARK = new RegExp('^' + PASS_FORMS + '(?:[ ]*[-–—:;,|(][ ]*[^ ].*)?[.!]?$');
+// 2026-11-28 (owner, batch b task 1): one exact set. A mark passes ONLY when the whole value (trimmed, lower case) is
+// `pass` or `passed`, alone or followed by plain detail after a colon or a dash ("pass: 215 tests", "pass — 0 warnings").
+// ok, green, clean, success, ✓ and "0 errors" alone no longer pass: they are unclear, and the output names the value.
+// Any negation word anywhere is a fail.
+export const PASS_WORDS = ['pass', 'passed'];
+const PASS_FORMS = '(?:' + PASS_WORDS.join('|') + ')';
+const PASS_MARK = new RegExp('^' + PASS_FORMS + '(?:[ ]*[-–—:][ ]*[^ ].*)?[.!]?$');
 const ZERO_COUNT = /\b(?:0|no|zero)\s+(?:errors?|failures?|failed|failing|warnings?|problems?|issues?)\b|\bwithout\s+(?:errors?|failures?)\b/g;
 const NEGATED = /✗|✘|\bnot\b|\bnever\b|n['’]t\b|\bno\s+(?:pass|passed|passing|ok|okay|green|clean|success|successful|succeed|succeeded)\b|\bun(?:successful|pass\w*|ok|clean|green|succe\w+)\b|\b(?:fail\w*|errors?|broken|red|crash\w*|refused|blocked|cannot)\b/;
 export function markResult(value) {
@@ -293,11 +296,15 @@ export function markResult(value) {
   if (NEGATED.test(text.replace(ZERO_COUNT, ' '))) return 'fail';
   return PASS_MARK.test(text) ? 'pass' : 'unclear';
 }
-// The GATE line of the gate skill. The tool counts the review and the goals. Every other mark is the author's own
-// evidence: --tests <passed>/<run> and --build, --attack, --security, --ran (a short note of the real result).
-// A PASS needs a positive test count with every test passing and every mark given. Otherwise no PASS line is printed.
+// The GATE line of the gate skill. The tool counts the review and the goals.
+// 2026-11-28 (owner, batch b task 1): the gate says yes only on records the guards trust (`trusted`, read by runVerdict
+// through trusted.mjs): `tests` a passing evidence receipt of this tree that the session shows and the scanner read as
+// passing; `lines` a whole pre-review run that passed on this tree (the ticket lines and places), whose run the session
+// shows. The author's own words (--tests, --build, --attack, --security, --ran, --untested) are still required, and
+// they may only block: none of them turns a "no" into a pass. With no `trusted` given, nothing is trusted.
 export const GATE_MARKS = [['build', 'build'], ['attack', 'attack tests'], ['security', 'security'], ['ran', 'ran it']];
-export function gateLine(list, { goals, untested = 0, tests, evidence = {}, reviewed = true }) {
+const shown = (v) => JSON.stringify(String(v).replace(/\s+/g, ' ').trim().slice(0, 80));
+export function gateLine(list, { goals, untested = 0, tests, evidence = {}, reviewed = true, trusted = {} }) {
   if (!reviewed) return { pass: false, open: [], line: NO_REVIEW.replace('REVIEW', 'GATE') };
   const open = list.filter((n) => n.state === 'open');
   const names = [...open.map((n) => 'NOTE ' + n.n), ...(untested ? [untested + ' untested goal(s)'] : [])];
@@ -305,10 +312,69 @@ export function gateLine(list, { goals, untested = 0, tests, evidence = {}, revi
   const m = /^(\d+)\/(\d+)$/.exec(String(tests || ''));
   if (m && (Number(m[2]) === 0 || Number(m[1]) !== Number(m[2]))) return { pass: false, open, line: `GATE: FAIL — tests ${tests} ✗: a PASS needs at least one test and every test passing` };
   const failed = GATE_MARKS.filter(([k]) => markResult(evidence[k]) === 'fail');
-  if (failed.length) return { pass: false, open, line: `GATE: FAIL — ${failed.map(([, label]) => label + ' ✗').join(', ')}` };
-  const missing = [...(m ? [] : ['--tests <passed>/<run>']), ...GATE_MARKS.filter(([k]) => markResult(evidence[k]) !== 'pass').map(([k, label]) => `--${k} "<${label}: the real result, saying pass, ok or 0 errors>"`)];
+  if (failed.length) return { pass: false, open, line: `GATE: FAIL — ${failed.map(([k, label]) => `${label} ✗ (${shown(evidence[k])})`).join(', ')}` };
+  const missing = [...(m ? [] : ['--tests <passed>/<run>']), ...GATE_MARKS.filter(([k]) => markResult(evidence[k]) !== 'pass').map(([k, label]) => (String(evidence[k] ?? '').trim()
+    ? `--${k} ${shown(evidence[k])} is not a pass word (a ${label} value starts with ${PASS_WORDS.join(' or ')})`
+    : `--${k} "<${label}: the real result, starting with pass>"`))];
   if (missing.length) return { pass: false, open, line: `GATE: INCOMPLETE — no pass line printed; missing evidence: ${missing.join(', ')}` };
-  return { pass: true, open, line: `GATE: PASS — build ✓, tests ${tests} ✓, attack tests ✓, security ✓, ran it ✓, review ✓, goals ${goals}/${goals} ✓` };
+  const t = trusted && typeof trusted === 'object' ? trusted : {};
+  const records = [['tests', 'a passing test receipt of this tree'], ['lines', 'a whole pre-review run of this tree'], ['review', 'the review record of HEAD'], ['proof', 'a proof of this tree']].filter(([k]) => !(t[k] && t[k].ok === true));
+  if (records.length) return { pass: false, open, line: `GATE: INCOMPLETE — no record: ${records.map(([k, what]) => `${what} (${(t[k] && t[k].why) || 'not read'})`).join('; ')}` };
+  return { pass: true, open, line: `GATE: PASS — build ✓, tests ${tests} ✓ (receipt: ${t.tests.command || 'seen'}), attack tests ✓, security ✓, ran it ✓, review ✓, goals ${goals}/${goals} ✓` };
+}
+
+// The trusted records of the gate (batch b task 1), for the repository's HEAD tree.
+export async function gateRecords(o, list) {
+  const t = await import('./trusted.mjs');
+  const cache = await import('./pre-review-cache.mjs');
+  const { execFileSync } = await import('node:child_process');
+  const git = (cwd, args) => { try { return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+  let repo = o.repo ? path.resolve(o.repo) : '';
+  if (!repo && o.notes && store) { try { repo = String(store.readTask(path.resolve(o.notes))?.repo || ''); } catch { repo = ''; } }
+  const top = repo ? git(repo, ['rev-parse', '--show-toplevel']) : null;
+  const no = (why) => ({ tests: { ok: false, why }, lines: { ok: false, why }, review: { ok: false, why }, proof: { ok: false, why } });
+  // 2026-11-28 (owner, task 1 hole 2): the records come only from this repository's own session log, which the tool finds
+  // itself; a log or report files the caller names are never read for them.
+  if (o.transcript !== undefined || o.reports !== undefined) return no('the gate reads its records only from this repository\'s own session log: run it with --repo or --notes, without --transcript and --reports');
+  // Review (task 1 PR): SANAD_PROJECTS_DIR names the folder the session log is looked for in: a log the caller chose.
+  if (process.env.SANAD_PROJECTS_DIR) return no('SANAD_PROJECTS_DIR is set, so the session log is one the caller chose: run the gate without it');
+  if (!top) return no('no repository named (--repo or --notes)');
+  const status = git(top, ['status', '--porcelain', '--untracked-files=all']);
+  const tree = status === '' ? git(top, ['rev-parse', 'HEAD^{tree}']) : '';
+  if (!tree) return no('uncommitted or untracked work: no record can be for this tree');
+  const runs = t.sessionRuns(list.transcript || '');
+  // 2026-11-28 (owner, task 1 hole 3): the test receipt is the suite's, chosen as "ready" chooses it: the repository's own
+  // git config sanad.suite, else the task's suite (task.json). The typed --tests count can only block.
+  let suite = git(top, ['config', '--local', '--get', 'sanad.suite']) || '', from = suite ? 'git config sanad.suite' : '';
+  if (!suite && o.notes && store) { try { suite = String(store.readTask(path.resolve(o.notes))?.suite || ''); from = suite ? 'task.json' : ''; } catch { suite = ''; } }
+  const { sameCommand } = await import('./sanad.mjs');
+  const found = [];
+  const seen = suite ? t.seenReceipts(runs, list.scan && list.scan.passingReceipts, { found }).filter((r) => r.source.treeAfter === tree && sameCommand([r.executable, ...r.args], suite)) : [];
+  const tests = seen.length ? { ok: true, command: `${suite} (from ${from})` }
+    : { ok: false, why: !suite ? 'no suite command named: git config sanad.suite "<the full suite command>" (or start --suite)' : list.transcript ? `no passing receipt of \`${suite}\` (from ${from}) on this tree is seen in the session: run it once, alone: node ${slash(path.join(here, 'evidence.mjs'))} --spec <its spec>` : 'no session log' };
+  const integration = git(top, ['config', '--get', 'sanad.integration']);
+  let base = integration ? 'origin/' + integration : '';
+  if (!base && o.notes && store) { try { base = String(store.readTask(path.resolve(o.notes))?.base || ''); } catch { base = ''; } }
+  base ||= 'origin/staging';
+  const record = cache.readFullRun(top);
+  const inputs = o.notes ? cache.notesInputs(cache.BEFORE_PROOF_FILES.map((n) => path.join(path.resolve(o.notes), n))) : '';
+  const fits = Boolean(o.notes) && cache.fullRunFits(top, record, { tree, inputs, base });
+  // Review (task 1 PR): the task's facts as "ready" reads them (the lane, the check lines, the proof record).
+  let facts = null;
+  try { facts = (await import('./sanad.mjs')).readFacts({ repo: top, notes: o.notes ? path.resolve(o.notes) : '' }); } catch { facts = null; }
+  const checkLines = Boolean(facts) && (facts.lane === 'text' || facts.has.check);
+  const lines = checkLines && fits && t.seenRecord(runs, { toolFile: 'pre-review.mjs', kind: 'pre-review', tree, record, found })
+    ? { ok: true } : { ok: false, why: !o.notes ? 'give --notes <dir>' : !facts ? 'the task cannot be read' : !checkLines ? 'no check lines (check.md is missing or blank), so the whole pre-review run checked none' : !record ? 'no whole pre-review run has passed here' : !fits ? 'the last whole pre-review pass was on other code, another base or other list files' : 'the session does not show the pre-review run that wrote it' };
+  // Review (task 1 PR): the gate's review is the hooks' review record for HEAD, as for "ready", not any finished run.
+  const head = git(top, ['rev-parse', 'HEAD']);
+  const rr = t.reviewRecord(top, head, tree, o.reviewStore || null);
+  const review = rr.ok ? { ok: true } : { ok: false, why: rr.why };
+  // Review (task 1 PR): the gate reads the proof record too (the lanes that ask for no proof, as "ready" reads them).
+  const noProofLane = Boolean(facts) && ((facts.lane === 'text' && !facts.textProof) || (facts.testsOnly && facts.switches.testsOnlyLane));
+  const proof = facts && (noProofLane || facts.proof.done) ? { ok: true } : { ok: false, why: !facts ? 'the task cannot be read' : 'the proof record holds no PROVED entry of this tree (sanad.mjs ready names what is missing)' };
+  // Fix 1 (owner: count only): the record lines that came from a call that ran other commands too.
+  const used = found.filter((x) => x.toolFile !== 'evidence.mjs' || (seen[0] && x.runId === seen[0].runId));
+  return { tests, lines, review, proof, shapes: t.shapeLine(used) };
 }
 
 const VALUE = ['--repo', '--transcript', '--reports', '--notes', '--fixed', '--what', '--user', '--decision', '--words', '--refuted', '--kind', '--for', '--question', '--untested', '--goals', '--tests', '--build', '--attack', '--security', '--ran'];
@@ -527,7 +593,7 @@ NOTES: no decision written
   return 0;
 }
 
-function runVerdict(o, out) {
+async function runVerdict(o, out) {
   if (o.review && o.gate) throw usage('verdict takes one of --review or --gate');
   if (!o.gate) o.review = true;   // the review line is the default: the printed steps call `verdict --notes <dir>`
   const list = readNotes(o);
@@ -541,8 +607,10 @@ function runVerdict(o, out) {
   // A finished reviewer run on record, read as sanad.mjs reads it (reviewsOf). No scan, or no run: not reviewed.
   const runs = list.scan && Array.isArray(list.scan.reviews) ? list.scan.reviews.filter((r) => r && r.launchAt && r.doneAt) : [];
   const reviewed = runs.length > 0;
-  const v = o.review ? reviewLine(list, { goals, untested, reviewed }) : gateLine(list, { goals, untested, reviewed, tests: o.tests, evidence: { build: o.build, attack: o.attack, security: o.security, ran: o.ran } });
-  out(v.line + '\n' + v.open.map((n) => `OPEN: NOTE ${n.n} (${n.kind}): ${n.text.slice(0, 140)}`).join('\n') + (v.open.length ? '\n' : '') + (list.checked ? '' : `NOT CHECKED: ${NOT_CHECKED}\n`));
+  const trusted = o.gate ? await (o.gateRecords || gateRecords)(o, list) : {};
+  const v = o.review ? reviewLine(list, { goals, untested, reviewed }) : gateLine(list, { goals, untested, reviewed, tests: o.tests, evidence: { build: o.build, attack: o.attack, security: o.security, ran: o.ran }, trusted });
+  out(v.line + '\n' + v.open.map((n) => `OPEN: NOTE ${n.n} (${n.kind}): ${n.text.slice(0, 140)}`).join('\n') + (v.open.length ? '\n' : '') + (list.checked ? '' : `NOT CHECKED: ${NOT_CHECKED}\n`)
+    + (trusted && trusted.shapes ? `RECORDS: ${trusted.shapes}\n` : ''));
   return v.pass ? 0 : 1;
 }
 
@@ -554,7 +622,7 @@ export async function main(argv = process.argv.slice(2), out = (s) => process.st
     if (o.command === 'answer') return await runAnswer(o, out, err);
     if (o.command === 'ask') return await runAsk(o, out);
     if (o.command === 'decide') return await runDecide(o, out, err);
-    return runVerdict(o, out);
+    return await runVerdict(o, out);
   } catch (error) {
     // A refusal of this tool, of note-check.mjs or of the notes folder store is a usage error; anything else is a crash, with its stack.
     const named = error instanceof UsageError || /^(?:UsageError|NotesError)$/.test((error && error.constructor && error.constructor.name) || '');

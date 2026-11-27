@@ -161,7 +161,7 @@ import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { StringDecoder } from 'node:string_decoder';
 import { createInterface } from 'node:readline';
-import { breakId, breakStates, canonicalTop, changedTestFiles, codeFingerprint, csClassList, declaredTests, defaultBase, enclosingTest, helperCallers, namedBy, proofHint, provenHas, provenTests, readRecord, recordKey, takeBackRun, testFileHashes, testSpans, withdrawRunFacts, writeBreakResult, writeEntry, writeRunFacts } from './proof-record.mjs';
+import { breakId, breakStates, canonicalTop, changedTestFiles, codeFingerprint, csClassList, declaredTests, defaultBase, enclosingTest, entryKey, helperCallers, namedBy, proofHint, provenHas, provenTests, readRecord, recordKey, siteIds, takeBackRun, testFileHashes, testSpans, withdrawRunFacts, writeBreakResult, writeEntry, writeRunFacts } from './proof-record.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { newLines, nothingChecks } from './new-lines.mjs';
 import { codeLines, codeOnly } from './size-check.mjs';
@@ -1270,7 +1270,7 @@ async function main() {
       const parts = breaks.filter(b => !b.single).flatMap(b => b.mustFail.map(String));
       const entries = readRecord(repo);
       const cwdRel = path.relative(repo, cwdHere).replace(/\\/g, '/');
-      if (entries && parts.length) delete entries.entries[recordKey(command, cwdRel)];
+      if (entries && parts.length) delete entries.entries[entryKey(command, cwdRel, breaks)];
       const scope = new Set(proofScope(command, testFiles, cwdRel));
       const spans = new Map();
       const ownOf = (l) => { if (!spans.has(l.file)) spans.set(l.file, testSpans(textAt(l.file), l.file)); return enclosingTest(spans.get(l.file), l.line); };
@@ -1450,7 +1450,9 @@ async function main() {
   // The run facts (green on this tree, red on the old code) are kept for a proof with breaks and also for one with only an
   // old-code run (2026-11-19): else an honest --old proof left nothing for the checks before review to read.
   const keepsFacts = !plan && !partial && (keepsRecord || hasOld);
-  const proof = { key: recordKey(command, recordCwd), proved: false, code: '', why: '' };
+  // `key`: the break results and run facts of this command (recordKey). `entry`: this proof's own entry, kept apart from
+  // another proof of the same command by the spots its breaks change (entryKey, 2026-11-28, batch b task 1 item 5).
+  const proof = { key: recordKey(command, recordCwd), entry: entryKey(command, recordCwd, breaks), sites: siteIds(breaks), proved: false, code: '', why: '' };
   // 2026-11-23 (owner): after BREAK INVALID the same proof does not run again until a break or a file changed (run 3 of
   // the small task ran the same invalid breaks twice). A break saved as invalid on this exact code (its result, by break
   // id: name, file, find, put and mustFail; by code id: codeFingerprint) stops the run before any copy or sync.
@@ -1465,7 +1467,7 @@ async function main() {
     process.exit(2);
   }
   function takeBack(reason) {
-    try { writeEntry(repo, proof.key, { ok: false, reason: String(reason).slice(0, 300), base, command, cwd: recordCwd, ...(partial ? { partial: true } : {}) }); }
+    try { writeEntry(repo, proof.entry, { ok: false, reason: String(reason).slice(0, 300), base, command, cwd: recordCwd, sites: proof.sites, ...(partial ? { partial: true } : {}) }); }
     catch { /* not written: an entry's code id still voids it after any edit */ }
   }
   function proofStarts() {
@@ -1814,7 +1816,7 @@ async function main() {
     for (const t of caught) if (fileHashes[t.file]) (byFile[t.file] ||= []).push({ line: t.line, title: t.title, ran: t.ran, by: t.by });
     const files = Object.keys(byFile).sort();
     try {
-      writeEntry(repo, proof.key, { ok: true, base, command, cwd: recordCwd, breaks: breaks.length, old: hasOld, green,
+      writeEntry(repo, proof.entry, { ok: true, base, command, cwd: recordCwd, sites: proof.sites, breaks: breaks.length, old: hasOld, green,
         files: Object.fromEntries(files.map(f => [f, fileHashes[f]])), targets, caught: Object.fromEntries(files.map(f => [f, byFile[f]])), code: proof.code, ...extra });
       proof.proved = true;
     } catch (e) { say('RED-PROOF: could not write the proof record — ' + e.message); }

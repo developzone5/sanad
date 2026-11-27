@@ -77,7 +77,8 @@ test('owner case 2: a failed proof is not cleared by another proof that passed',
   assert.equal(r.released, false);
   assert.match(r.why, /only a passing run of its own command clears it/);
   // Also when the failed entry still holds the tests of the run before it (a hand-made record): ok false never releases.
-  record.entries.failed = { ...entry(top, { 't/a.test.js': [[1, '[C1] shows the role']] }, { code: 'b'.repeat(40), at: OLD_AT }), ok: false };
+  // (2026-11-28, batch b item 5: its own command is kept apart from the passing one, as a real record keeps it.)
+  record.entries.failed = { ...entry(top, { 't/a.test.js': [[1, '[C1] shows the role']] }, { code: 'b'.repeat(40), at: OLD_AT }), ok: false, command: ['node', '--test', 't/a.test.js'] };
   assert.equal(oldEntries(top, record, TODAY).get('failed').released, false);
 });
 

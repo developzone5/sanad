@@ -87,7 +87,7 @@ test('ready, owner case 2: a failed proof is not cleared by another proof that p
   writeEntry(fx.repo, 'failed', { ok: false, reason: 'BREAK NOT CAUGHT [C3]', command: ['node', '--test', B], cwd: '' });
   wait();
   proof(fx, 'other', ['node', '--test', A, B], { [A]: [[1, '[C1] shows the role']], [B]: [[1, '[C3] shows the date']] });
-  assert.match(proofLine(fx), /^READY NOT DONE — proof: an older proof entry still blocks: `node --test t\/more\/b\.test\.js` \(its last run did not end PROVED: only a passing run of its own command clears it\)/m);
+  assert.match(proofLine(fx), /^READY NOT DONE — proof: an older proof entry still blocks: `node --test t\/more\/b\.test\.js` \(its last run did not end PROVED: only a passing run of its own command clears it/m);
   // Its own command passing replaces it.
   proof(fx, 'failed', ['node', '--test', B], { [B]: [[1, '[C3] shows the date']] });
   assert.match(proofLine(fx), /^READY done {5}— proof:/m);

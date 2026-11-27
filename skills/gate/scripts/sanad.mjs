@@ -32,7 +32,8 @@ import { parseSiblings, jobOpenReason } from './siblings.mjs';
 import { requestStart, report as timerReport } from './sanad-timer.mjs';
 import { readRecord, codeFingerprint, recordKey, oldEntries } from './proof-record.mjs';
 import { foreignLine as foreignText } from './change-set.mjs';
-import { beforeProofPassed, notesInputs, BEFORE_PROOF_FILES } from './pre-review-cache.mjs';
+import { beforeProofPassed, notesInputs, BEFORE_PROOF_FILES, readFullRun, fullRunFits } from './pre-review-cache.mjs';
+import { sessionRuns, seenReceipts, seenRecord, reviewRecord, firstRound, taskStartSeen, shapeLine, launchPrompts } from './trusted.mjs';
 import { due, render, switchLines, stopRound, askOwner, pathFor, GATE_DIR, q } from './steps.mjs';
 
 export const EVIDENCE_OPEN = (tree) => `<!-- sanad-evidence tree=${tree} -->`;
@@ -117,7 +118,7 @@ export function reviewReported(pin, reviews, reports, reportFiles) {
 
 // The finish times of the reports the other engine left in the notes folder (codex-review.md, codex-whole.md,
 // claude-fresh.md, ...). The folder is the one notes-dir.mjs names. An empty file is no report.
-function otherReports(dir, engine, every = false) {
+function otherReports(dir, engine, every = false, { firstRoundOnly = false } = {}) {
   const out = [];
   if (!dir) return out;
   let folder = dir;
@@ -128,6 +129,8 @@ function otherReports(dir, engine, every = false) {
   try {
     for (const n of fs.readdirSync(folder)) {
       if (!wanted(n.toLowerCase()) || !/\.md$/i.test(n)) continue;
+      // Review (task 1 PR): a re-check's report (codex-recheck-<round>….md) never fills a first-round seat.
+      if (firstRoundOnly && /re-?check/i.test(n)) continue;
       const st = fs.statSync(path.join(folder, n));
       if (st.isFile() && st.size > 0) out.push(st.mtimeMs);
     }
@@ -137,12 +140,14 @@ function otherReports(dir, engine, every = false) {
 
 // The review notes of the task's session: { known, all }. A session log with no note is a known, empty list.
 // No log, or a scanner that cannot be loaded: not known, and nothing is called answered.
+// 2026-11-28 (batch b task 1): also the session log read and the scanner's passing receipts, for the trusted records.
+const passingOf = (scan) => (scan && Array.isArray(scan.passingReceipts) ? scan.passingReceipts : []);
 function sessionNotesOf(top) {
-  try { const list = notesTool.sessionNotes({ repo: top }); return { known: true, all: [...list], reviews: reviewsOf(list.scan) }; } catch { /* maybe a session with no note */ }
+  try { const list = notesTool.sessionNotes({ repo: top }); return { known: true, all: [...list], reviews: reviewsOf(list.scan), transcript: list.transcript || '', passing: passingOf(list.scan) }; } catch { /* maybe a session with no note */ }
   try {
     const newest = noteCheck.transcriptCandidates(top)[0];
     const scan = newest && noteCheck.loadScan().scanTranscript(newest);
-    if (scan && Array.isArray(scan.reviewNotes) && !scan.reviewNotes.length) return { known: true, all: [], reviews: reviewsOf(scan) };
+    if (scan && Array.isArray(scan.reviewNotes) && !scan.reviewNotes.length) return { known: true, all: [], reviews: reviewsOf(scan), transcript: newest, passing: passingOf(scan) };
   } catch { /* not known */ }
   return { known: false, all: [] };
 }
@@ -242,7 +247,7 @@ const sidesOfTask = (task) => (Array.isArray(task?.sides) ? task.sides : []).fil
   .map((s) => ({ ...s, test: Array.isArray(s.testCommand) ? s.testCommand.map(q).join(' ') : String(s.test) }));
 
 /** Every fact the steps and the lists read, from the notes folder, the state folder and git. */
-export function readFacts({ repo, notes, last = false, deep = false, sessionNotes = sessionNotesOf }) {
+export function readFacts({ repo, notes, last = false, deep = false, sessionNotes = sessionNotesOf, trust = null }) {
   const head = (git(repo, ['rev-parse', '--show-toplevel', 'HEAD', 'HEAD^{tree}']) || '').split(/\r?\n/);
   const top = head[0] || path.resolve(repo);
   const dir = notes || taskDir(top);
@@ -259,7 +264,15 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
   const KEYS = { ticketrequired: 'ticketRequired', stopround: 'stopRound', testsonlylane: 'testsOnlyLane', designchoice: 'designChoice', carrydecision: 'carryDecision', replayblocks: 'replayBlocks' };
   const switchHits = [...hits].map(([k, h]) => ({ ...h, key: KEYS[k] || h.key }));
   const on = (v) => /^(?:true|yes|on|1)$/i.test(String(v || ''));
-  const base = (typeof task.base === 'string' && task.base) || 'origin/' + (sw.integration || 'staging');
+  // 2026-11-28 (owner, batch b task 1): the base is the repository's integration branch (git config sanad.integration);
+  // task.json's base counts only when none is set there.
+  const base = sw.integration ? 'origin/' + sw.integration : (typeof task.base === 'string' && task.base) || 'origin/staging';
+  // The suite command and the CI job: the repository's own setting (git config --local sanad.suite / sanad.suiteCi) when
+  // one is set, task.json only when none is (owner, batch b answer 2). `from` names where it came from, for the output.
+  const local = (key) => git(top, ['config', '--local', '--get', key]) || '';
+  const suiteSet = local('sanad.suite'), ciSet = local('sanad.suiteCi');
+  const suiteMark = suiteSet || task.suite || '', suiteFrom = suiteSet ? 'git config sanad.suite' : task.suite ? 'task.json' : '';
+  const ciJob = ciSet || (typeof task.suiteCi === 'string' ? task.suiteCi : ''), ciFrom = ciSet ? 'git config sanad.suiteCi' : 'task.json';
   const status = git(top, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
   const entries = (status || '').split('\0').filter(Boolean);
   const loose = entries.filter((e) => e.startsWith('?? ')).map((e) => e.slice(3));
@@ -328,12 +341,12 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
     textProof = names.some((n) => sizeTool.fileKind(n.replace(/\\/g, '/')) === 'test');
   }
   const receiptDirs = [typeof task.receipts === 'string' && task.receipts ? task.receipts : at('evidence')];
-  const receipt = suiteReceipt(receiptDirs, task.suite, tree);
-  const ci = lane === 'small' && typeof task.suiteCi === 'string' && task.suiteCi ? task.suiteCi : '';
+  const receipt = suiteReceipt(receiptDirs, suiteMark, tree);
+  const ci = lane === 'small' && ciJob ? ciJob : '';
 
   // The notes matter from the first review on; before it the session log is not read at all.
-  let read = { known: false, all: [], reviews: null };
-  if (deep || pins.length) { try { const got = sessionNotes(top); read = { known: Boolean(got && got.known), all: Array.isArray(got?.all) ? got.all.filter(Boolean) : [], reviews: Array.isArray(got?.reviews) ? got.reviews : null }; } catch { /* not known */ } }
+  let read = { known: false, all: [], reviews: null, transcript: '', passing: [] };
+  if (deep || pins.length) { try { const got = sessionNotes(top); read = { known: Boolean(got && got.known), all: Array.isArray(got?.all) ? got.all.filter(Boolean) : [], reviews: Array.isArray(got?.reviews) ? got.reviews : null, transcript: typeof got?.transcript === 'string' ? got.transcript : '', passing: Array.isArray(got?.passing) ? got.passing : [] }; } catch { /* not known */ } }
   const all = read.all;
   // The other engine's report files count as a seat's report when they are newer than the pin.
   const engine = task.engine || readText(at('engine.txt')).trim() || 'claude';
@@ -367,10 +380,14 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
     proof: { done: proofDone, missingSides, entries: ents.length, oldBlocking: current.length ? oldBlocking : [], breaks: current.reduce((s, e) => s + (Number(e.breaks) || 0), 0), early: clean && proofStartedEarly(logs, head[2] || '', sides.length), progress, logs },
     // beforeProof (2026-11-23): the last whole `pre-review --before-proof` run passed on the work tree as it is now.
     checks: { code: undefined, all: undefined, beforeProof: !foreign && ahead > 0 && dir ? beforeProofPassed(top, undefined, notesInputs(BEFORE_PROOF_FILES.map((n) => at(n))), base) : false },
-    suite: { done: Boolean(receipt || ci), receipt, ci, mark: task.suite || '' },
+    suite: { done: Boolean(receipt || ci), receipt, ci, ciJob, mark: suiteMark, from: suiteFrom, ciFrom },
     notes: { known: read.known, all, open: read.known ? all.filter(isOpen) : [] },
+    // The session as the scanner read it (batch b task 1): its log, its finished reviewer runs and its passing receipts.
+    session: { transcript: read.transcript, reviews: read.reviews, passing: read.passing }, engine, trust,
     decisions, pushed,
     selfRead: dir ? String((readJson(at(SELF_READ)) || {}).commit || '') : '',
+    // The change as sized now for the lane, when it was (review, task 1 PR): "ready" reads it, so it sizes once.
+    sizedNow: judged && typeof judged === 'object' ? judged : null,
   };
 }
 
@@ -406,6 +423,53 @@ export function nextLines(f) {
   return [...out, ...render(steps, context(f), f)];
 }
 
+// 2026-11-28 (owner, batch b task 1): what "ready" says yes on, read only from records the guards trust (trusted.mjs).
+// `f.trust` (tests): { runs, reviewStore, size } stand for the session's shell calls, the hooks' review record and the
+// size of the change. A notes-folder value may only make an item stricter (a larger size, one more side).
+const SIZE_RANK = ['tiny', 'small', 'medium', 'big'];
+export async function trustedFacts(f) {
+  // One reading per command: ready, owed and status share it, so the change is sized at most once here (fix 4).
+  if (f.trustedFacts) return f.trustedFacts;
+  const inj = f.trust || {};
+  const runs = Array.isArray(inj.runs) ? inj.runs : sessionRuns(f.session?.transcript);
+  // The size: the size check's answer on the change as it is now; size.json/size.txt may only raise it.
+  // 2026-11-28 (owner, task 1 hole 4): sized again here, never from a kept answer (`fresh`), once, at the gate only.
+  let live = typeof inj.size === 'string' ? inj.size : '';
+  if (!live && f.sizedNow && f.sizedNow.size) live = f.sizedNow.size;   // sized now already, for the lane
+  if (!live && !f.git.foreign) { try { live = sizeTool?.sizeTask ? sizeTool.sizeTask({ repo: f.top, base: f.base, fresh: true })?.size || '' : ''; } catch { live = ''; } }
+  const typed = SIZE_RANK.includes(f.size) ? f.size : '';
+  const size = !live ? '' : typed && SIZE_RANK.indexOf(typed) > SIZE_RANK.indexOf(live) ? typed : live;
+  let seats = [];
+  if (size) { try { seats = (await import('./review-brief.mjs')).reviewSeats(size); } catch { seats = []; } }
+  if (Array.isArray(inj.seats)) seats = inj.seats;   // tests: a seat list that could not be read
+  const review = reviewRecord(f.top, f.git.head, f.git.headTree, inj.reviewStore || null);
+  // 2026-11-28 (owner, task 1 hole 5): a seat counts only for a run launched after this task's start in this session (the
+  // first `sanad.mjs start` call for this notes folder the session shows, or a linked earlier session's, once that link
+  // exists), or after task.json's start time when that is later.
+  let linkedLogs = [];
+  try { if (typeof notesDir?.linkedSessions === 'function' && f.notesDir) linkedLogs = notesDir.linkedSessions(f.notesDir) || []; } catch { linkedLogs = []; }
+  const startSeen = Array.isArray(inj.linkedLogs) ? taskStartSeen(runs, f.notesDir, { linkedLogs: inj.linkedLogs }) : taskStartSeen(runs, f.notesDir, { linkedLogs });
+  const typedStart = Date.parse(f.task?.startedAt || '');
+  const since = Number.isFinite(startSeen) ? Math.max(startSeen, Number.isFinite(typedStart) ? typedStart : -Infinity) : NaN;
+  // Review (task 1 PR): a reviewer run counts only when its launch prompt names this task's notes folder; the other
+  // engine's re-check report never fills its first-round seat.
+  const prompts = inj.prompts instanceof Map ? inj.prompts : launchPrompts(f.session?.transcript);
+  const round = firstRound(seats, f.session?.reviews, f.notesDir ? otherReports(f.notesDir, f.engine, false, { firstRoundOnly: true }) : [], { since, prompts, notesDir: f.notesDir });
+  const tree = f.git.tree;
+  // Fix 1 (owner: count only): each record line's call is noted with its shape; nothing is refused for it.
+  const found = [];
+  const receipt = tree && f.suite.mark ? seenReceipts(runs, f.session?.passing, { found }).find((r) => r.source.treeAfter === tree && sameCommand([r.executable, ...r.args], f.suite.mark)) || null : null;
+  const full = readFullRun(f.top);
+  const listsNow = notesInputs(BEFORE_PROOF_FILES.map((n) => path.join(f.notesDir || '.', n)));
+  const fullFits = Boolean(tree) && fullRunFits(f.top, full, { tree, inputs: listsNow, base: f.base });
+  const fullSeen = fullFits && seenRecord(runs, { toolFile: 'pre-review.mjs', kind: 'pre-review', tree, record: full, found });
+  const shapes = shapeLine(found.filter((x) => x.toolFile !== 'evidence.mjs' || (receipt && x.runId === receipt.runId)));
+  // Review (task 1 PR, hole 2): a projects folder named by SANAD_PROJECTS_DIR is a session log the caller chose.
+  const override = !Array.isArray(inj.runs) && process.env.SANAD_PROJECTS_DIR ? 'SANAD_PROJECTS_DIR is set, so the session log is one the caller chose: run ready without it' : '';
+  f.trustedFacts = { size, live, seats, review, round, startSeen, since, receipt, full, fullFits, fullSeen, shapes, override };
+  return f.trustedFacts;
+}
+
 /** The required list for the push: each item done or not done for the current tree. */
 export async function readyItems(f) {
   const text = f.lane === 'text';
@@ -413,13 +477,45 @@ export async function readyItems(f) {
   const light = f.testsOnly && f.switches.testsOnlyLane;
   const items = [];
   const add = (id, done, why) => items.push({ id, done: Boolean(done), why });
-  add('review', f.pinAtHead && f.reviewReported, f.pinAtHead ? (f.reviewReported ? `round ${f.round} is pinned to HEAD and a reviewer has reported` : f.reviewSeats && f.reviewSeats.need > 1 && f.reviewSeats.have > 0 ? `round ${f.round} is pinned to HEAD, but only ${f.reviewSeats.have} of ${f.reviewSeats.need} reviewer seats have a finished report after the pin` : `round ${f.round} is pinned to HEAD, but no completed reviewer run after the pin is on record`) : f.lastPin ? `the last review read ${String(f.lastPin.commit || '').slice(0, 10)}, HEAD is ${f.git.head.slice(0, 10)}: no re-check of the fix` : 'no pinned review');
+  const t = await trustedFacts(f);
+  const preReviewCmd = `node ${q(`${GATE_DIR}/pre-review.mjs`)} --repo ${q(f.top.replace(/\\/g, '/'))} --notes ${q(String(f.notesDir || 'NOTES').replace(/\\/g, '/'))}`;
+  // The review: an accepted REVIEW: PASS on the hooks' review record for HEAD, and for each seat the size asks for a
+  // finished first-round run the scanner saw (a re-check never fills one).
+  const startCmd = `node ${q(`${GATE_DIR}/sanad.mjs`)} start --repo ${q(f.top.replace(/\\/g, '/'))} --notes ${q(String(f.notesDir || 'NOTES').replace(/\\/g, '/'))}`;
+  const seatsWhy = !t.size ? 'the size of the change cannot be judged (size-check.mjs), so the seats it needs are not known'
+    : !Array.isArray(f.session?.reviews) ? 'no session scan, so no reviewer run can be seen'
+      : !Number.isFinite(t.since) ? `this session shows no start of this task, so no reviewer run can be tied to it: run ${startCmd} in this session, then the first-round reviews`
+        : !t.seats.length ? `the seats of a ${t.size} change cannot be read (review-brief.mjs), so none is known to be filled`
+          : t.round.missing.length ? `${t.round.have} of ${t.round.need} first-round seat(s) of a ${t.size} change have a finished run launched for this task's notes folder: missing ${t.round.missing.join(', ')} (a re-check never fills a first-round seat)` : '';
+  const reviewDone = f.git.clean && t.review.ok && t.size && t.seats.length > 0 && Array.isArray(f.session?.reviews) && Number.isFinite(t.since) && !t.round.missing.length;
+  add('review', reviewDone, reviewDone ? `the review record holds an accepted REVIEW: PASS for HEAD, and each of the ${t.round.need} first-round seat(s) of a ${t.size} change (${t.seats.join(', ')}) has a finished run`
+    : [!f.git.clean ? 'uncommitted or untracked work: no review record can be for this tree' : !t.review.ok ? t.review.why : '', seatsWhy].filter(Boolean).join('; '));
   add('notes', f.notes.known && !f.notes.open.length, !f.notes.known ? 'the notes list could not be read' : f.notes.open.length ? `${f.notes.open.length} note(s) open: ${f.notes.open.map((n) => n.n).join(', ')}` : 'every note answered');
   // On the tests-only lane (switch on and tests only) no PROVED proof entry is asked for.
   if (!noProof && !light) add('proof', f.proof.done, f.proof.done ? `${f.proof.breaks} break(s) caught on this tree` : f.git.foreign ? 'not read: too many untracked files' : f.proof.missingSides.length ? `no proof of the side(s): ${f.proof.missingSides.join(', ')}` : f.proof.oldBlocking?.length ? `an older proof entry still blocks: ${f.proof.oldBlocking.slice(0, 2).map((o) => `\`${o.command.slice(0, 100)}\` (${o.why.slice(0, 200)})`).join('; ')}${f.proof.oldBlocking.length > 2 ? ` and ${f.proof.oldBlocking.length - 2} more` : ''}: run that proof again on this tree` : f.proof.entries ? 'the proof record is not for this tree, or a run did not end PROVED (a partial run is no proof)' : 'no proof record');
-  add('suite', f.suite.done, f.suite.ci ? `left to CI: ${f.suite.ci}` : f.suite.receipt ? `passed on this tree (${f.suite.receipt.runId || 'receipt'})` : !f.git.tree ? 'uncommitted or untracked work: no receipt can be for this tree' : !f.suite.mark ? 'no suite command named (start --suite)' : 'no passing full-suite receipt for this tree');
-  add('ticket lines', f.has.lines && (text || (f.has.check && (light || (f.has.places && !f.open.places && !f.open.siblings)))), !f.has.lines ? 'no lines file' : text ? 'lines file kept' : !f.has.check ? 'no check lines' : light ? 'tests-only: lines and check lines kept' : `${f.open.places} place(s) and ${f.open.siblings} second-look line(s) open`);
+  // The suite: a passing evidence receipt of the suite command on this tree that the session shows and the scanner read as
+  // passing. The output names the command it accepted and where that command came from.
+  // 2026-11-28 (owner, task 1 hole 4): "left to CI" only when the change, sized now at the gate, is small; the typed
+  // size and the lane never decide it.
+  const ci = t.size === 'small' && f.suite.ciJob ? f.suite.ciJob : '';
+  const ciRefused = !ci && f.suite.ciJob ? ` (left to CI is only for a small change; sized now it is ${t.size || 'not known'})` : '';
+  add('suite', ci || t.receipt, ci ? `left to CI: ${ci} (named in ${f.suite.ciFrom}; the change sized now is small)`
+    : t.receipt ? `passed on this tree: \`${f.suite.mark}\` (from ${f.suite.from}; receipt ${t.receipt.runId}, seen passing in the session)`
+      : !f.git.tree ? 'uncommitted or untracked work: no receipt can be for this tree'
+        : !f.suite.mark ? 'no suite command named: set it with git config sanad.suite "<the full suite command>" (or start --suite)'
+          : `no passing receipt of \`${f.suite.mark}\` (from ${f.suite.from}) on this tree is seen in the session: run it once on this tree, alone: node ${q(`${GATE_DIR}/evidence.mjs`)} --spec <its spec>${ciRefused}`);
+  // The ticket lines and the places: a whole pre-review run that passed on this tree, with these list files, whose run the
+  // session shows (it prints the record's line). The lines file must be there too (a notes file only ever adds a "no").
+  // Review (task 1 PR): with no check lines the whole run checked none, so a code change also needs check.md.
+  add('ticket lines', f.has.lines && (text || f.has.check) && t.fullSeen, !f.has.lines ? 'no lines file'
+    : !text && !f.has.check ? 'no check lines (check.md is missing or blank), so the whole pre-review run checked none'
+    : !t.full ? `no whole pre-review run has passed for this work tree: run ${preReviewCmd}`
+      : !t.fullFits ? `the last whole pre-review run that passed was on other code, another base or other list files: run ${preReviewCmd}`
+        : !t.fullSeen ? `the session does not show the pre-review run that wrote its record for this tree: run ${preReviewCmd} in this session`
+          : `a whole pre-review run passed on this tree with these lists (${text ? 'lines file kept' : light ? 'tests-only lane' : `${f.open.places} place(s) and ${f.open.siblings} second-look line(s) open`})`);
   add('one commit', f.git.ahead === 1 && f.git.clean, `${f.git.ahead} commit(s) on ${f.base}${f.git.clean ? '' : ', with uncommitted or untracked work'}`);
+  // Review (task 1 PR, hole 2): under SANAD_PROJECTS_DIR the session log is the caller's choice: no item read from it is done.
+  if (t.override) for (const i of items) if (['review', 'suite', 'ticket lines'].includes(i.id)) { i.done = false; i.why = `${t.override}; ${i.why}`; }
   const body = readText(path.join(f.notesDir || '.', 'pr-body.md'));
   let bodyWhy = 'no pr-body.md in the notes folder', bodyOk = false;
   if (body) {
@@ -443,6 +539,13 @@ export async function owedItems(f) {
 }
 
 /** The evidence block of the PR text: every line from a record, between two lines that name the tree. */
+// The suite line of the evidence block (review, task 1 PR): only what the trusted reading shows (trustedFacts, which
+// ready and pr-body read first); a receipt file in the notes folder alone never makes it "passed".
+function suiteText(f) {
+  const t = f.trustedFacts;
+  if (t && !t.override && t.size === 'small' && f.suite.ciJob) return `left to CI: ${f.suite.ciJob}`;
+  return t && !t.override && t.receipt ? 'passed on this tree' : 'NOT RUN on this tree';
+}
 export function evidenceBlock(f) {
   const kinds = f.pins.map((p) => (p.short ? 'short check' : p.kind || 'full')).join(', ');
   const answered = f.notes.all.filter((n) => !f.notes.open.includes(n));
@@ -456,7 +559,8 @@ export function evidenceBlock(f) {
     `- Lane: ${f.testsOnly && f.switches.testsOnlyLane ? 'tests-only (light path)' : 'normal'}`,
     ...switchLines(f).map((l) => `- ${l}`),
     `- Breaks caught: ${f.lane === 'text' && !f.textProof ? 'none needed (text only)' : f.testsOnly && f.switches.testsOnlyLane ? 'none needed (tests-only light path)' : f.proof.done ? `${f.proof.breaks}, on this tree` : 'NOT PROVEN on this tree'}`,
-    `- Suite: ${f.suite.ci ? `left to CI: ${f.suite.ci}` : f.suite.receipt ? 'passed on this tree' : 'NOT RUN on this tree'}`,
+    // Review (task 1 PR): with the trusted reading at hand (ready, pr-body), the suite line says only what it shows.
+    `- Suite: ${suiteText(f)}`,
     `- Review rounds: ${f.round}${kinds ? ` (${kinds})` : ''}${f.pinAtHead ? '' : ' — the last one did not read this commit'}`,
     `- Notes: ${f.notes.known ? `${by(/^fixed/i)} fixed, ${by(/^user/i)} decided by the user, ${by(/^refuted/i)} refuted, ${f.notes.open.length} open` : 'not read'}`,
     ...words('drop-line').map((w) => `- Dropped line: ${w}`),
@@ -587,13 +691,13 @@ function start(o) {
     `FILES in ${shown}: ticket-text.md (the ticket's words you save) · ticket.md (made by lines.mjs) · lines.md · check.md · places.md · siblings-report.md · siblings.md · breaks.json (one file, all sides) · proof logs: ${logs} (one per side) — use these names, the later steps read them`];
 }
 
-export async function main(argv, print = (line) => process.stdout.write(line + '\n'), { sessionNotes } = {}) {
+export async function main(argv, print = (line) => process.stdout.write(line + '\n'), { sessionNotes, trust } = {}) {
   let o;
   try { o = parse(argv); } catch (error) { process.stderr.write(`SANAD: ${error.message}\n${USAGE}\n`); return 2; }
   if (!['start', 'next', 'status', 'ready', 'owed', 'pr-body', 'self-read', 'size'].includes(o.cmd)) { process.stderr.write(USAGE + '\n'); return 2; }
   try {
     if (o.cmd === 'start') { for (const l of [...start(o), ...nextLines(readFacts({ repo: o.repo, notes: path.resolve(o.notes) }))]) print(l); return 0; }
-    const ask = { repo: path.resolve(o.repo), notes: o.notes ? path.resolve(o.notes) : '', last: Boolean(o.last), deep: o.cmd !== 'next', ...(sessionNotes ? { sessionNotes } : {}) };
+    const ask = { repo: path.resolve(o.repo), notes: o.notes ? path.resolve(o.notes) : '', last: Boolean(o.last), deep: o.cmd !== 'next', ...(sessionNotes ? { sessionNotes } : {}), ...(trust ? { trust } : {}) };
     if (ask.deep && !sessionNotes) await loadNotesTools();
     let f = readFacts(ask);
     // After the first review the notes decide the step: read them, with the scanner's reader.
@@ -608,9 +712,8 @@ export async function main(argv, print = (line) => process.stdout.write(line + '
       for (const l of switchLines(f)) print(l);
       print(`READY lane: ${f.testsOnly && f.switches.testsOnlyLane ? 'tests-only (light path)' : 'normal'}`);
       for (const i of items) print(`READY ${i.done ? 'done    ' : 'NOT DONE'} — ${i.id}: ${i.why}`);
-      if (f.pinAtHead && f.reviewSeats && f.reviewSeats.fromFiles) print(`READY note — review: no session scan is available; the seats were counted from the report files in the notes folder (${f.reviewSeats.have} of ${f.reviewSeats.need})`);
-      // The seats of the round could not be matched to reports: the item rests on one finished run (the push guard's rule).
-      if (f.pinAtHead && f.reviewReported && f.reviewSeats && f.reviewSeats.matched === false) print(`READY note — review: the ${f.reviewSeats.need} seats of round ${f.round} could not be matched to reports; one finished reviewer run after the pin is taken as the round`);
+      // Task 1 fix 1 (owner: count only): the record lines that came from a call that ran other commands too.
+      if (f.trustedFacts && f.trustedFacts.shapes) print(`READY note — records: ${f.trustedFacts.shapes}`);
       const left = items.filter((i) => !i.done);
       print(`READY: ${left.length ? `no — ${left.length} of ${items.length} not done` : `yes — ${items.length} of ${items.length} done`} for tree ${f.git.tree ? f.git.tree.slice(0, 10) : 'with uncommitted work'}`);
       if (left.length) print(`A push the owner orders now is saved first: node ${q(`${GATE_DIR}/notes.mjs`)} decide --kind push-now --words OWNER-WORDS --notes ${q(f.notesDir.replace(/\\/g, '/'))}`);
@@ -623,6 +726,7 @@ export async function main(argv, print = (line) => process.stdout.write(line + '
       print(`OWED: ${owed.items.length} item(s) open after the push the user ordered ("${String(owed.decision.words).trim().slice(0, 120)}"). A green CI run clears none of them.`);
       return owed.items.length ? 1 : 0;
     }
+    await trustedFacts(f);   // the evidence block's suite line comes from the trusted reading (review, task 1 PR)
     const block = evidenceBlock(f);
     if (o.out) fs.writeFileSync(path.resolve(o.out), block.join('\n') + '\n');
     for (const l of block) print(l);
