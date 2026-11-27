@@ -140,8 +140,11 @@ export const STEPS = [
       ...(f.switches.remoteHost ? [{ text: 'bash ~/.claude/scripts/remote/remote-preflight.sh --connect', background: true }] : []),
       ...(f.switches.remoteHost && sidesOf(c).some((s) => s.server) ? [{ text: 'bash ~/.claude/scripts/remote/remote-preflight.sh --db', background: true }] : []),
       ...(f.switches.remoteHost ? sidesOf(c).filter((s) => s.server).map((s) => ({ text: `${tool(c, 'red-proof.mjs')} --repo ${p(c.repo)} --warm${s.cwd ? ` --cwd ${p(s.cwd)}` : ''} -- ${s.test}`, background: true })) : []),
+      // 2026-11-28 (owner, batch b task 3; test 4: 6 minutes reading and planning, then 2.5 on places and the second look,
+      // one after another): the places search and the second look run while the builder reads.
+      { text: 'side by side: while you read the ticket and the code, a sonnet-worker runs the places search below from the ticket\'s names; when places.md exists, launch the second look at once; the check lines and the plan wait for both answers, before any code', plain: true },
     ] },
-  { id: 'places', loop: 'Step 1, item 4', lanes: CODE, light: true,
+  { id: 'places', loop: 'Step 1, item 4', lanes: CODE, light: true, beside: 'start',
     done: (f) => f.has.places,
     lines: (c) => [{ text: `${tool(c, 'places.mjs')} --repo ${p(c.repo)} --names NAMES --data DATA --out ${note(c, 'places.md')}` },
       // 2026-11-25 (owner, test 4): the same value shown by another path was missed; the data search lists it.
@@ -181,7 +184,9 @@ export const STEPS = [
     ] },
   { id: 'tests-fix', loop: 'Step 3, items 1-2', lanes: ALL,
     done: (f) => f.git.ahead > 0 || f.git.changed,
-    lines: () => [{ text: 'write the tests, then the fix of the rule in every place that shares it: each place on the list and any other with that rule or data', plain: true }] },
+    lines: () => [{ text: 'write the tests, then the fix of the rule in every place that shares it: each place on the list and any other with that rule or data', plain: true },
+      // 2026-11-28 (owner, batch b task 3; test 4: 5 minutes on tests before the fix): the tests are written beside the fix.
+      { text: 'side by side: a sonnet-worker writes the tests from the ticket lines and the check lines (with the planned breaks in words), never from the fix\'s code, while you write the fix; read and own its diff before the commit', plain: true }] },
   { id: 'new-tests-once', loop: 'Step 3, item 2', lanes: CODE, beside: 'commit',
     done: (f) => f.git.ahead > 0 && f.git.clean,
     lines: (c) => [

@@ -86,7 +86,8 @@ test('each state of a small task prints its due step, with every path filled', a
   const first = start(fx);
   assert.equal(first.status, 0, first.out);
   const n = fx.notes.replace(/\\/g, '/');
-  assert.deepEqual(stepsOf(first.out), ['start']);
+  // 2026-11-28 (batch b task 3): the places search is printed beside the start, for a helper while the builder reads.
+  assert.deepEqual(stepsOf(first.out), ['start', 'places']);
   assert.ok(first.out.includes(`--out ${n}/lines.md`), first.out);
   note(fx, 'lines.md', 'T1 the list shows the due date\n');
   let r = run(fx, 'next');
@@ -283,7 +284,7 @@ test('two work trees of one repository hold two tasks, and next in one never rea
   note(a, 'lines.md', 'T1 one\n');
   const na = run(a, 'next').out, nb = run(b, 'next').out;
   assert.deepEqual(stepsOf(na), ['places']);
-  assert.deepEqual(stepsOf(nb), ['start']);
+  assert.deepEqual(stepsOf(nb), ['start', 'places']);
   assert.ok(!na.includes('notes-b') && nb.includes('notes-b'), na + nb);
   // A folder with no task says so and exits 0: nothing here stops the author.
   const none = fixture();
