@@ -994,7 +994,8 @@ test('hints: the author\'s design note (design.md) goes into the brief for the g
   const b = run(['--brief', '--notes', f.notes, '--repo', f.repo]);
   assert.equal(b.status, 0, b.stdout + b.stderr);
   const brief = fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8');
-  assert.match(brief, /^## The author's design \(design\.md\) — check it for gaps and missed places\n\n {4}Page the roster on the server; keep the add list from offering members\.\n {4}- C1\. a line that only looks like a check line$/m);
+  // 2026-11-28 (batch c task 4): the heading asks the second look to judge the design, with one instruction line.
+  assert.match(brief, /^## The author's design \(design\.md\) — judge it before any code\n\nJudge this design [^\n]*Check it for gaps and missed places too\.\n\n {4}Page the roster on the server; keep the add list from offering members\.\n {4}- C1\. a line that only looks like a check line$/m);
   const report = path.join(f.notes, 'siblings-report.md');
   fs.writeFileSync(report, 'SIBLINGS: none\nSAME JOB: none\n');
   const rec = run(['--record', report, '--notes', f.notes]);

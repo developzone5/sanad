@@ -54,9 +54,9 @@ Exit: `▸ checked: <n> facts confirmed, <m> not sure yet`.
 
 Every size starts from the `J<n>` lines.
 
-- **Small:** no seat. The places list, the `J<n>` outcomes and the check lines are the plan.
+- **Small and Medium:** before item 6, `<notes>/design.md`: the design in 3 lines, then `NOT: <way> — <why>`. The second look judges it (`D1`): `→ follow` or `→ not: <why>`, shown to the user.
 - **Medium:** when a query's shape changes, one Database optimizer seat reads the planned query before code; each finding is fixed in the plan or becomes a proof at the gate.
-- **Big:** `/braintrust` before code; two Architects each propose a design, blind to each other, and the boss picks; its verdict is the plan. By the owner's yes (switch `sanad.designChoice`) the user chooses between the two before code when the picked one adds a table, a migration or a worker, or is about twice the other's size.
+- **Big:** `/braintrust` before code; two Architects each propose a design, blind to each other, and the boss picks; its verdict is the plan. Owner's choice: [loop-rare-cases.md](loop-rare-cases.md).
 
 Ask the user during the task only for a choice that changes the size or the design, all at once, with my pick. Any other choice takes my pick and joins the end list (Step 3.5, item 5), one line each.
 

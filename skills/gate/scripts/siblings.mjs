@@ -146,13 +146,16 @@ export function buildBrief({ repo, ticket, checks, list, dropped = [], design = 
     ...(live.length ? live.map((p) => '- ' + placeLine(p)) : ['- none: no product file uses these names']), '',
     // 2026-11-22: the author's own design, when written, is what the second look checks for gaps; it never picks one.
     // Indented as a block, so a "- T1." or "- C1." line of the design is never read back as a ticket or check line.
-    ...(String(design).trim() ? ["## The author's design (design.md) — check it for gaps and missed places", '', ...String(design).trim().split(/\r?\n/).map((l) => '    ' + l), ''] : []),
+    // 2026-11-28 (owner, batch c task 4): the second look judges it before any code, in one DESIGN line.
+    ...(String(design).trim() ? ["## The author's design (design.md) — judge it before any code", '',
+      'Judge this design against the ticket lines and the places, before any code, in one line: `DESIGN: agree — <why>`, or, when the project already does the same kind of job in a better way, `DESIGN: better — <file>:<line> · <that way> — <why it is better here>`. Check it for gaps and missed places too.', '',
+      ...String(design).trim().split(/\r?\n/).map((l) => '    ' + l), ''] : []),
   ].join('\n');
 }
 
 export function launchLine(brief) {
   return `LAUNCH: Agent second-look · prompt: ${PROMPT_START} Read and follow only the brief at ${slash(brief)}. ` +
-    'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING, OUTSIDE PR and SAME JOB lines (or SIBLINGS: none and SAME JOB: none).';
+    'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING, OUTSIDE PR and SAME JOB lines (or SIBLINGS: none and SAME JOB: none), and the DESIGN line when the brief holds the author\'s design.';
 }
 
 export function writeBrief({ notes, repo }) {
@@ -202,6 +205,14 @@ const SIBLING_LINE = /^SIBLINGS?(?:\s*\d+)?\s*[*_`~]*\s*:[*_`~]*\s*(.*)$/i;
 const SIBLING_BRACKETED = /^SIBLINGS?\s*[\])]\s*:?\s*(.*)$/i;
 const SIBLING_WORD = /^SIBLINGS?\b/i;
 const JOB = /^SAME JOB:\s*(.*)$/i;
+// 2026-11-28 (owner, batch c task 4; run 3: the root-cause question came after two rounds of patches): on Small and
+// Medium the builder writes the design before any code (design.md: the design in three lines, then one way turned
+// down), and the second look judges it in one line: `DESIGN: agree — <why>` or `DESIGN: better — <file>:<line> ·
+// <the way this project already does this kind of job> — <why>`. The line is kept as D1 in siblings.md; the builder
+// answers it `follow` or `not: <why>`, and shows that line to the owner. No guard and no check reads it.
+const DESIGN = /^DESIGN\s*:\s*(.*)$/i;
+export const DESIGN_HEADING = "## The second look's view of the design — write `follow` or `not: <why>` after →, and show that line to the owner";
+export const designLine = (r) => `D${r.n} · ${r.body} → ${r.outcome}`;
 // 2026-11-22 (owner): the second look gives hints, never the design. A BEST DESIGN line of an older report or list
 // (bold or code marks around it too) is passed over.
 const BEST_LINE = /^[*_`]*BEST DESIGN\b/i;
@@ -215,11 +226,13 @@ const shape = (b) => { const s = SHAPED.exec(b); return s ? `${s[1].trim()}:${s[
 // The agent's answer: { siblings, none, outside, jobs, jobNone } (the text of each S, OUTSIDE PR and SAME JOB line),
 // or null when it has no sibling answer of any kind.
 export function parseReport(text) {
-  const siblings = [], outside = [], jobs = [];
+  const siblings = [], outside = [], jobs = [], design = [];
   let none = false, jobNone = false, best = null;
   for (const row of String(text).split(/\r?\n/)) {
     const l = bare(row);
     if (BEST_LINE.test(l)) continue;
+    const d = DESIGN.exec(l);
+    if (d) { const b = body(d[1]); if (b && !design.includes(b)) design.push(b); continue; }
     if (NONE.test(l)) { none = true; continue; }
     if (JOB_NONE.test(l)) { jobNone = true; continue; }
     const o = OUTSIDE.exec(l);
@@ -236,13 +249,13 @@ export function parseReport(text) {
     const b = body(m[1]);
     if (b && !siblings.includes(shape(b))) siblings.push(shape(b));
   }
-  return siblings.length || none || outside.length ? { siblings, none: !siblings.length, outside, jobs, jobNone: jobNone && !jobs.length, best } : null;
+  return siblings.length || none || outside.length ? { siblings, none: !siblings.length, outside, jobs, jobNone: jobNone && !jobs.length, best, design } : null;
 }
 
 // "S3 · <text> → <outcome>" and "J2 · <text> → <outcome>"; a line whose arrow was deleted reads with no outcome
 // (open), never dropped.
 export function parseSiblings(text) {
-  const rows = [], jobs = [];
+  const rows = [], jobs = [], design = [];
   let none = false, jobNone = false, sources = '', holds = {}, lineHashes = null, checkHashes = null, best = null, recorded = '';
   const hashes = (s) => s.split(/\s+/).filter((h) => /^[0-9a-f]+$/.test(h));
   for (const line of String(text).split(/\r?\n/)) {
@@ -260,13 +273,13 @@ export function parseSiblings(text) {
     const rec = /^Recorded: (.*)$/.exec(line);
     if (rec) { recorded = rec[1].trim(); continue; }
     if (BEST_LINE.test(line.trim())) continue;
-    const m = /^([SJ])(\d+) · (.*)$/.exec(line);
+    const m = /^([SJD])(\d+) · (.*)$/.exec(line);
     if (!m) continue;
     const arrow = m[3].indexOf('→');
-    (m[1] === 'S' ? rows : jobs).push({ n: Number(m[2]), body: (arrow < 0 ? m[3] : m[3].slice(0, arrow)).trim(), outcome: arrow < 0 ? '' : m[3].slice(arrow + 1).trim() });
+    (m[1] === 'S' ? rows : m[1] === 'J' ? jobs : design).push({ n: Number(m[2]), body: (arrow < 0 ? m[3] : m[3].slice(0, arrow)).trim(), outcome: arrow < 0 ? '' : m[3].slice(arrow + 1).trim() });
   }
   for (const r of rows) if (holds && typeof holds[r.n] === 'string') r.holds = holds[r.n];
-  return { rows, none, jobs, jobNone: jobNone && !jobs.length, sources, lineHashes, checkHashes, best, recorded };
+  return { rows, none, jobs, jobNone: jobNone && !jobs.length, sources, lineHashes, checkHashes, best, recorded, design };
 }
 
 // One line's short hash: its words, with runs of spaces as one space.
@@ -311,7 +324,7 @@ export function parseOutside(text) {
   return String(text).split(/\r?\n/).map((l) => /^- OUTSIDE PR:\s*(.*)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
 }
 
-export function renderSiblings({ brief, report, recorded, rows, outside = [], jobs = [], jobNone = false, sources = '', lineHashes = null, checkHashes = null }) {
+export function renderSiblings({ brief, report, recorded, rows, outside = [], jobs = [], jobNone = false, sources = '', lineHashes = null, checkHashes = null, design = [] }) {
   return [
     '# Siblings — places with the same rule or defect that the places list missed', '',
     `Brief: ${slash(brief)}`,
@@ -326,6 +339,7 @@ export function renderSiblings({ brief, report, recorded, rows, outside = [], jo
     'siblings.mjs --record keeps every outcome when it records again; pre-review.mjs --siblings checks this file.', '',
     ...(rows.length ? rows.map(siblingLine) : ['SIBLINGS: none']), '',
     ...(jobs.length || jobNone ? [JOB_HEADING, '', ...(jobs.length ? jobs.map(jobLine) : ['SAME JOB: none']), ''] : []),
+    ...(design.length ? [DESIGN_HEADING, '', ...design.map(designLine), ''] : []),
     ...(outside.length ? [OUTSIDE_HEADING, '', ...outside.map((o) => '- OUTSIDE PR: ' + o), ''] : []),
   ].join('\n');
 }
@@ -381,9 +395,13 @@ export function recordSiblings({ report, notes, now = new Date() }) {
   const jobNone = !jobs.length && (found.jobNone || old.jobNone);
   const outside = parseOutside(oldText);
   for (const b of found.outside) if (!outside.includes(b)) outside.push(b);
-  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside, jobs, jobNone, sources: sources || old.sources, lineHashes: lineHashes || old.lineHashes, checkHashes: checkHashes || old.checkHashes });
+  // Batch c task 4: the second look's view of the design keeps its number and the builder's answer when recorded again.
+  const design = old.design;
+  let nextDesign = design.reduce((n, r) => Math.max(n, r.n), 0) + 1;
+  for (const b of found.design || []) if (!design.some((r) => r.body === b)) design.push({ n: nextDesign++, body: b, outcome: '' });
+  const text = renderSiblings({ brief, report: path.resolve(report), recorded: now.toISOString(), rows, outside, jobs, jobNone, sources: sources || old.sources, lineHashes: lineHashes || old.lineHashes, checkHashes: checkHashes || old.checkHashes, design });
   fs.writeFileSync(out, oldText.includes('\r\n') ? text.replace(/\n/g, '\r\n') : text);
-  return { out, rows, outside, jobs, jobNone };
+  return { out, rows, outside, jobs, jobNone, design };
 }
 
 // Why a J line is still open ('' = closed): `reuse` (the design follows that pattern) or `not: <reason>`.
@@ -627,16 +645,18 @@ function main() {
       const notes = path.resolve(o.notes);
       const b = writeBrief({ notes, repo: path.resolve(o.repo) });
       process.stdout.write(`SIBLINGS BRIEF: ${b.brief} · T1..T${b.ticket.length}${b.dropped.length ? ` (${b.dropped.map((n) => 'T' + n).join(', ')} dropped)` : ''} · ${b.checks.length ? `C1..C${b.checks.length}` : 'no check line yet'} · ${b.places} place(s)${b.design ? ' · your design (design.md)' : ''}\n` +
-        (b.design ? '' : `NOTE: no design.md: write your design in a few lines as ${slash(path.join(notes, 'design.md'))} and run --brief again, so the second look checks it for gaps\n`) +
+        (b.design ? '' : `NOTE: no design.md: on a small or medium task, write the design in three lines and one way you turned down (NOT: <way> — <why>) as ${slash(path.join(notes, 'design.md'))} and run --brief again, so the second look judges it before any code\n`) +
         launchLine(b.brief) + '\n' +
         `THEN: save the agent's final message as ${slash(path.join(notes, REPORT))}, then run: node ${slash(path.join(here, 'siblings.mjs'))} --record ${slash(path.join(notes, REPORT))} --notes ${slash(notes)}\n`);
     } else if (o.record) {
-      const { out, rows, outside, jobs, jobNone } = recordSiblings({ report: path.resolve(o.record), notes: path.resolve(o.notes) });
+      const { out, rows, outside, jobs, jobNone, design } = recordSiblings({ report: path.resolve(o.record), notes: path.resolve(o.notes) });
       const r = checkSiblings({ rows });
       process.stdout.write(rows.map((row) => '  ' + siblingLine(row).trimEnd() + '\n').join('') +
         `SIBLINGS: ${r.count} found, ${r.open.length} open — written to ${out}${r.count ? '; write P<n> or none: <reason> after each →' : ''}\n` +
         jobs.map((row) => '  ' + jobLine(row).trimEnd() + '\n').join('') +
         (jobs.length ? `SAME JOB: ${jobs.length} found — hints for the design: write reuse or not: <why> after each (the reviewer sees the reason) →\n` : jobNone ? 'SAME JOB: none — the agent found no earlier work of the same kind\n' : '') +
+        design.map((row) => '  ' + designLine(row).trimEnd() + '\n').join('') +
+        (design.length ? `DESIGN: the second look judged your design — write follow or not: <why> after → in ${out}, and show the owner that line\n` : '') +
         (outside.length ? `OUTSIDE PR: ${outside.length} line(s) outside the ticket, kept apart — not this task's work; they go to the user's end list (loop.md Step 3.5, item 5)\n` : ''));
     } else if (o.close) {
       const file = path.resolve(o.close);
