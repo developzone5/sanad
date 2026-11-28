@@ -74,6 +74,12 @@ test('retry: only a named wall-clock test failing on its time assertion runs aga
   assert.equal(lists.TIME_LIMIT_TESTS.length <= 8, true, 'the list is short');
   assert.deepEqual(lists.retryFiles(failingLog(SANAD), 'gate'), ['sanad.test.mjs']);
   assert.deepEqual(lists.retryFiles(failingLog(CHANGE, SANAD), 'gate'), ['change-set.test.mjs', 'sanad.test.mjs']);
+  // 2026-11-28 (owner, option 1): the remote-preflight time window, as the installs' logs printed it; its other
+  // assertions are real failures.
+  const PREFLIGHT = ['remote-preflight.test.mjs', 'starting health still has a time limit', 'AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:\n  \n    assert.ok(t.calls().filter(line => line.includes(\'docker inspect\')).length > 2)'];
+  assert.deepEqual(lists.retryFiles(failingLog(PREFLIGHT), 'hooks'), ['remote-preflight.test.mjs']);
+  assert.equal(lists.retryFiles(failingLog([PREFLIGHT[0], PREFLIGHT[1], 'AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n0 !== 8']), 'hooks'), null, 'its exit-code assertion is real');
+  assert.equal(lists.retryFiles(failingLog([PREFLIGHT[0], PREFLIGHT[1], 'AssertionError [ERR_ASSERTION]: The input did not match the regular expression /^APP-DOWN/']), 'hooks'), null, 'its APP-DOWN assertion is real');
   assert.equal(lists.retryFiles(failingLog(SANAD, ['pre-review.test.mjs', 'a check', 'AssertionError [ERR_ASSERTION]: took 9 ms']), 'gate'), null, 'one real failure: no retry');
   assert.equal(lists.retryFiles(failingLog(SANAD), 'hooks'), null, 'the file of another suite');
   assert.deepEqual(lists.retryFiles(failingLog(SCAN), 'hooks'), ['scan-incremental.test.mjs']);

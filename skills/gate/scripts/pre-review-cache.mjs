@@ -173,6 +173,30 @@ export function beforeProofPassed(repo, tree = workTree(repo), inputs = '', base
     return Boolean(tree) && Boolean(head) && r.ok === true && r.tree === tree && r.head === head && String(r.base || '') === baseRev(repo, base) && String(r.inputs || '') === String(inputs || '');
   } catch { return false; }
 }
+// 2026-11-28 (owner, batch b task 1): a whole `pre-review` run (no --before-proof, no --part, with --notes) that passed,
+// by the tree, HEAD, base and list files it ran on. "ready" counts the ticket lines and places as checked only on this
+// record, and only when the session shows the run that wrote it (trusted.mjs seenRecord: the run prints its line).
+function fullRunFile(repo) { const f = beforeProofFile(repo); return path.join(path.dirname(path.dirname(f)), 'pre-review-full', path.basename(f)); }
+/** Saves a passed whole run and returns the record (null when nothing was saved). */
+export function rememberFullRun(repo, { tree, head, base, inputs }) {
+  if (!tree || !head) return null;
+  const record = { kind: 'pre-review', tree, head: String(head), base: baseRev(repo, base), inputs: String(inputs || ''), ok: true };
+  const file = fullRunFile(repo);
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify({ ...record, at: new Date().toISOString() })); return record; } catch { return null; }
+}
+/** The saved whole run as written (its `at` left out, as recordId hashes it), or null. */
+export function readFullRun(repo) {
+  try {
+    const r = JSON.parse(fs.readFileSync(fullRunFile(repo), 'utf8'));
+    if (!r || typeof r !== 'object') return null;
+    return { kind: r.kind, tree: r.tree, head: r.head, base: r.base, inputs: r.inputs, ok: r.ok };
+  } catch { return null; }
+}
+/** Whether the saved whole run is for this tree, HEAD, base and these list files. */
+export function fullRunFits(repo, record, { tree, inputs, base }) {
+  const head = git(repo, ['rev-parse', 'HEAD']);
+  return Boolean(record && tree && head) && record.ok === true && record.tree === tree && record.head === head && String(record.base || '') === baseRev(repo, base) && String(record.inputs || '') === String(inputs || '');
+}
 function readAll() {
   try { const j = JSON.parse(fs.readFileSync(cacheFile(), 'utf8')); return j && typeof j.entries === 'object' ? j : { entries: {} }; }
   catch { return { entries: {} }; }

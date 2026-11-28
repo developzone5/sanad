@@ -155,9 +155,11 @@ async function main(argv) {
   if (notes) {
     // The block is compared with what the records say now, for the repository this command runs in.
     try {
-      const { readFacts, evidenceBlock, loadNotesTools } = await import('./sanad.mjs');
+      const { readFacts, evidenceBlock, loadNotesTools, trustedFacts } = await import('./sanad.mjs');
       await loadNotesTools();
       const facts = readFacts({ repo: process.cwd(), notes: path.resolve(notes), deep: true });
+      // Review (task 1 PR): the block's suite line comes from the trusted reading, as pr-body prints it.
+      if (typeof trustedFacts === 'function') await trustedFacts(facts);
       evidence = evidenceProblems(text, facts, evidenceBlock(facts));
       compared = evidence.length === 0;
     } catch (error) { evidence = [`the evidence block could not be checked (${String(error && error.message || error).split(/\r?\n/)[0]})`]; }

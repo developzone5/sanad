@@ -61,6 +61,10 @@ export const TIME_LIMIT_TESTS = [
   { file: 'claude/skills/gate/tests/notes-dir.test.mjs', title: 'a lock left by a dead process is taken over; an unsigned or very old one only when it is old enough', timing: /AssertionError[^\n]*: no wait for a writer that is gone/ },
   { file: 'claude/skills/gate/tests/test-machine-lock.test.mjs', title: 'two proofs share the machine (the server\'s and the page\'s), and another host is never waited for', timing: /AssertionError[^\n]*: a second proof waited/ },
   { file: 'claude/hooks/tests/scan-incremental.test.mjs', title: 'a large transcript is read in pieces and a later call reads only the new part fast', timing: /AssertionError[^\n]*: a later call took \d+ ms/ },
+  // 2026-11-28 (owner, option 1): it counts `docker inspect` calls in a 2-second window; under both suites it saw two, and
+  // rolled two installs back (it passed alone at 2.3 s and 2.7 s). Only this assertion is the clock: its exit code or
+  // its APP-DOWN line failing is a real failure.
+  { file: 'claude/hooks/tests/remote-preflight.test.mjs', title: 'starting health still has a time limit', timing: /AssertionError[^\n]*: The expression evaluated to a falsy value:\s+assert\.ok\(t\.calls\(\)\.filter\(line => line\.includes\('docker inspect'\)\)\.length > 2\)/ },
 ];
 
 const norm = (f) => String(f || '').trim().replace(/\\/g, '/').replace(/^\.\//, '');

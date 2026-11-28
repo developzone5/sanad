@@ -120,6 +120,19 @@ function recordPath(top) {
 export function recordKey(command, cwd = '') {
   return crypto.createHash('sha1').update(JSON.stringify([String(cwd).replace(/\\/g, '/'), ...command.map(String)])).digest('hex').slice(0, 16);
 }
+// 2026-11-28 (owner, batch b task 1 item 5): two proofs with one test command overwrote each other's entry, so a failed
+// proof of one break was cleared by another break's pass. The entry key now holds the spots its breaks change too (each
+// break's file, find and put; a break's name and mustFail are left out, so fixing only a break's test name keeps its
+// spot). The break results and run facts stay under recordKey, so a saved break result is still reused.
+export function siteId(brk) {
+  const b = brk && typeof brk === 'object' ? brk : {};
+  return crypto.createHash('sha1').update(JSON.stringify([String(b.file ?? '').replace(/\\/g, '/'), lf(b.find), lf(b.put)])).digest('hex').slice(0, 16);
+}
+export function siteIds(breaks) { return [...new Set((Array.isArray(breaks) ? breaks : []).filter((b) => b && !b.single).map(siteId))].sort(); }
+export function entryKey(command, cwd = '', breaks = []) {
+  const sites = siteIds(breaks);
+  return sites.length ? recordKey(command, cwd) + '.' + crypto.createHash('sha1').update(sites.join(',')).digest('hex').slice(0, 12) : recordKey(command, cwd);
+}
 
 // The record: { top, entries: { <key>: { ok, breaks, files, targets, caught, code, ... } } }, or for a proof
 // that did not end PROVED { ok: false, reason, ... } (2026-11-17). A file in the format
@@ -1071,6 +1084,13 @@ export function proofHint(own) {
 // file and folder the old one ran. A newer passing entry counts as provenTests counts an entry: ok, at least one break,
 // today's code id, every break target as it was. An entry that is not ok (a failed or stopped proof) names no test, so nothing but a passing run of its own
 // command (which replaces it) clears it: another proof's pass never does. An entry that names no test never stops blocking.
+// 2026-11-28 (batch b task 1 item 5): entries of one command are kept apart by the spots their breaks change (entryKey).
+// A not-ok entry is cleared only by a NEWER passing entry on today's code, of the same command in the same folder, whose
+// breaks cover every spot of the failed one (sites); an entry written before 2026-11-28 has no sites, and a newer
+// passing run of its command clears it, as before. Another break's pass never clears it.
+// 2026-11-28 (batch b task 1 item 6): a narrower command never stands for a wider one. A test file added to a command that
+// named no test file (`npx vitest run` → `npx vitest run t/a.test.js`) runs fewer tests: it no longer counts as running
+// every part of the old command.
 // Returns Map { <entry key> → { released, files: [{ file, released, why }], why? } } for every entry not ok on today's code.
 export function oldEntries(top, record = readRecord(top), today = codeFingerprint(top)) {
   const out = new Map();
@@ -1084,8 +1104,16 @@ export function oldEntries(top, record = readRecord(top), today = codeFingerprin
     if (old.ok === true && today && old.code === today) continue;
     const named = old.ok === true && old.caught && typeof old.caught === 'object' && !Array.isArray(old.caught) ? old.caught : {};
     const files = Object.keys(named).filter((f) => Array.isArray(named[f]) && named[f].length);
+    if (old.ok !== true) {
+      const oldSites = Array.isArray(old.sites) ? old.sites.map(String) : null;
+      const same = (e) => Array.isArray(e.command) && Array.isArray(old.command) && e.command.map(String).join('\0') === old.command.map(String).join('\0') && String(e.cwd || '') === String(old.cwd || '');
+      const covered = live.some(([k, e]) => k !== key && time(e) > time(old) && same(e) && (oldSites === null || oldSites.every((s) => Array.isArray(e.sites) && e.sites.includes(s))));
+      out.set(key, covered ? { released: true, files: [], why: 'a newer passing run of its command, on today\'s code, covers each of its breaks' }
+        : { released: false, files: [], why: 'its last run did not end PROVED: only a passing run of its own command clears it, and that run must cover each of its breaks' });
+      continue;
+    }
     if (!files.length) {
-      out.set(key, { released: false, files: [], why: old.ok === true ? 'it names no test' : 'its last run did not end PROVED: only a passing run of its own command clears it' });
+      out.set(key, { released: false, files: [], why: 'it names no test' });
       continue;
     }
     // Review (2026-11-25): a renamed test file is not gone. A file counts as no longer in the tree only when git, comparing the
@@ -1136,9 +1164,16 @@ export function oldEntries(top, record = readRecord(top), today = codeFingerprin
     // every word of the old entry's command (`node --test a.test.js more/` ⊄ `node --test a.test.js`), and add only test
     // files to it (review: an added `--exclude more/**` ran less). This only blocks.
     const words = Array.isArray(old.command) ? old.command.map(String) : [];
+    // Item 6: an added test file widens only a command that already named test files or test folders; added to a command
+    // that named none (it ran them all), it narrows it. Review (task 1 PR): a runner script (node_modules/vitest/vitest.mjs)
+    // or a flag's value (--root ./web) names no test: a named folder is a word that ends in a slash, or one whose last
+    // part has no file extension and that is not a flag's value (`--root ./web`).
+    const afterFlag = (i, all) => i > 0 && /^--?[\w-]+$/.test(all[i - 1]);
+    const namedFiles = words.slice(1).some((w, i, all) => !w.startsWith('-')
+      && (TEST_FILE.test(w) || /[\\/]$/.test(w) || (/[\\/]/.test(w) && !/\.[A-Za-z0-9]+$/.test(w.split(/[\\/]/).pop()) && !afterFlag(i, all))));
     const ranAll = words.length > 0 && live.some(([k, e]) => k !== key && time(e) > time(old) && String(e.cwd || '') === String(old.cwd || '')
       && Array.isArray(e.command) && words.every((w) => e.command.map(String).includes(w))
-      && e.command.map(String).every((w) => words.includes(w) || (TEST_FILE.test(w) && !w.startsWith('-'))));
+      && e.command.map(String).every((w) => words.includes(w) || (namedFiles && TEST_FILE.test(w) && !w.startsWith('-'))));
     if (!ranAll) { out.set(key, { released: false, files: rows, why: 'no newer passing entry on today\'s code ran every part of its command (a test file or a folder it named)' }); continue; }
     out.set(key, { released: rows.every((r) => r.released), files: rows });
   }
