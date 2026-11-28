@@ -118,6 +118,7 @@ export function reviewReported(pin, reviews, reports, reportFiles) {
 
 // The finish times of the reports the other engine left in the notes folder (codex-review.md, codex-whole.md,
 // claude-fresh.md, ...). The folder is the one notes-dir.mjs names. An empty file is no report.
+const FINISHED_REPORT = /^[ \t]*(?:[-*•>#]+[ \t]*)?[`*_]*RECOMMEND:[`*_ \t]*(?:PASS|FAIL)(?![|\w])/m;
 function otherReports(dir, engine, every = false, { firstRoundOnly = false } = {}) {
   const out = [];
   if (!dir) return out;
@@ -132,7 +133,9 @@ function otherReports(dir, engine, every = false, { firstRoundOnly = false } = {
       // Review (task 1 PR): a re-check's report (codex-recheck-<round>….md) never fills a first-round seat.
       if (firstRoundOnly && /re-?check/i.test(n)) continue;
       const st = fs.statSync(path.join(folder, n));
-      if (st.isFile() && st.size > 0) out.push(st.mtimeMs);
+      // 2026-11-28 (owner, batch c note 7): a stopped run can leave an error text or half a report; a report counts as
+      // finished only when it holds its verdict line (RECOMMEND: PASS or FAIL, the first line the brief asks for).
+      if (st.isFile() && st.size > 0 && FINISHED_REPORT.test(readText(path.join(folder, n)).replace(/^﻿/, ''))) out.push(st.mtimeMs);
     }
   } catch { /* none */ }
   return out;

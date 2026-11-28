@@ -440,6 +440,33 @@ test('review: a reviewer run counts for this task only when its launch prompt na
   assert.match(item((await cmd(fx, 'ready')).out, 'review'), /^READY done/);
 });
 
+// 2026-11-28 (owner, batch c note 7): a stopped run of the other engine can leave an error text or half a report in its
+// file; only a report with its verdict line is a finished review.
+test('review: the other engine\'s file without its verdict line (a stopped run) is no finished review', async () => {
+  const fx = fixture();
+  await task(fx);
+  allTrusted(fx);
+  for (const text of ['Error: the run was stopped (rate limit)\n', 'Reading the brief...\nBug — a.js:1 — the count', '   \n']) {
+    fs.writeFileSync(path.join(fx.notes, 'codex-review.md'), text);
+    fs.utimesSync(path.join(fx.notes, 'codex-review.md'), new Date('2026-11-28T09:15:00Z'), new Date('2026-11-28T09:15:00Z'));
+    assert.match(item((await cmd(fx, 'ready')).out, 'review'), /^READY NOT DONE — review: .*missing other engine/, JSON.stringify(text));
+  }
+  otherReport(fx, '2026-11-28T09:15:00Z');
+  assert.match(item((await cmd(fx, 'ready')).out, 'review'), /^READY done/);
+});
+
+// 2026-11-28 (owner, batch c note 8): seats are counted by each run's own seat, so two fresh-eyes runs and the other
+// engine's report never fill a big round's risk-files seat.
+test('review: two fresh-eyes runs and a Codex report are no big round', async () => {
+  const fx = fixture();
+  await task(fx);
+  allTrusted(fx);
+  fx.trust.size = 'big';
+  const seat = (s, id) => ({ id, seat: s, launchAt: '2026-11-28T09:00:00Z', doneAt: '2026-11-28T09:20:00Z' });
+  fx.notesList.reviews = [seat('fresh eyes', 'a'), seat('fresh eyes', 'b')];
+  assert.match(item((await cmd(fx, 'ready')).out, 'review'), /^READY NOT DONE — review: .*2 of 3 first-round seat\(s\) of a big change .*missing risk files/);
+});
+
 test('review: the other engine\'s re-check report never fills its first-round seat', async () => {
   const fx = fixture();
   await task(fx);
