@@ -69,4 +69,12 @@ test('the Codex reviewer roles say what is not a note, and the rule pages give S
   assert.doesNotMatch(loop, /one review|One quick review|the whole diff, fresh eyes/);
   assert.match(read(claudeRoot, 'skills', 'sanad', 'reference', 'full-pr-review.md'), /Small and Medium fresh eyes and the other engine, Big the full round/);
   assert.doesNotMatch(read(claudeRoot, 'agents', 'recheck-reviewer.md'), /The whole-diff review of a Big task uses routine-reviewer/);
+  // 2026-11-28 (owner, notes 26 and 33): the last places that still said Small gets one review.
+  assert.match(read(claudeRoot, 'CLAUDE.md'), /\*\*Small\*\* \(one side, no risk signal: no experts, fresh eyes and the other engine together,/);
+  assert.match(read(claudeRoot, 'skills', 'sanad', 'reference', 'boss-routing.md'), /\(Small and Medium: fresh eyes and the other engine\)/);
+  assert.match(read(claudeRoot, 'skills', 'sanad', 'reference', 'loop-rare-cases.md'), /the tests-only path \(tests pass, the two reviews, no breaks, no second look\)/);
+  assert.match(read(claudeRoot, 'skills', 'ship', 'SKILL.md'), /Small and Medium: fresh eyes and the other engine; Big:/);
+  for (const page of [['CLAUDE.md'], ['skills', 'sanad', 'reference', 'boss-routing.md'], ['skills', 'sanad', 'reference', 'loop-rare-cases.md'], ['skills', 'ship', 'SKILL.md']]) {
+    assert.doesNotMatch(read(claudeRoot, ...page), /one quick review|Small: one fresh-eyes review|Small: fresh eyes;|tests pass, one review/, page.join('/'));
+  }
 });
