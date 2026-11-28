@@ -241,7 +241,7 @@ export const STEPS = [
       ...(noProofStep(f) || f.proof.done ? [{ text: preReview(c) }] : [{ text: preReview(c, ' --before-proof') }, { text: 'the full checks run after the proof', plain: true }]),
       { text: brief(c, f, '--pin') },
       { text: `launch every line of ${note(c, 'launch.md')} in one message`, plain: true },
-      ...(f.lane === 'small' ? [{ text: "suggestion, not measured: start the gate's focused evidence runs while the one reviewer reads", plain: true }] : []),
+      ...(f.lane === 'small' ? [{ text: "suggestion, not measured: start the gate's focused evidence runs while the two reviewers read", plain: true }] : []),
     ] },
   { id: 'notes', loop: 'Step 3.5, item 4', lanes: ALL, unknown: (f) => !f.notes.known,
     done: (f) => f.notes.known && f.notes.open.length === 0,

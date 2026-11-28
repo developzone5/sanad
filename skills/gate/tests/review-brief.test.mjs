@@ -48,7 +48,7 @@ test('every ticket line needs a Check line, and every Check line names its sourc
 });
 
 // 2026-11-07: a reviewer re-asked a question the user had closed; the slowest reviewer had the widest job.
-test('decided questions go into both briefs; a small change gets one review, the Claude fresh eyes', () => {
+test('decided questions go into both briefs; a small change gets the Claude fresh eyes and the Codex fresh eyes', () => {
   const list = '- 2026-11-06 · Twin · F.tsx:1 · open\n- 2026-11-06 · Wording question — CLOSED: the ticket decides (user: "is qa not mention")\n';
   const decided = decidedItems(list);
   assert.deepEqual(decided, ['Wording question — CLOSED: the ticket decides (user: "is qa not mention")']);
@@ -56,11 +56,15 @@ test('decided questions go into both briefs; a small change gets one review, the
   const args = { repo: 'C:/r', branch: 'b', base: 'origin/staging', mergeBase: 'a'.repeat(40), ticket: 't', checks: ['x'], outside: withDecided, facts: { stack: '', size: 'SIZE: small (diff)', callers: '' } };
   for (const brief of [buildBrief(args), buildFreshBrief({ ...args, missed: [] })]) assert.match(brief, /## Decided by the user — do not ask again\n\n- Wording question — CLOSED/);
   const small = buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b', size: 'small' });
-  // A tiny or small change gets one review (user rule 2026-11-11): the Claude fresh eyes, no whole-diff pass, no Codex.
+  // 2026-11-28 (owner, batch c task 2): a tiny or small change gets the Claude fresh eyes and the other engine's fresh
+  // eyes, launched together, no whole-diff pass.
   assert.match(small, /FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
-  assert.doesNotMatch(small, /whole-diff pass|codex exec|Fill the coverage checklist/);
+  assert.match(small, /^## Fresh eyes \(Codex\) — Bash, run_in_background$/m);
+  assert.doesNotMatch(small, /whole-diff pass|Fill the coverage checklist/);
   assert.doesNotMatch(small, /Test designer/, 'the designer is a Big-task seat (2026-11-13)');
-  assert.match(buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b' }), /Fill the coverage checklist/);
+  // A size not known is Big: a Codex task keeps its whole-diff pass with the checklist sentence; a Claude task has none.
+  assert.match(buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b', engine: 'codex' }), /whole-diff pass[^\n]*Fill the coverage checklist/);
+  assert.doesNotMatch(buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b' }), /whole-diff pass/);
 });
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'review-brief.mjs');
@@ -134,7 +138,7 @@ test('launch lines name the briefs exactly: the fresh brief for both fresh-eyes 
   const launch = buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'fix/x' });
   assert.match(launch, /Test designer[\s\S]*The task's brief: C:\/n\/brief\.md/);
   assert.match(launch, /FRESH EYES whole-PR review\. Read and follow only the brief at C:\/n\/brief-fresh\.md/);
-  assert.match(launch, /whole-diff pass\. Read and follow the brief at C:\/n\/brief\.md/);
+  assert.doesNotMatch(launch, /whole-diff pass/, 'no Claude whole-diff seat (2026-11-28)');
   assert.match(launch, /risk files pass \(Pass A\)\. Read and follow the brief at C:\/n\/brief\.md/);
   assert.match(launch, /codex exec -s read-only[\s\S]*brief at C:\/n\/brief-fresh\.md/);
 });
@@ -223,7 +227,7 @@ test('the larger of the routed and the measured size is used, and a difference i
   assert.doesNotMatch(buildFreshBrief({ ...base, missed: [], size: 'small', facts: big }), /## Focused brief/);
   const launch = buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b', size: 'big', sizeNote: 'size: routed small, measured big → using big' });
   assert.match(launch, /^size: routed small, measured big → using big$/m);
-  assert.match(launch, /whole-diff pass/);
+  assert.match(launch, /risk files pass/);
 });
 
 // 2026-11-12 (user-approved sizes): Small and Medium get one fresh-eyes review; only Big gets the full round.
@@ -247,15 +251,19 @@ test('a medium change gets the Claude fresh eyes with the full brief and the Cod
   const mediumFacts = { ...facts, size: 'SIZE: medium (diff) — the shared API contract (src/api/x.ts)' };
   assert.doesNotMatch(buildBrief({ ...base, facts: mediumFacts }), /## Focused brief/);
   assert.doesNotMatch(buildFreshBrief({ ...base, facts: mediumFacts }), /## Focused brief/);
+  // 2026-11-28 (owner, batch c task 2): tiny and small get both engines, launched together, with the focused brief.
   for (const size of ['tiny', 'small']) {
-    const one = buildLaunch({ ...args, size });
-    assert.match(one, /^\(A tiny or small change: only this one review, user rule 2026-11-11\.\)$/m, size);
-    assert.equal(reviewers(one).length, 1, size);
-    assert.doesNotMatch(one, /Fill the coverage checklist|whole-diff pass|codex exec/, size + ' keeps the focused review');
+    const two = buildLaunch({ ...args, size });
+    assert.match(two, /^\(A tiny or small change: fresh eyes and the other engine, launched together; owner decision 2026-11-28\.\)$/m, size);
+    assert.equal(reviewers(two).length, 1, size);
+    assert.deepEqual(headings(two), ['Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', 'Fresh eyes (Codex) — Bash, run_in_background'], size);
+    assert.equal((two.match(/codex exec -s read-only/g) || []).length, 1, size + ': one other-engine review');
+    assert.doesNotMatch(two, /Fill the coverage checklist|whole-diff pass/, size + ' keeps the focused review');
   }
   const big = buildLaunch({ ...args, size: 'big' });
-  // 2026-11-15: a big change also gets the risk-files reviewer, right after the Claude fresh eyes.
-  assert.deepEqual(reviewers(big).map(l => l.split('. ')[0]), ['You are the independent reviewer — FRESH EYES whole-PR review', 'You are the independent reviewer — risk files pass (Pass A)', 'You are the independent reviewer — whole-diff pass']);
+  // 2026-11-15: a big change also gets the risk-files reviewer, right after the Claude fresh eyes. 2026-11-28: no
+  // Claude whole-diff seat.
+  assert.deepEqual(reviewers(big).map(l => l.split('. ')[0]), ['You are the independent reviewer — FRESH EYES whole-PR review', 'You are the independent reviewer — risk files pass (Pass A)']);
   assert.match(big, /codex exec -s read-only/);
   assert.doesNotMatch(reviewers(big)[0], /Fill the coverage checklist/, 'big: the fresh eyes line is unchanged');
   assert.doesNotMatch(big, /A medium change|A tiny or small change/);
@@ -275,7 +283,7 @@ test('a big change adds the risk-files reviewer after the Claude fresh eyes: rep
   const launch = buildLaunch({ ...riskArgs, size: 'big', facts: riskFacts, changed: riskChanged });
   assert.deepEqual(launch.split(/^## /m).slice(1).map(s => s.split('\n')[0]), ['Test designer — Agent braintrust-expert-sonnet, run_in_background',
     'Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', 'Risk files (Claude) — Agent independent-reviewer, run_in_background',
-    'Whole diff (Claude) — Agent routine-reviewer, run_in_background', 'Fresh eyes (Codex) — Bash, run_in_background']);
+    'Fresh eyes (Codex) — Bash, run_in_background']);
   const risk = riskBlock(launch);
   assert.ok(risk.startsWith('You are the independent reviewer — risk files pass (Pass A). Read and follow the brief at C:/n/brief.md, including its Rules section. Do not open any other file in that folder.'), risk);
   // The stop and push guards count a reviewer run by this start (hooks/lib/transcript-scan.js, REVIEWER_PROMPT).
@@ -395,7 +403,7 @@ test('the command uses the larger size for launch.md and says so', () => {
   assert.match(r.stdout, /^size: routed small, measured big → using big$/m);
   const launch = fs.readFileSync(path.join(notes, 'launch.md'), 'utf8');
   assert.match(launch, /^size: routed small, measured big → using big$/m);
-  assert.match(launch, /whole-diff pass/, 'the full round');
+  assert.match(launch, /risk files pass/, 'the full round');
   assert.doesNotMatch(fs.readFileSync(out, 'utf8'), /## Focused brief/);
   const bad = spawnSync(process.execPath, [script, '--out', out, '--ticket', ticket, '--lines', lines, '--check', check, '--repo', repo, '--base', 'main', '--size', 'huge'], { encoding: 'utf8', env, windowsHide: true });
   assert.equal(bad.status, 2, 'an unknown --size is a usage error');
@@ -548,7 +556,7 @@ test('--coverage: a Check line in the wrong shape fails with its reason; a right
 test('a big launch holds no Test designer line once the designer ran, and says why in one line; small and medium are unchanged', () => {
   const args = { ...riskArgs, facts: riskFacts, changed: riskChanged };
   const headings = text => text.split(/^## /m).slice(1).map(s => s.split(' — ')[0]);
-  const reviewers = ['Fresh eyes (Claude)', 'Risk files (Claude)', 'Whole diff (Claude)', 'Fresh eyes (Codex)'];
+  const reviewers = ['Fresh eyes (Claude)', 'Risk files (Claude)', 'Fresh eyes (Codex)'];
   const fromFreshEyes = text => text.slice(text.indexOf('## Fresh eyes (Claude)'));
   // Big, and a size not known (the full round too).
   for (const size of ['big', '']) {
@@ -561,7 +569,7 @@ test('a big launch holds no Test designer line once the designer ran, and says w
       assert.deepEqual(headings(launch), reviewers, done);
       assert.doesNotMatch(launch, /Seat: Test designer|braintrust-expert-sonnet|a requirement that changed/, done);
       assert.equal(launch.split('\n').filter(l => l.startsWith('Test designer')).join('|'), `Test designer: already ran before code (${done})`, 'one line says why it is not launched');
-      assert.equal(fromFreshEyes(launch), fromFreshEyes(open), 'the four reviewers are launched as before');
+      assert.equal(fromFreshEyes(launch), fromFreshEyes(open), 'the three reviewers are launched as before');
     }
   }
   // Small and Medium never had the line: a saved report changes nothing for them.
@@ -603,14 +611,14 @@ test('the command leaves the Test designer out of a big launch when its report i
     rows = launchLines();
     assert.ok(!rows.some(l => /^## Test designer|Seat: Test designer/.test(l)), name + ': no designer launch');
     assert.ok(rows.includes(`Test designer: already ran before code (${name})`), name + ': the reason line names the file');
-    assert.equal(reviewerCount(rows), 3, name + ': the reviewers stay');
+    assert.equal(reviewerCount(rows), 2, name + ': the reviewers stay (no Claude whole diff, 2026-11-28)');
     assert.ok(rows.some(l => l.includes('codex exec -s read-only')), name + ': the other engine stays');
     fs.rmSync(path.join(notes, name));
   }
   rows = launchLines('--designer-done');
   assert.ok(!rows.some(l => /^## Test designer|Seat: Test designer/.test(l)), '--designer-done: no designer launch');
   assert.ok(rows.includes('Test designer: already ran before code (--designer-done)'));
-  assert.equal(reviewerCount(rows), 3);
+  assert.equal(reviewerCount(rows), 2);
   // A requirement changed after the report was saved: the designer must run again, so its line stays.
   const report = path.join(notes, 'test-designer.md');
   fs.writeFileSync(report, 'SETUP\nCASES\nBREAKS\n');
@@ -648,7 +656,9 @@ const stripEngine = t => t.replace(/^Engine: [^\n]*\n\n/m, '');
 
 // MUST NOT CHANGE (fails only on the engine line on the old code): the Claude plan is byte for byte today's.
 test('the Claude plan is unchanged except its engine line', () => {
-  const gold = { small: 'e63e00d983b7d592c25f66b326c13151bef8daebcc6dd02d892f86b4e8d90caf', medium: '00ea58022c234baf316d7607cb991573fa324b64f820b7c6edc3dfac98b80179', big: '382c90e7fde2b895c7023137f50b5b64b2e968d553451bb16563ba30f9df98d7' };
+  // 2026-11-28 (owner, batch c task 2): the small hash and the big hash were updated on purpose: a small plan now holds the
+  // Codex fresh eyes, and a big plan has no Claude whole-diff seat. The medium hash is untouched.
+  const gold = { small: '792094eb97c4c7542611bd800c44149d2368b045a617c386262d2faa15e9c7f6', medium: '00ea58022c234baf316d7607cb991573fa324b64f820b7c6edc3dfac98b80179', big: 'dd61fadece53cda783cf811e0424f9e88f39bfbbe4e096bbdb2d028331afe26f' };
   // 2026-11-19 (the pinned-review release): the big hash was updated on purpose. The Big plan's risk and whole-diff
   // seats each got their own question, and the trace list with no signal named holds the after-save question.
   // 2026-11-19: small and medium hashes are untouched (those plans hold no Codex line). The big hash was updated once: it is
@@ -669,17 +679,18 @@ test('every launch file says in its first lines which engine it was built for', 
   }
 });
 
-test('a Codex task: small gets one Codex fresh-eyes review and no Claude agent; medium adds the Claude fresh eyes', () => {
+// 2026-11-28 (owner, batch c task 2): tiny and small add the Claude fresh eyes too, as medium does.
+test('a Codex task: small gets the Codex fresh eyes and the Claude fresh eyes; medium the same with the full brief', () => {
   for (const size of ['tiny', 'small']) {
     const launch = buildLaunch({ ...engArgs, size, engine: 'codex' });
-    assert.deepEqual(seats(launch), ['Fresh eyes (Codex) — Bash, run_in_background'], size);
-    assert.doesNotMatch(launch, /Agent independent-reviewer|Agent routine-reviewer|Agent braintrust|Fresh eyes \(Claude\)/, size);
+    assert.deepEqual(seats(launch), ['Fresh eyes (Codex) — Bash, run_in_background', 'Fresh eyes (Claude) — Bash, run_in_background (claude -p)'], size);
+    assert.doesNotMatch(launch, /Agent independent-reviewer|Agent routine-reviewer|Agent braintrust/, size);
     assert.match(launch, /codex exec -s read-only -c model_reasoning_effort="xhigh" -C "C:\/r" -o "C:\/n\/codex-fresh\.md"/, size);
     // 2026-11-18 (finding 2): fresh eyes is the risk reviewer again (loop-rare-cases.md), not the whole-diff role.
     assert.match(launch, /Your Codex role is sanad-risk-reviewer/, size);
     assert.doesNotMatch(launch, /sanad-reviewer\b/, size);
     assert.match(launch, /Read and follow only the brief at C:\/n\/brief-fresh\.md/, size);
-    assert.equal((launch.match(/"You are the independent reviewer/g) || []).length, 1, size);
+    assert.equal((launch.match(/"You are the independent reviewer/g) || []).length, 2, size + ': the Codex and the Claude fresh eyes');
   }
   const medium = buildLaunch({ ...engArgs, size: 'medium', engine: 'codex' });
   assert.deepEqual(seats(medium), ['Fresh eyes (Codex) — Bash, run_in_background', 'Fresh eyes (Claude) — Bash, run_in_background (claude -p)']);
@@ -1020,7 +1031,7 @@ test('a Codex plan: every launch line carries the model of its own role, and a c
   assert.ok(lineOf(big2, 'codex-risk.md').includes(' -m "m-sanad-risk-reviewer-a" '));
 });
 
-test('the Claude Big and medium plans Codex line carries the fresh-eyes role model; small Claude plans hold no Codex line', () => {
+test('the Claude Big, medium and small plans Codex line carries the fresh-eyes role model', () => {
   const home = codexHomeWith(modelsA);
   const big = buildLaunch({ ...engArgs, size: 'big', engine: 'claude', codexHome: home });
   const lines = codexLines(big);
@@ -1029,7 +1040,10 @@ test('the Claude Big and medium plans Codex line carries the fresh-eyes role mod
   assert.doesNotMatch(big, /no model setting found/);
   const home2 = codexHomeWith({ ...modelsA, 'sanad-risk-reviewer': 'new-one' });
   assert.ok(codexLines(buildLaunch({ ...engArgs, size: 'big', codexHome: home2 }))[0].includes(' -m "new-one" '));
-  assert.equal(codexLines(buildLaunch({ ...engArgs, size: 'small', codexHome: home })).length, 0, 'small');
+  // 2026-11-28 (owner, batch c task 2): small has the other engine too.
+  const small = codexLines(buildLaunch({ ...engArgs, size: 'small', codexHome: home }));
+  assert.equal(small.length, 1, 'small: one Codex line, the other engine');
+  assert.ok(small[0].includes(' -m "m-sanad-risk-reviewer-a" '), small[0]);
   const medium = codexLines(buildLaunch({ ...engArgs, size: 'medium', codexHome: home }));
   assert.equal(medium.length, 1, 'medium: one Codex line, the other engine');
   assert.ok(medium[0].includes(' -m "m-sanad-risk-reviewer-a" '), medium[0]);

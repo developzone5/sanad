@@ -22,11 +22,11 @@ Loaded by the `sanad-implementation` stage. "Sanad Step N" anywhere means the st
 
 Before code: `node <gate>/sanad.mjs size --notes <notes> --files <planned files> --names <names>` saves the size; type none. `pre-review` reruns `size-check.mjs`; on `SIZE GREW` add `--up <size> --fact "<the missed fact>"`.
 
-- **Small** — one side (page or server) and no risk signal. No experts, no waiting. One quick review, started with the proof's first two runs. A slow suite is left to CI and the PR text says so.
+- **Small** — one side (page or server) and no risk signal. No experts, no waiting. Fresh eyes and the other engine, started with the proof's first two runs. A slow suite is left to CI and the PR text says so.
 - **Medium** — both sides, a query, the shared API or another medium signal. The proof, fresh eyes and the other engine, the full suite.
 - **Big** — access, money, a migration, concurrency, files or URLs, a dependency, or a function with more than 10 callers. The boss routes ([boss-routing.md](boss-routing.md)); experts plan first (`/braintrust`); then the full review round.
-- **Text only** (the check says tiny) — Small without rules 1 to 3: no list and no test. Lint, a look at the screen, one review.
-- **Tests only** (owner's yes; switch `sanad.testsOnlyLane`) — only tests change: no places list, no second look; the proof of each new or changed test, one review, the suite once.
+- **Text only** (the check says tiny) — Small without rules 1 to 3: no list and no test. Lint, a look at the screen, the two reviews.
+- **Tests only** (owner's yes; switch `sanad.testsOnlyLane`) — only tests change: no places list, no second look; the proof of each new or changed test, the two reviews, the suite once.
 
 **One job per PR.** Over about 400 logic lines or 30 code files, `pre-review` asks the user: split it, or keep it as one job (`one-job.mjs --keep "<their words>"`)?
 
@@ -82,7 +82,7 @@ Exit: `▸ built: <n> files changed, <n> tests pass, checks clean`.
    `node <gate>/pre-review.mjs --was <size> --notes <notes>`
 2. **The brief**, always from the tool, never typed or copied:
    `node <gate>/review-brief.mjs --pin --notes <notes> [--proof-log <notes>/proof.log] --engine <claude|codex> --size <size>`
-3. **Launch** every line of `<notes>/launch.md` in one message. Big: the risk files with their trace list, the whole diff, fresh eyes and the other engine. No source edit while they read.
+3. **Launch** every line of `<notes>/launch.md` in one message. Big: the risk files with their trace list, fresh eyes and the other engine (a Codex task: its whole diff too). No source edit while they read.
 4. **Notes (rule 5).** A report line that starts with `Blocker`, `Bug`, `Gap`, `Question` or `EXTRA TEST`, or that leaves a choice to the user ("you decide"), is a note; the guards number it (`notes.mjs list --open`). Each gets one answer through `notes.mjs answer` (`--fixed`, `--refuted`, or `--user` after `notes.mjs decide` saved the user's words). It refuses what the guards would refuse and prints the lines to send, each on its own line, in a message with no tool call:
    `NOTE <n>: fixed — <what changed and the test that proves it>`
    `NOTE <n>: user — "<the user's exact words>"`

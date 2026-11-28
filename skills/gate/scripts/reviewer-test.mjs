@@ -55,6 +55,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { isMain } from './is-main.mjs';
 import { parseVerdicts, judge } from './note-check.mjs';
+import { wholeDiffPrompt } from './review-brief.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CASES = path.resolve(HERE, '..', 'reviewer-cases');
@@ -71,7 +72,7 @@ export const GRADES = ['blocker', 'bug', 'gap'];
 export const JOBS = {
   'fresh-claude': { seat: 'independent-reviewer', engine: 'claude', kind: 'review', heading: /^## Fresh eyes \(Claude\) — Agent independent-reviewer/ },
   'risk-claude': { seat: 'independent-reviewer', engine: 'claude', kind: 'review', heading: /^## Risk files \(Claude\) — Agent independent-reviewer/ },
-  'whole-claude': { seat: 'routine-reviewer', engine: 'claude', kind: 'review', heading: /^## Whole diff \(Claude\) — Agent routine-reviewer/ },
+  'whole-claude': { seat: 'routine-reviewer', engine: 'claude', kind: 'review' },
   'fresh-codex': { seat: 'sanad-risk-reviewer', engine: 'codex', kind: 'review', heading: /^## Fresh eyes \(Codex\) — Bash/ },
   'risk-codex': { seat: 'sanad-risk-reviewer', engine: 'codex', kind: 'review', heading: /^## Risk files \(Codex\) — Bash/ },
   'whole-codex': { seat: 'sanad-reviewer', engine: 'codex', kind: 'review', heading: /^## Whole diff \(Codex\) — Bash/ },
@@ -256,7 +257,9 @@ export function prepare(name, { cases = CASES, work } = {}) {
     const launch = fs.readFileSync(path.join(n, 'launch.md'), 'utf8');
     for (const [job, j] of Object.entries(JOBS)) {
       if (j.kind !== 'review' || job === 'recheck' || j.engine !== engine) continue;
-      keep(job, launchSection(launch, j.heading));
+      // 2026-11-28 (batch c task 2): a task's Big round has no Claude whole-diff seat now; the reviewer test keeps
+      // scoring routine-reviewer with the prompt that seat had (review-brief.mjs wholeDiffPrompt).
+      keep(job, job === 'whole-claude' ? wholeDiffPrompt(path.join(n, 'brief.md')) : launchSection(launch, j.heading));
     }
   }
   if (c.answer.faults.some((f) => f.place)) {

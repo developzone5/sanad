@@ -526,20 +526,24 @@ function knownFresh({ touched = [], other = [], decided = [], decisions = [], fi
 // sizes: Small and Medium get one fresh-eyes review, only Big the full round): a medium change gets the same
 // one review, with the full brief and the checklist sentence the whole-diff pass carried.
 // 2026-11-25 (owner): a medium change also gets the other engine's fresh eyes, launched together with the task's own
-// fresh eyes. Small keeps one review; Big keeps the full round.
+// fresh eyes. Big keeps the full round.
+// 2026-11-28 (owner, batch c task 2; the first reviewer run: the Codex fresh eyes caught 24 faults in 2.3 minutes, the
+// Claude fresh eyes 12 in 1.6): a tiny or small change gets both engines too, launched together, as Medium does. The
+// Claude whole-diff seat (routine-reviewer) leaves the Big round: it caught 13 faults and none that no other seat
+// caught. A Codex task keeps its own whole-diff seat (sanad-reviewer, 2 faults no other seat caught).
 const WHOLE_DIFF_FULL = 'Fill the coverage checklist lines that apply (CLIENT STATE, NEW BLOCKS, FAILURES / LOCALES, USERS FOUND BY SEARCH, TESTS CAN FAIL).';
-const ONE_REVIEW = {
-  tiny: '(A tiny or small change: only this one review, user rule 2026-11-11.)',
-  small: '(A tiny or small change: only this one review, user rule 2026-11-11.)',
-};
 const TWO_REVIEWS = {
+  tiny: '(A tiny or small change: fresh eyes and the other engine, launched together; owner decision 2026-11-28.)',
+  small: '(A tiny or small change: fresh eyes and the other engine, launched together; owner decision 2026-11-28.)',
   medium: '(A medium change: fresh eyes with the full brief and the other engine, launched together; owner decision 2026-11-25.)',
 };
-// The seats of a full round, by size: what --pin saves and what launch.md holds.
-export function reviewSeats(size) {
-  if (ONE_REVIEW[size]) return ['fresh eyes'];
+// The routine-reviewer seat's whole-diff prompt, kept for its other users (the reviewer test, reviewer-test.mjs): no
+// task round launches it now.
+export const wholeDiffPrompt = (brief) => `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${WHOLE_DIFF_FULL} ${SEAT_QUESTION.whole} Read-only: no builds, no tests, no edits.`;
+// The seats of a full round, by size and the task's engine: what --pin saves and what launch.md holds.
+export function reviewSeats(size, engine = 'claude') {
   if (TWO_REVIEWS[size]) return ['fresh eyes', 'other engine'];
-  return ['fresh eyes', 'risk files', 'whole diff', 'other engine'];
+  return engine === 'codex' ? ['fresh eyes', 'risk files', 'whole diff', 'other engine'] : ['fresh eyes', 'risk files', 'other engine'];
 }
 
 // The risk-files reviewer's trace list (2026-11-15: loop.md and CLAUDE.md give a Big change a risk reviewer on the
@@ -688,7 +692,7 @@ function codexRun({ repo, out, log, prompt, role, codexHome }) {
   return ['```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shq(out)}"${flag} "${shq(prompt)}" < /dev/null > "${shq(log)}" 2>&1`, '```', '', ...note];
 }
 function buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone, codexHome }) {
-  const one = ONE_REVIEW[size], two = TWO_REVIEWS[size];
+  const two = TWO_REVIEWS[size];
   const dir = path.posix.dirname(String(brief).replace(/\\/g, '/'));
   // The designer's report is saved under the name designerReport() accepts, so its line leaves after it ran (finding 5).
   const run = (name, prompt) => codexRun({ repo, out: `${dir}/${name === 'designer' ? DESIGNER_REPORTS[0] : `codex-${name}.md`}`, log: `${dir}/codex-${name}.log`, prompt, role: CODEX_ROLE[name], codexHome });
@@ -702,14 +706,14 @@ function buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, c
   ];
   return [
     '# Launch lines (copy as they are)', '',
-    'Engine: Codex — the reviewers below are Codex launches (codex exec, read-only, xhigh)' + (one ? '.' : '; Claude is the one other engine.'), '',
+    'Engine: Codex — the reviewers below are Codex launches (codex exec, read-only, xhigh); Claude is the one other engine.', '',
     ...(sizeNote ? [sizeNote, ''] : []),
-    ...(one || two ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Bash, run_in_background (Codex sanad-practical-expert)', '',
+    ...(two ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Bash, run_in_background (Codex sanad-practical-expert)', '',
       ...run('designer', `Seat: Test designer. ${roleSentence(CODEX_ROLE.designer)} Read your role guide too: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. ${areaLine(changed)} Deliver per your guide.`),
       DESIGNER_AGAIN, '']),
     '## Fresh eyes (Codex) — Bash, run_in_background', '',
     ...run('fresh', `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.fresh)} ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}${tail}`),
-    ...(one ? [one, ''] : two ? [...claudeFresh, two, ''] : [
+    ...(two ? [...claudeFresh, two, ''] : [
       '## Risk files (Codex) — Bash, run_in_background', '',
       ...run('risk', [`You are the independent reviewer — risk files pass (Pass A). Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.risk)} Review the risk files below with their callers and writers: answer each trace question for each file by following real inputs through the changed code. ${SEAT_QUESTION.risk} ${tail}`, ...riskBody({ facts, changed })].join('\n')),
       '## Whole diff (Codex) — Bash, run_in_background', '',
@@ -723,7 +727,7 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
   if (!ENGINES.includes(engine)) throw new Error('--engine must be one of ' + ENGINES.join(', '));
   if (engine === 'codex') return buildCodexLaunch({ brief, fresh, repo, branch, size, sizeNote, facts, changed, designerDone, codexHome });
   const freshModel = codexModel(CODEX_ROLE.fresh, codexHome);
-  const one = ONE_REVIEW[size], two = TWO_REVIEWS[size];
+  const two = TWO_REVIEWS[size];
   // -m comes from the fresh-eyes role's settings file (codexRoleModel), read when the plan is written.
   // 2026-11-18 (audit finding 5): every value goes through shq, as in the Codex plan. The folder is escaped first and
   // joined after, so an ordinary path keeps the separators it had.
@@ -733,18 +737,17 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
   ];
   return [
     '# Launch lines (copy as they are)', '',
-    'Engine: Claude — the reviewers below are Claude agents' + (one ? '.' : '; Codex is the one other engine.'), '',
+    'Engine: Claude — the reviewers below are Claude agents; Codex is the one other engine.', '',
     ...(sizeNote ? [sizeNote, ''] : []),
     // The Test designer is a Big-task seat (loop-rare-cases.md, the expert panel); a tiny, small or medium change
     // listed it too, and the line looked like a step to run (2026-11-13).
-    ...(one || two ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
+    ...(two ? [] : designerDone ? [`Test designer: already ran before code (${designerDone})`, ''] : ['## Test designer — Agent braintrust-expert-sonnet, run_in_background', '',
     `Seat: Test designer. Read your role guide first: ~/.claude/skills/braintrust/experts/test-designer.md. Use the [TEST] lines of the stack's playbooks in ~/.claude/skills/braintrust/playbooks/. Read-only. The task's brief: ${brief} — read its Ticket, Check and Rules sections. Code: ${repo}, branch ${branch}. ${areaLine(changed)} Deliver per your guide.`, '', DESIGNER_AGAIN, '']),
     '## Fresh eyes (Claude) — Agent independent-reviewer, run_in_background', '',
     `You are the independent reviewer — FRESH EYES whole-PR review. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${size === 'medium' ? WHOLE_DIFF_FULL + ' ' : ''}Read-only: no builds, no tests, no edits.`, '',
-    ...(one ? [one, ''] : two ? [...codexFresh, two, ''] : [
+    // 2026-11-28 (owner, batch c task 2): no Claude whole-diff seat; the risk files, fresh eyes and the other engine.
+    ...(two ? [...codexFresh, two, ''] : [
       ...riskLaunch({ brief, facts, changed }),
-      '## Whole diff (Claude) — Agent routine-reviewer, run_in_background', '',
-      `You are the independent reviewer — whole-diff pass. Read and follow the brief at ${brief}, including its Rules section. Do not open any other file in that folder. ${WHOLE_DIFF_FULL} ${SEAT_QUESTION.whole} Read-only: no builds, no tests, no edits.`, '',
       ...codexFresh,
     ]),
   ].join('\n');
@@ -1195,10 +1198,11 @@ if (isMain(import.meta.url) && process.argv.includes('--coverage')) {
     // reviewers read. When it cannot be made, the pinned diff stays and one NOTE line says so.
     let pinLines = '', copy = '';
     if (pinning) {
-      // The read-only copy is for Big only (the round the author may fix during); a medium round has two seats and no copy.
-      const one = Boolean(ONE_REVIEW[chosen.size] || TWO_REVIEWS[chosen.size]);
+      // The read-only copy is for Big only (the round the author may fix during); a tiny, small or medium round has two
+      // seats and no copy.
+      const one = Boolean(TWO_REVIEWS[chosen.size]);
       await guardRound('full');
-      const pin = { kind: 'full', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: reviewSeats(chosen.size), frozen: '', signals: signalKeys, noteCount: await noteCount() };
+      const pin = { kind: 'full', commit: head, tree: git(repo, ['rev-parse', head + '^{tree}']), mergeBase, seats: reviewSeats(chosen.size, engine), frozen: '', signals: signalKeys, noteCount: await noteCount() };
       let saved = addPin(notesDir, pin);
       pinLines = keepPin(saved.round);
       if (!one && !o['no-frozen']) {

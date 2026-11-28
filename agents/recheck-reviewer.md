@@ -1,6 +1,6 @@
 ---
 name: recheck-reviewer
-description: Sanad Step 3.5 re-check after a fix, and the short check after the last round. Read-only Sonnet (newest) at high effort that checks the fix diff and the callers of its changed functions against the earlier notes, and escalates any sensitive boundary to the Opus independent-reviewer. The whole-diff review of a Big task uses routine-reviewer. Launch with a prompt whose first words are "You are the independent reviewer".
+description: Sanad Step 3.5 re-check after a fix, and the short check after the last round. Read-only Sonnet (newest) at high effort that checks the fix diff and the callers of its changed functions against the earlier notes, and escalates any sensitive boundary to the Opus independent-reviewer. Launch with a prompt whose first words are "You are the independent reviewer".
 model: sonnet
 effort: high
 disallowedTools: Write, Edit, NotebookEdit, Agent

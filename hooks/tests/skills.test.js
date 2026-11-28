@@ -59,8 +59,12 @@ test('the second look, the note check and the re-check launch their own agent fi
   assert.match(noteCheck.launchLine('C:/n/note-check-brief.md'), /^LAUNCH: Agent note-checker · prompt: Seat: Note check/);
   assert.match(noteCheck.launchLine('C:/n/note-check-brief.md', false), /^LAUNCH: Agent note-checker · /);
   assert.match(brief.buildRecheckLaunch({ brief: 'C:/n/b.md', repo: 'C:/r', round: 2, risk: {} }), /Agent recheck-reviewer/);
-  const bigWhole = brief.buildLaunch({ brief: 'C:/n/b.md', fresh: 'C:/n/f.md', repo: 'C:/r', branch: 'x', size: 'big' }).split('\n').find((l) => l.startsWith('## Whole diff (Claude)'));
-  assert.equal(bigWhole, '## Whole diff (Claude) — Agent routine-reviewer, run_in_background');
+  // 2026-11-28 (owner, batch c task 2): a Claude task's Big round has no routine-reviewer seat; a Codex task keeps its
+  // own whole diff, and the reviewer test keeps the routine-reviewer prompt.
+  const bigClaude = brief.buildLaunch({ brief: 'C:/n/b.md', fresh: 'C:/n/f.md', repo: 'C:/r', branch: 'x', size: 'big' });
+  assert.doesNotMatch(bigClaude, /routine-reviewer|^## Whole diff/m);
+  assert.match(brief.buildLaunch({ brief: 'C:/n/b.md', fresh: 'C:/n/f.md', repo: 'C:/r', branch: 'x', size: 'big', engine: 'codex' }), /^## Whole diff \(Codex\) — Bash, run_in_background$/m);
+  assert.match(brief.wholeDiffPrompt('C:/n/b.md'), /^You are the independent reviewer — whole-diff pass\. Read and follow the brief at C:\/n\/b\.md/);
 });
 // 2026-11-12: the loop is one short page. It had grown to 63 KB in 18 dated layers with rules that
 // contradicted each other, and rules written there were skipped. These lines keep it one page: the six
