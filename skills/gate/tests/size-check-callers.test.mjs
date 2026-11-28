@@ -341,7 +341,7 @@ test('2026-11-19: --json holds every caller row of 40 changed functions; the tex
   assert.deepEqual(lines.slice(0, 5), [
     'Stack: no known stack files',
     'SIZE: small (diff) — behavior code with no risk signal',
-    '  roles: one review: fresh eyes',
+    '  roles: two reviews together: fresh eyes and the other engine',
     '  callers: fn05 ×1 [src/user.ts:3]; (+28 more changed functions, all analysed; rows not printed)',
     '  files: 1 (1 code, 80 code lines changed)',
   ]);

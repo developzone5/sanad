@@ -142,7 +142,9 @@ export const STEPS = [
       ...(f.switches.remoteHost ? sidesOf(c).filter((s) => s.server).map((s) => ({ text: `${tool(c, 'red-proof.mjs')} --repo ${p(c.repo)} --warm${s.cwd ? ` --cwd ${p(s.cwd)}` : ''} -- ${s.test}`, background: true })) : []),
       // 2026-11-28 (owner, batch b task 3; test 4: 6 minutes reading and planning, then 2.5 on places and the second look,
       // one after another): the places search and the second look run while the builder reads.
-      { text: 'side by side: while you read the ticket and the code, a sonnet-worker runs the places search below from the ticket\'s names; when places.md exists, launch the second look at once; the check lines and the plan wait for both answers, before any code', plain: true },
+      { text: 'side by side: while you read the ticket and the code, a sonnet-worker runs the places search below from the ticket\'s names; when places.md exists, launch the second look at once; the check lines and the plan wait for both answers, before any code' +
+        // 2026-11-28 (owner, batch c task 4): on Small and Medium the second look judges the design too, so it needs it.
+        (['small', 'medium'].includes(f.lane) ? '; on this size write design.md while the search runs: the second look gets the places list and the design together' : ''), plain: true },
     ] },
   { id: 'places', loop: 'Step 1, item 4', lanes: CODE, light: true, beside: 'start',
     done: (f) => f.has.places,
@@ -156,10 +158,16 @@ export const STEPS = [
     // Due with the check lines unless the owner set sanad.lateCheckLines false: then only once check.md exists.
     when: (f) => f.has.check || f.switches.lateCheckLines !== false,
     done: (f) => f.has.siblings,
-    lines: (c) => [
-      { text: `${tool(c, 'siblings.mjs')} --brief --notes ${p(c.notes)} --repo ${p(c.repo)}` },
+    lines: (c, f) => [
+      // 2026-11-28 (owner, batch c task 4): on Small and Medium the design is judged before any code. Big keeps its two
+      // designers and the boss's choice; a tiny change has no design step.
+      ...(['small', 'medium'].includes(f.lane) ? [{ text: `first write ${note(c, 'design.md')}: the design in three lines, then NOT: <one way you turned down> — <why, in one line>`, plain: true }] : []),
+      // 2026-11-28 (owner, notes 24-25): the saved size goes to the second look, so it asks the design on Small and
+      // Medium always and never on Big.
+      { text: `${tool(c, 'siblings.mjs')} --brief --notes ${p(c.notes)} --repo ${p(c.repo)}${['tiny', 'small', 'medium', 'big'].includes(f.size) ? ` --size ${f.size}` : ''}` },
       { text: 'launch the LAUNCH line it prints, save the answer as siblings-report.md', plain: true },
       { text: `${tool(c, 'siblings.mjs')} --record ${note(c, 'siblings-report.md')} --notes ${p(c.notes)}` },
+      ...(['small', 'medium'].includes(f.lane) ? [{ text: 'its D1 line judges the design: follow it, or write not: <why> after its → and show the owner that one line', plain: true }] : []),
     ] },
   { id: 'places-closed', loop: 'Step 1, item 7', lanes: CODE, light: true,
     done: (f) => f.has.places && f.open.places === 0 && f.open.siblings === 0,
@@ -241,7 +249,7 @@ export const STEPS = [
       ...(noProofStep(f) || f.proof.done ? [{ text: preReview(c) }] : [{ text: preReview(c, ' --before-proof') }, { text: 'the full checks run after the proof', plain: true }]),
       { text: brief(c, f, '--pin') },
       { text: `launch every line of ${note(c, 'launch.md')} in one message`, plain: true },
-      ...(f.lane === 'small' ? [{ text: "suggestion, not measured: start the gate's focused evidence runs while the one reviewer reads", plain: true }] : []),
+      ...(f.lane === 'small' ? [{ text: "suggestion, not measured: start the gate's focused evidence runs while the two reviewers read", plain: true }] : []),
     ] },
   { id: 'notes', loop: 'Step 3.5, item 4', lanes: ALL, unknown: (f) => !f.notes.known,
     done: (f) => f.notes.known && f.notes.open.length === 0,

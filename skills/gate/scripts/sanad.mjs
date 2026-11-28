@@ -118,6 +118,7 @@ export function reviewReported(pin, reviews, reports, reportFiles) {
 
 // The finish times of the reports the other engine left in the notes folder (codex-review.md, codex-whole.md,
 // claude-fresh.md, ...). The folder is the one notes-dir.mjs names. An empty file is no report.
+const FINISHED_REPORT = /^[ \t]*(?:[-*•>#]+[ \t]*)?[`*_]*RECOMMEND:[`*_ \t]*(?:PASS|FAIL)(?![|\w])/m;
 function otherReports(dir, engine, every = false, { firstRoundOnly = false } = {}) {
   const out = [];
   if (!dir) return out;
@@ -132,7 +133,9 @@ function otherReports(dir, engine, every = false, { firstRoundOnly = false } = {
       // Review (task 1 PR): a re-check's report (codex-recheck-<round>….md) never fills a first-round seat.
       if (firstRoundOnly && /re-?check/i.test(n)) continue;
       const st = fs.statSync(path.join(folder, n));
-      if (st.isFile() && st.size > 0) out.push(st.mtimeMs);
+      // 2026-11-28 (owner, batch c note 7): a stopped run can leave an error text or half a report; a report counts as
+      // finished only when it holds its verdict line (RECOMMEND: PASS or FAIL, the first line the brief asks for).
+      if (st.isFile() && st.size > 0 && FINISHED_REPORT.test(readText(path.join(folder, n)).replace(/^﻿/, ''))) out.push(st.mtimeMs);
     }
   } catch { /* none */ }
   return out;
@@ -440,7 +443,9 @@ export async function trustedFacts(f) {
   const typed = SIZE_RANK.includes(f.size) ? f.size : '';
   const size = !live ? '' : typed && SIZE_RANK.indexOf(typed) > SIZE_RANK.indexOf(live) ? typed : live;
   let seats = [];
-  if (size) { try { seats = (await import('./review-brief.mjs')).reviewSeats(size); } catch { seats = []; } }
+  // 2026-11-28 (owner, batch c task 2): the seats depend on the task's engine too: a Codex task's Big round keeps its
+  // whole-diff seat, a Claude task's has none.
+  if (size) { try { seats = (await import('./review-brief.mjs')).reviewSeats(size, f.engine); } catch { seats = []; } }
   if (Array.isArray(inj.seats)) seats = inj.seats;   // tests: a seat list that could not be read
   const review = reviewRecord(f.top, f.git.head, f.git.headTree, inj.reviewStore || null);
   // 2026-11-28 (owner, task 1 hole 5): a seat counts only for a run launched after this task's start in this session (the

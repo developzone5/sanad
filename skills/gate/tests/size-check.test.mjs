@@ -32,10 +32,11 @@ const size = (repo, extra = {}) => sizeTask({ repo, base: 'base', ...extra });
 
 // 2026-11-12: roles() said "no reviewer" for tiny and three reviewers for small, while launch.md starts
 // one review for both (user rule 2026-11-11). The roles now say what launch.md really starts.
-test('docs, tests, texts and styles only are tiny, with one review: the fresh eyes', () => {
+// 2026-11-28 (owner, batch c task 2): tiny and small get the fresh eyes and the other engine, launched together.
+test('docs, tests, texts and styles only are tiny, with two reviews: the fresh eyes and the other engine', () => {
   const r = size(change({}, { 'docs/a.md': 'x\n', 'src/a.test.ts': "it('x', () => {});\n", 'src/locales/en/a.json': '{"a":"b"}\n', 'src/a.css': '.a{}\n' }));
   assert.equal(r.size, 'tiny');
-  assert.equal(r.roles[0], 'one review: fresh eyes');
+  assert.equal(r.roles[0], 'two reviews together: fresh eyes and the other engine');
 });
 
 test('a plain behavior change is small; its changed functions are listed with their callers', () => {
@@ -43,8 +44,8 @@ test('a plain behavior change is small; its changed functions are listed with th
   const repo = change({ 'src/Page.tsx': page }, { 'src/Page.tsx': page.replace('return next;', 'return next + 1;') });
   const r = size(repo);
   assert.equal(r.size, 'small');
-  assert.equal(r.roles[0], 'one review: fresh eyes');
-  assert.doesNotMatch(r.roles.join(' '), /whole-diff|Codex/, 'a small change gets one review, as launch.md starts');
+  assert.equal(r.roles[0], 'two reviews together: fresh eyes and the other engine');
+  assert.doesNotMatch(r.roles.join(' '), /whole-diff|Codex/, 'a small change gets the two reviews launch.md starts');
   const pick = r.callers.find(c => c.name === 'pick');
   assert.ok(pick, JSON.stringify(r.callers));
   assert.equal(pick.count, 2);
@@ -1082,9 +1083,10 @@ test('a git diff.mnemonicPrefix setting does not hide the content signals', () =
 
 test('the size line names no engine seat: fresh eyes and the other engine', () => {
   const small = size(change({ 'Api/S.cs': csClass('        var n = 1;') }, { 'Api/S.cs': csClass('        var n = 2;') }));
-  assert.equal(small.roles[0], 'one review: fresh eyes');
+  assert.equal(small.roles[0], 'two reviews together: fresh eyes and the other engine');
   const big = size(change({ 'Api/S.cs': csClass('        var n = 1;') }, { 'Api/S.cs': csClass('        var n = 1;\n        if (a != _currentUser.UserId) return Forbid();') }));
   assert.ok(big.roles.some(r => /the other engine/.test(r)), JSON.stringify(big.roles));
+  assert.ok(!big.roles.some(r => /whole-diff/.test(r)), 'no whole-diff seat named (2026-11-28): ' + JSON.stringify(big.roles));
   assert.doesNotMatch(big.roles.join(' '), /Opus|Codex|Sonnet/);
 });
 

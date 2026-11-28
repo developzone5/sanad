@@ -93,7 +93,7 @@ test('--pin names the one commit in both briefs, saves the round and keeps the c
   const pins = readPins(f.notes);
   assert.equal(pins.length, 1);
   assert.deepEqual([pins[0].round, pins[0].kind, pins[0].commit, pins[0].frozen, pins[0].mergeBase], [1, 'full', a, '', mb]);
-  assert.deepEqual(pins[0].seats, ['fresh eyes']);
+  assert.deepEqual(pins[0].seats, ['fresh eyes', 'other engine'], 'a small round is both engines (2026-11-28)');
   const ref = pinRef(pinTask(f.notes), 1);
   assert.match(ref, /^refs\/sanad\/review\/notes-[0-9a-f]{8}\/1$/);
   assert.equal(f.git('rev-parse', ref), a);
@@ -246,19 +246,22 @@ test('the after-save question is in the fresh brief only when the signal is pres
   assert.match(launch, /- Api\/Sync\.cs — [^\n]+\nTrace list:\n1\. The change saves and then calls another system\./);
 });
 
-test('a Big launch holds four seats with their own questions; fresh eyes stays free; Small still holds one review', () => {
+// 2026-11-28 (owner, batch c task 2): a Claude task's Big round has no whole-diff seat (three seats); a Codex task keeps
+// its own (four). Small holds the two fresh eyes.
+test('a Big launch holds its seats with their own questions; fresh eyes stays free; Small holds the two fresh eyes', () => {
   const args = { brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b', designerDone: 'x', codexHome: path.join(os.tmpdir(), 'no-such-codex-home') };
   for (const engine of ['claude', 'codex']) {
     const big = buildLaunch({ ...args, size: 'big', engine });
     const seats = big.split(/^## /m).slice(1);
-    assert.equal(seats.length, 4, engine);
+    assert.equal(seats.length, engine === 'codex' ? 4 : 3, engine);
     const risk = seats.find(s => /^Risk files/.test(s)), whole = seats.find(s => /^Whole diff/.test(s)), fresh = seats.filter(s => /^Fresh eyes/.test(s));
     assert.ok(risk.includes(SEAT_QUESTION.risk) && !risk.includes(SEAT_QUESTION.whole), engine);
-    assert.ok(whole.includes(SEAT_QUESTION.whole) && !whole.includes(SEAT_QUESTION.risk), engine);
+    if (engine === 'codex') assert.ok(whole.includes(SEAT_QUESTION.whole) && !whole.includes(SEAT_QUESTION.risk), engine);
+    else assert.equal(whole, undefined, engine);
     assert.equal(fresh.length, 2);
     for (const s of fresh) assert.doesNotMatch(s, /Your own question/);
     const small = buildLaunch({ ...args, size: 'small', engine });
-    assert.equal(small.split(/^## /m).length - 1, 1);
+    assert.equal(small.split(/^## /m).length - 1, 2);
     assert.doesNotMatch(small, /Your own question/);
   }
 });
@@ -340,7 +343,7 @@ test('--pin on a medium change saves two seats, the fresh eyes and the other eng
   assert.equal((f.read('launch.md').match(/codex exec -s read-only/g) || []).length, 1);
 });
 
-test('the re-check launch names recheck-reviewer; the Big whole diff keeps routine-reviewer', () => {
+test('the re-check launch names recheck-reviewer; a Big round launches no routine-reviewer', () => {
   const recheck = buildRecheckLaunch({ brief: 'C:/n/brief-recheck-2.md', repo: 'C:/r', round: 2, engine: 'claude', risk: {} });
   assert.match(recheck, /^## Re-check, whole diff \(Claude\) — Agent recheck-reviewer, run_in_background$/m);
   assert.doesNotMatch(recheck, /Agent routine-reviewer/);
@@ -350,6 +353,6 @@ test('the re-check launch names recheck-reviewer; the Big whole diff keeps routi
   const withRisk = buildRecheckLaunch({ brief: 'C:/n/brief-recheck-2.md', repo: 'C:/r', round: 2, engine: 'claude', risk: { access: ['a.js'] }, files: [{ name: 'a.js' }] });
   assert.match(withRisk, /^## Re-check, risk files \(Claude\) — Agent independent-reviewer, run_in_background$/m);
   const big = buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b', size: 'big' });
-  assert.match(big, /^## Whole diff \(Claude\) — Agent routine-reviewer, run_in_background$/m);
+  assert.doesNotMatch(big, /routine-reviewer|^## Whole diff/m, 'no Claude whole-diff seat (2026-11-28)');
   assert.doesNotMatch(big, /recheck-reviewer/);
 });

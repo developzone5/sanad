@@ -17,7 +17,7 @@ These assignments control all Sanad roles. Claude retains its existing setup. **
 | Main executor | existing Claude session; Opus (newest) for behavior code | current Codex-family session / xhigh; a new launch runs on the default of `~/.codex/config.toml` |
 | Boss / extra gap reviewer | `routing-boss`: Fable (newest) / xhigh | `sanad-boss`: Astra / xhigh |
 | Pass A, risk files | `independent-reviewer`: Opus (newest) / xhigh | `sanad-risk-reviewer`: Astra / xhigh |
-| Pass B, whole diff (Big) | `routine-reviewer`: Sonnet (newest) / xhigh | `sanad-reviewer`: Sol / xhigh |
+| Pass B, whole diff (Big; a Codex task only since 2026-11-28) | `routine-reviewer`: Sonnet (newest) / xhigh — no task round launches it; the reviewer test and the PC 2 `review` role still do | `sanad-reviewer`: Sol / xhigh |
 | Re-check after a fix | `recheck-reviewer`: Sonnet (newest) / high | `sanad-reviewer`: Sol / xhigh |
 | Second look (`siblings.mjs`) | `second-look`: Opus (newest) / high | `sanad-expert`: Astra / xhigh |
 | Note check (`note-check.mjs`) | `note-checker`: Opus (newest) / high | `sanad-expert`: Astra / xhigh |
