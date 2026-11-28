@@ -79,6 +79,7 @@ import { enclosingFunction, codeOnly } from './size-check.mjs';
 // data), and this file must still load beside an older size-check.mjs.
 import * as sizeCheck from './size-check.mjs';
 import { isMain } from './is-main.mjs';
+import { workTreeId, keyOf, readKept, keepIfSame } from './kept.mjs';
 
 // More product files than this and nobody can judge each one (2026-11-12): name the rule, not the word.
 export const MAX_FILES = 40;
@@ -591,6 +592,12 @@ function derivedHere(repo, names) {
 // (every partial file) and the types that derive from it. null when the repository declares no such type: the name
 // is then a text key or an object member, and keeps the plain search. `extension`: the member is a C# extension
 // method (`this` first parameter): it is called on any value, so no use of it is folded.
+// The family of a type from its names (as typeFamily builds it), for a kept answer.
+const familyOf = (names, extension) => ({ names, extension, re: new RegExp(`(?<![\\w$])(?:${names.map(escapeRe).join('|')})(?![\\w$])`) });
+// The line a run prints when its searches were kept (batch b task 2).
+export const keptLine = (list) => !list || !list.kept ? ''
+  : list.kept.all ? `places: kept — the same code and inputs, searched ${list.kept.at}; not searched again\n`
+    : list.kept.searches ? `places: ${list.kept.searches} search(es) kept for the same code and inputs, ${list.kept.searchedNow} run now\n` : '';
 export function typeFamily(repo, type, member = '') {
   const names = new Set();
   const files = new Set();
@@ -712,18 +719,38 @@ export function writePlaces({ repo, names = [], out, now = new Date(), unfold = 
     unfolded.add(row.name);
   }
   const folds = new Map(), reopened = [], extensions = [];
+  // 2026-11-28 (owner, batch b task 2): each search is kept for the exact code (the working folder's tree) and its exact
+  // inputs (kept.mjs); the same search on the same code reads the kept answer. One changed byte is another tree: every
+  // search runs again. The lists' outcomes and hashes below are worked out on every run, as before.
+  const tree = workTreeId(top);
+  const skipKey = skip.map((s) => path.relative(top, s).replace(/\\/g, '/'));
+  const keptAt = [], toKeep = [];
+  let searchedNow = 0;
+  const mapOut = (m) => [...m].map(([k, v]) => [k, v]);
+  const keptSearch = (kind, args, compute, enc, dec) => {
+    const key = keyOf('places', tree, { kind, args, skip: skipKey });
+    const hit = readKept('places', top, key);
+    if (hit) { keptAt.push(hit.at); return dec(hit.value); }
+    searchedNow++;
+    const v = compute();
+    toKeep.push([key, enc(v)]);
+    return v;
+  };
+  const keptName = (term) => keptSearch('name', [term], () => searchName(top, term, { skip }), (v) => ({ product: mapOut(v.product), tests: v.tests }), (v) => ({ product: new Map(v.product), tests: v.tests }));
+  const keptData = (name) => keptSearch('data', [name], () => searchData(top, name, { skip }), (v) => ({ product: mapOut(v.product), tests: v.tests, folded: mapOut(v.folded) }), (v) => ({ product: new Map(v.product), tests: v.tests, folded: new Map(v.folded) }));
+  const keptFamily = (type, member) => keptSearch('family', [type, member], () => typeFamily(top, type, member), (v) => (v ? { names: v.names, extension: v.extension } : null), (v) => (v ? familyOf(v.names, v.extension) : null));
   for (const name of all) {
     const tm = TYPE_MEMBER.exec(name);
-    const family = tm ? typeFamily(top, tm[1], tm[2]) : null;
+    const family = tm ? keptFamily(tm[1], tm[2]) : null;
     const wasFolded = Boolean(old && old.folded.some(f => f.name === name));
     // A name that was folded and whose type is gone (renamed) has nothing to fold by: its uses are places again.
     if (tm && !family && wasFolded && !unfolded.has(name)) { unfolded.add(name); reopened.push(name); }
     const byMember = Boolean(tm && (family || unfolded.has(name)));
     // 2026-11-25: a data name (data:<owner>.<field>) lists the functions that show or write the value; the other reads fold.
-    const data = DATA.test(name) ? searchData(top, name, { skip }) : null;
+    const data = DATA.test(name) ? keptData(name) : null;
     if (data && unfolded.has(name)) for (const [file, lines] of data.folded) data.product.set(file, [...new Set([...(data.product.get(file) || []), ...lines])].sort((a, b) => a - b));
     else if (data && data.folded.size) folds.set(name, { kind: 'read only', rows: [...data.folded].map(([file, lines]) => ({ file, lines })).sort((a, b) => (a.file < b.file ? -1 : 1)), tests: [] });
-    const hit = data ? { product: data.product, tests: data.tests } : searchName(top, byMember ? tm[2] : name, { skip });
+    const hit = data ? { product: data.product, tests: data.tests } : keptName(byMember ? tm[2] : name);
     if (byMember && family && family.extension) extensions.push(name);
     if (byMember && family && !family.extension && !unfolded.has(name)) {
       // A file stays when it names the type, a derived type or its interface; a file that cannot be read stays.
@@ -740,6 +767,9 @@ export function writePlaces({ repo, names = [], out, now = new Date(), unfold = 
     found.set(name, hit.product);
     tests.set(name, hit.tests);
   }
+  // Review (batch b): a file that changed while the searches ran gives answers of other code than the key's tree: the new
+  // searches are kept only when the working folder is still that tree.
+  keepIfSame('places', top, toKeep, tree);
   // Each file is read once per run, however many names and hits it has.
   const texts = new Map();
   const linesOf = (file) => {
@@ -807,7 +837,11 @@ export function writePlaces({ repo, names = [], out, now = new Date(), unfold = 
     // A data name's folded line names every file of its other reads (2026-11-25, owner: none is hidden).
     folded.push({ n: had ? had.n : nextF++, name, uses: f.rows.reduce((n, r) => n + r.lines.length, 0), files: f.rows.length, samples: (f.kind ? f.rows : f.rows.slice(0, 3)).map(r => r.file), rows: f.rows, tests: f.tests, ...(f.kind ? { kind: f.kind } : {}) });
   }
-  const list = { repo: top, names: all, searched: now.toISOString(), places, tests, wide, uses, folded, unfolded: [...unfolded], reopened, extensions };
+  // Every search kept: the list says when it was really searched, and the run prints one line that says so.
+  const allKept = searchedNow === 0 && keptAt.length > 0;
+  const searched = allKept ? keptAt.sort()[0] : now.toISOString();
+  const list = { repo: top, names: all, searched, places, tests, wide, uses, folded, unfolded: [...unfolded], reopened, extensions,
+    kept: { searches: keptAt.length, searchedNow, all: allKept, at: allKept ? searched : '' } };
   if (dry) return list;
   fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
   fs.writeFileSync(out, renderPlaces(list));
@@ -1114,13 +1148,13 @@ async function main() {
     if (o.out) {
       const list = writePlaces({ repo: path.resolve(o.repo), names: [...(o.names ? o.names.split(',') : []), ...added], out: path.resolve(o.out) });
       const { count, open, folded } = checkPlaces(list);
-      process.stdout.write(`${addNote}${widths(list.wide)}${folds(list)}${splits(open)}PLACES: ${tally(count, open.length, folded)} — written to ${path.resolve(o.out)}; write C<n> or none: <reason> after each →\n`);
+      process.stdout.write(`${keptLine(list)}${addNote}${widths(list.wide)}${folds(list)}${splits(open)}PLACES: ${tally(count, open.length, folded)} — written to ${path.resolve(o.out)}; write C<n> or none: <reason> after each →\n`);
     } else {
       let refreshed;
       if (o.refresh) refreshed = refreshPlaces(path.resolve(o.refresh), { repo: o.repo && path.resolve(o.repo), names: added, unfold: o.unfold ? o.unfold.split(',') : [] });
       if (!o.check) {
         const { count, open, folded } = checkPlaces(readPlaces(path.resolve(o.refresh)));
-        process.stdout.write(`${addNote}${widths(refreshed && refreshed.wide)}${folds(refreshed)}${splits(open)}PLACES: ${tally(count, open.length, folded)} — refreshed ${path.resolve(o.refresh)}\n`);
+        process.stdout.write(`${keptLine(refreshed)}${addNote}${widths(refreshed && refreshed.wide)}${folds(refreshed)}${splits(open)}PLACES: ${tally(count, open.length, folded)} — refreshed ${path.resolve(o.refresh)}\n`);
       } else {
         let checkCount;
         if (o['check-lines']) {
@@ -1130,7 +1164,7 @@ async function main() {
           checkCount = checkLines(fs.readFileSync(o['check-lines'], 'utf8')).length;
         }
         const r = checkPlaces(readPlaces(path.resolve(o.check)), { checkCount });
-        process.stdout.write(addNote + widths(refreshed && refreshed.wide) + folds(refreshed) + r.text + '\n');
+        process.stdout.write(keptLine(refreshed) + addNote + widths(refreshed && refreshed.wide) + folds(refreshed) + r.text + '\n');
         process.exitCode = r.ok ? 0 : 1;
       }
     }

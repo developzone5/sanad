@@ -36,6 +36,7 @@ import { readStack } from './stack.mjs';
 import { TEST_FILE } from './check-ticket-lines.mjs';
 import { isMain } from './is-main.mjs';
 import { changeSet, foreignLine } from './change-set.mjs';
+import { workTreeId, keyOf, readKept, keepIfSame } from './kept.mjs';
 
 export const SIZES = ['tiny', 'small', 'medium', 'big'];
 const CODE = /\.(?:cs|[cm]?[jt]sx?|py|go|java|kt|rb|php|sql|razor|cshtml|vue|svelte)$/i;
@@ -1515,7 +1516,36 @@ function spelledByGit(repo, names) {
 // `names` (plan mode only): the names the places list searched; each one defined in a planned file is read whole
 // and its callers are counted (plannedSymbols), as a diff counts the callers of each changed function.
 // `range` ({ from, at }, in place of `base`): the range form of readDiff, sized as a diff.
-export function sizeTask({ repo, base, files: planned, names = null, range = null }) {
+// 2026-11-28 (owner, batch b task 2): the size of a diff is kept for the exact change set (kept.mjs: the working folder's
+// tree, the base commit and its merge base with HEAD, the tools), so the checks, the one-job check and the review brief
+// read one answer per change set instead of sizing it again. One changed byte is another change set. `fresh`: size it
+// again and keep the new answer (for a caller that must not read a kept answer).
+export function keptSizeKey(root, base) {
+  const tree = workTreeId(root);
+  const baseAt = git(root, ['rev-parse', '--verify', '--quiet', String(base) + '^{commit}'], { allowFail: true }).trim();
+  const mergeBase = baseAt ? git(root, ['merge-base', baseAt, 'HEAD'], { allowFail: true }).trim() : '';
+  const key = baseAt ? keyOf('size', tree, { base: baseAt, mergeBase }) : '';
+  return { tree, key };
+}
+export function sizeTask({ repo, base, files: planned, names = null, range = null, fresh = false }) {
+  const root = path.resolve(git(path.resolve(repo), ['rev-parse', '--show-toplevel']).trim());
+  // A FOREIGN? change set (too many untracked files) is never hashed: the size below refuses it, as before.
+  let foreign = true;
+  try { foreign = Boolean(base && !range && !planned) && changeSet(root, base).foreign.length > 0; } catch { foreign = true; }
+  const keep = base && !range && !planned && !foreign ? keptSizeKey(root, base) : null;
+  if (keep && keep.key && !fresh) {
+    const hit = readKept('size', root, keep.key);
+    if (hit && hit.value && hit.value.size) return { ...hit.value, kept: { at: hit.at } };
+  }
+  const r = sizeTaskNow({ repo: root, base, files: planned, names, range });
+  // Every answer has the same fields: `kept` is null when the answer was sized now.
+  r.kept = null;
+  // Review (batch b): a file that changed while it was sized gives an answer of other code than the key's tree: it is
+  // kept only when the working folder is still that tree.
+  if (keep && keep.key) keepIfSame('size', root, [[keep.key, r]], keep.tree);
+  return r;
+}
+function sizeTaskNow({ repo, base, files: planned, names = null, range = null }) {
   const root = path.resolve(git(path.resolve(repo), ['rev-parse', '--show-toplevel']).trim());
   texts.clear();
   oldTexts.clear();
@@ -1636,6 +1666,8 @@ export function format(r, was) {
   if (r.renamed && r.renamed.length) out.push('  renamed: ' + r.renamed.join(', '));
   if (r.binary && r.binary.length) out.push('  binary: ' + r.binary.join(', '));
   if (was && SIZES.indexOf(r.size) > SIZES.indexOf(was)) out.push(`SIZE GREW: ${was} → ${r.size}. Add before review: ${r.roles.join('; ')}`);
+  // Batch b task 2: a kept answer says so.
+  if (r.kept) out.push(`  kept: the same change set was sized at ${r.kept.at}; not sized again`);
   return out.join('\n');
 }
 

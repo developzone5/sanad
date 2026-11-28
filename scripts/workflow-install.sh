@@ -58,6 +58,8 @@ finish() {
   local status=$?
   trap - EXIT; trap '' INT TERM HUP   # a second Ctrl+C must not cut the rollback short
   set +e
+  # A suite still running (an exit while both run at once) is stopped before any file is put back.
+  for _pid in "${hooks_pid:-}" "${gate_pid:-}"; do [ -n "$_pid" ] && { kill "$_pid" 2>/dev/null; wait "$_pid" 2>/dev/null; }; done
   if [ "$phase" = writing ]; then
     if rollback; then echo "ROLLED BACK: the previous files are live again"
     else
@@ -93,6 +95,27 @@ while IFS= read -r f; do
   [ -f "$CAND/$f" ] || removed+=("$f")
 done < <(cd "$BASE" && find claude agents codex -type f 2>/dev/null | sort)
 [ ${#changed[@]} -eq 0 ] && [ ${#removed[@]} -eq 0 ] && { echo "Nothing to install."; exit 0; }
+stamp() { echo "TIME: $1 $(date -u +%H:%M:%S)"; }
+stamp start
+
+# 2026-11-28 (owner, batch b task 4): the proof on the test machine and the replay run only when the change needs them.
+# The candidate's claude/scripts/install-lists.mjs decides, from the changed and removed files: a file on no list, the
+# installer itself or the lists file means every step runs; so does a lists file that is missing or cannot answer.
+LISTS="$CAND/claude/scripts/install-lists.mjs"
+e2e_need=run; e2e_why="every step runs (no lists file in the candidate)"; replay_need=run; replay_why="$e2e_why"
+if [ -f "$LISTS" ]; then
+  _changed_list="$(mktemp "${TMPDIR:-/tmp}/workflow-install-changed.XXXXXX")"
+  printf '%s\n' "${changed[@]}" "${removed[@]}" > "$_changed_list"
+  if _decided="$(node "$LISTS" decide "$_changed_list" 2>/dev/null)"; then
+    _e2e_line="$(printf '%s\n' "$_decided" | grep '^E2E=' || true)"; _replay_line="$(printf '%s\n' "$_decided" | grep '^REPLAY=' || true)"
+    # Only an exact "skip" leaves a step out; anything else (run, a broken line) keeps it.
+    case "$_e2e_line" in E2E=skip*) e2e_need=skip;; esac
+    case "$_replay_line" in REPLAY=skip*) replay_need=skip;; esac
+    [ -n "$_e2e_line" ] && e2e_why="$(printf '%s\n' "$_e2e_line" | cut -f2-)"
+    [ -n "$_replay_line" ] && replay_why="$(printf '%s\n' "$_replay_line" | cut -f2-)"
+  else e2e_why="every step runs (the lists file could not answer)"; replay_why="$e2e_why"; fi
+  rm -f "$_changed_list"
+fi
 
 # 2026-11-17 (audit I2): a function, because the guard runs twice: here, and again right before the first
 # live write. The end-to-end runs between the two can take minutes, and a live file may change meanwhile.
@@ -116,7 +139,10 @@ if [ -n "${SANAD_E2E_RUN+set}" ]; then e2e_runs="$SANAD_E2E_RUN"; else e2e_runs=
 [ "$e2e_runs" = "none" ] && e2e_runs=""   # tests: SANAD_E2E_RUN=none skips the machine's own runs
 if [ -z "$e2e_runs" ]; then
   echo "E2E: skipped — no run set (git config --global --add sanad.e2eRun \"<repo>|<folder>|<test command>\")"
+elif [ "$e2e_need" = skip ]; then
+  echo "E2E: left out — $e2e_why"
 else
+  echo "E2E: runs — $e2e_why"
   while IFS='|' read -r e2e_repo e2e_dir e2e_cmd; do
     [ -n "$e2e_repo" ] || continue
     echo "E2E: $e2e_repo ($e2e_dir): $e2e_cmd"
@@ -132,9 +158,12 @@ fi
 # `git config --global sanad.replayBlocks true`: then a difference not on the release's approved lines
 # (claude/scripts/replay/approved.txt) stops the install here, before any live write. SANAD_REPLAY=none skips it.
 REPLAY_JS="$CAND/claude/scripts/replay/replay.mjs"
+stamp e2e-done
 if [ "${SANAD_REPLAY:-}" = "none" ]; then echo "REPLAY: skipped (SANAD_REPLAY=none)"
 elif [ ! -f "$REPLAY_JS" ]; then echo "REPLAY: skipped (the candidate has no replay script)"
+elif [ "$replay_need" = skip ]; then echo "REPLAY: left out — $replay_why"
 else
+  echo "REPLAY: runs — $replay_why"
   replay_args=(run --base "$BASE" --cand "$CAND" --corpus "${SANAD_STATE_DIR:-$HOME/.claude/state}/replay-corpus")
   [ -f "$CAND/claude/scripts/replay/approved.txt" ] && replay_args+=(--approved "$CAND/claude/scripts/replay/approved.txt")
   replay_rc=0; node "$REPLAY_JS" "${replay_args[@]}" || replay_rc=$?
@@ -150,6 +179,7 @@ else
   fi
 fi
 
+stamp replay-done
 # The second drift guard (2026-11-17, audit I2): see drift_guard above. Still nothing written here.
 drift_guard || { echo "ABORTED: live files changed during the end-to-end runs; nothing was changed."; exit 1; }
 
@@ -194,19 +224,49 @@ fi
 # now, and a suite passes only with exit 0 AND a finished summary: "ℹ fail 0" and a pass count above 0.
 # The summary adds to the exit; it never replaces it.
 hooks_rc=0; gate_rc=0
+# 2026-11-28 (owner, batch b task 4): both suites run at the same time, not one after the other. Each keeps its own
+# command, log and verdict. So the machine is not busier than with one suite, the hook suite gets 2 test slots and
+# the gate suite the rest (install-lists.mjs concurrency); a Node without --test-concurrency runs both as before.
+conc_flag() {   # $1 = hooks|gate
+  [ -f "$LISTS" ] || return 0
+  node -e "process.exit(process.allowedNodeEnvironmentFlags.has('--test-concurrency') ? 0 : 1)" 2>/dev/null || return 0
+  local n; n="$(node "$LISTS" concurrency "$1" 2>/dev/null || true)"
+  case "$n" in ''|*[!0-9]*) return 0;; esac
+  printf -- '--test-concurrency=%s' "$n"
+}
+hooks_conc="$(conc_flag hooks)"; gate_conc="$(conc_flag gate)"
+stamp suites-start
 # Colour off (audit I1 follow-up): FORCE_COLOR put a colour code before each summary line, so a green suite read as "no summary".
-(cd "$C/hooks/tests" && env -u FORCE_COLOR NO_COLOR=1 node --test --test-reporter=spec) > "$B/tests-hooks.log" 2>&1 || hooks_rc=$?
-(cd "$C/skills/gate/tests" && env -u FORCE_COLOR NO_COLOR=1 node --test --test-reporter=spec) > "$B/tests-gate.log" 2>&1 || gate_rc=$?
+# shellcheck disable=SC2086 — an empty flag is no word
+(cd "$C/hooks/tests" && env -u FORCE_COLOR NO_COLOR=1 node --test $hooks_conc --test-reporter=spec) > "$B/tests-hooks.log" 2>&1 & hooks_pid=$!
+# shellcheck disable=SC2086
+(cd "$C/skills/gate/tests" && env -u FORCE_COLOR NO_COLOR=1 node --test $gate_conc --test-reporter=spec) > "$B/tests-gate.log" 2>&1 & gate_pid=$!
+wait "$hooks_pid" || hooks_rc=$?
+wait "$gate_pid" || gate_rc=$?
+hooks_pid=; gate_pid=
+stamp suites-done
 suite_ok() {   # $1 = the runner's own exit, $2 = its log
   [ "$1" -eq 0 ] && grep -aqE '^ℹ fail 0[[:space:]]*$' "$2" && grep -aqE '^ℹ pass [1-9][0-9]*[[:space:]]*$' "$2" \
     && ! grep -aqE '^ℹ fail [1-9]' "$2"
+}
+# A suite that failed only in the few named test files with a wall-clock limit (install-lists.mjs TIME_LIMIT_TESTS) runs
+# those files again, alone, after both suites; they must pass there. Any other failing test is a real failure.
+again_ok() {   # $1 = hooks|gate, $2 = its tests folder, $3 = its log; true when the files ran again alone and passed
+  [ -f "$LISTS" ] || return 1
+  local files; files="$(node "$LISTS" retry "$3" "$1" 2>/dev/null || echo NONE)"
+  { [ -n "$files" ] && [ "$files" != NONE ]; } || return 1
+  local rc=0 again="${3%.log}-again.log"
+  # shellcheck disable=SC2046 — one word per file name
+  (cd "$2" && env -u FORCE_COLOR NO_COLOR=1 node --test --test-reporter=spec $(printf '%s\n' "$files")) > "$again" 2>&1 || rc=$?
+  suite_ok "$rc" "$again" || return 1
+  echo "SUITE $1: only test files with a wall-clock limit failed under the load of both suites, and they passed alone: $(printf '%s ' $files)(log: $again)"
 }
 hooks=$(grep -aE '^ℹ (pass|fail)' "$B/tests-hooks.log" 2>/dev/null | tr '\n' ' ') || true
 gate=$(grep -aE '^ℹ (pass|fail)' "$B/tests-gate.log" 2>/dev/null | tr '\n' ' ') || true
 echo "hooks: $hooks"; echo "gate: $gate"
 failed=0
-suite_ok "$hooks_rc" "$B/tests-hooks.log" || { echo "  suite failed (tests-hooks): exit $hooks_rc, summary: ${hooks:-none}"; failed=1; }
-suite_ok "$gate_rc" "$B/tests-gate.log" || { echo "  suite failed (tests-gate): exit $gate_rc, summary: ${gate:-none}"; failed=1; }
+suite_ok "$hooks_rc" "$B/tests-hooks.log" || again_ok hooks "$C/hooks/tests" "$B/tests-hooks.log" || { echo "  suite failed (tests-hooks): exit $hooks_rc, summary: ${hooks:-none}"; failed=1; }
+suite_ok "$gate_rc" "$B/tests-gate.log" || again_ok gate "$C/skills/gate/tests" "$B/tests-gate.log" || { echo "  suite failed (tests-gate): exit $gate_rc, summary: ${gate:-none}"; failed=1; }
 if [ "$failed" = 1 ]; then
   for log in "$B/tests-hooks.log" "$B/tests-gate.log"; do
     { grep -aE '^✖ ' "$log" 2>/dev/null || true; } | grep -v '^✖ failing tests:' | sed -E 's/ \([0-9.]+ms\)$//' | sort -u | head -10 \

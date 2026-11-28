@@ -4,7 +4,7 @@
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Dest D:\other\.claude -KeepSettings
 #
 # 1. Backs up every file it will replace to <Dest>\backups\sanad-install-<timestamp>\.
-# 2. Copies CLAUDE.md, skills\, hooks\, agents\, output-styles\, scripts\workflow-install.sh, scripts\remote\, scripts\docker\ and scripts\replay\.
+# 2. Copies CLAUDE.md, skills\, hooks\, agents\, output-styles\, scripts\workflow-install.sh, scripts\install-lists.mjs, scripts\remote\, scripts\docker\ and scripts\replay\.
 # 3. Writes settings.json with the hook paths pointed at <Dest>\hooks\ (skip with -KeepSettings).
 # 4. Runs the hook and gate test suites from the installed location (skip with -SkipTests).
 # 5. Registers the two Docker tasks for this user (scripts\docker\register-tasks.ps1).
@@ -34,7 +34,8 @@ $items = @(
   @{ From = 'agents';                      To = 'agents' },
   @{ From = 'output-styles';               To = 'output-styles' },
   @{ From = 'scripts\workflow-install.sh'; To = 'scripts\workflow-install.sh' },
-  @{ From = 'scripts\remote';              To = 'scripts\remote' },
+  @{ From = 'scripts\install-lists.mjs';   To = 'scripts\install-lists.mjs' },
+  @{ From = 'scripts\remote';             To = 'scripts\remote' },
   @{ From = 'scripts\docker';              To = 'scripts\docker' },
   @{ From = 'scripts\replay';              To = 'scripts\replay' }
 )

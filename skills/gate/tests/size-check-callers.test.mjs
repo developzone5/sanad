@@ -335,14 +335,18 @@ test('2026-11-19: --json holds every caller row of 40 changed functions; the tex
   assert.equal(r.moreSymbols, 28);
   const text = spawnSync(process.execPath, [script, '--repo', repo, '--base', 'base'], { encoding: 'utf8', env: process.env });
   assert.equal(text.status, 0, text.stderr);
-  assert.equal(text.stdout, [
+  // 2026-11-28 (batch b task 2): the same change set, sized a second time, reads the kept answer and says so; the lines
+  // before stay byte for byte.
+  const lines = text.stdout.split('\n');
+  assert.deepEqual(lines.slice(0, 5), [
     'Stack: no known stack files',
     'SIZE: small (diff) — behavior code with no risk signal',
     '  roles: one review: fresh eyes',
     '  callers: fn05 ×1 [src/user.ts:3]; (+28 more changed functions, all analysed; rows not printed)',
     '  files: 1 (1 code, 80 code lines changed)',
-    '',
-  ].join('\n'));
+  ]);
+  assert.match(lines[5], /^ {2}kept: the same change set was sized at \d{4}-\d\d-\d\dT[\d:.]+Z; not sized again$/);
+  assert.deepEqual(lines.slice(6), ['']);
 });
 
 test('2026-11-19: 30 changed functions are all in allCallers, and two files of one base name keep their own rows', () => {

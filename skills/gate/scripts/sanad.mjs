@@ -313,7 +313,9 @@ export function readFacts({ repo, notes, last = false, deep = false, sessionNote
   // 2026-11-20: a saved `tiny` (the text path) is judged again on the code as it is now, and so is the tests-only
   // switch. Nothing else is judged, and a tree called foreign never is, so `next` stays fast.
   let judged;
-  const judge = () => { if (judged === undefined) { try { judged = sizeTool?.sizeTask ? sizeTool.sizeTask({ repo: top, base }) : null; } catch { judged = null; } } return judged; };
+  // 2026-11-28 (review, batch b task 2): the lane decides whether the proof is on the required list, so it never reads a
+  // kept size from the state folder: the change is sized now (`fresh`), as before the kept sizes.
+  const judge = () => { if (judged === undefined) { try { judged = sizeTool?.sizeTask ? sizeTool.sizeTask({ repo: top, base, fresh: true }) : null; } catch { judged = null; } } return judged; };
   let testsOnly = false;
   if (on(sw.testsonlylane) && !foreign) testsOnly = judge()?.testsOnly === true;
   let lane = size === 'tiny' ? 'text' : ['small', 'medium', 'big'].includes(size) ? size : 'small';

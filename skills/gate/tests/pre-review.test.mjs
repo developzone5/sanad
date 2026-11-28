@@ -159,7 +159,8 @@ test('places: the list is searched again first, every place needs an outcome, an
   const list = placesFor(repo, 'a', { open: true });
   const open = run(repo, ['--places', list]);
   assert.equal(open.status, 1, open.stdout);
-  assert.match(open.stdout, /✗ places[^\n]*\n\s+OPEN: P1 · a · web\/src\/a\.ts · \(file\)\n\s+PLACES: 1 place\(s\), 1 open/);
+  // (2026-11-28, batch b task 2: the list was made on this code just above, so its search is kept and says so first.)
+  assert.match(open.stdout, /✗ places[^\n]*\n\s+places: kept — the same code and inputs, searched \S+; not searched again\n\s+OPEN: P1 · a · web\/src\/a\.ts · \(file\)\n\s+PLACES: 1 place\(s\), 1 open/);
   fs.writeFileSync(list, fs.readFileSync(list, 'utf8').replace(/→ $/m, '→ C1'));
   // A place that appears after the list was written (a new caller in an untracked file) cannot be missed.
   write('web/src/b.ts', "import { a } from './a';\n");
