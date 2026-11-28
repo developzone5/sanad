@@ -162,7 +162,9 @@ export const STEPS = [
       // 2026-11-28 (owner, batch c task 4): on Small and Medium the design is judged before any code. Big keeps its two
       // designers and the boss's choice; a tiny change has no design step.
       ...(['small', 'medium'].includes(f.lane) ? [{ text: `first write ${note(c, 'design.md')}: the design in three lines, then NOT: <one way you turned down> — <why, in one line>`, plain: true }] : []),
-      { text: `${tool(c, 'siblings.mjs')} --brief --notes ${p(c.notes)} --repo ${p(c.repo)}` },
+      // 2026-11-28 (owner, notes 24-25): the saved size goes to the second look, so it asks the design on Small and
+      // Medium always and never on Big.
+      { text: `${tool(c, 'siblings.mjs')} --brief --notes ${p(c.notes)} --repo ${p(c.repo)}${['tiny', 'small', 'medium', 'big'].includes(f.size) ? ` --size ${f.size}` : ''}` },
       { text: 'launch the LAUNCH line it prints, save the answer as siblings-report.md', plain: true },
       { text: `${tool(c, 'siblings.mjs')} --record ${note(c, 'siblings-report.md')} --notes ${p(c.notes)}` },
       ...(['small', 'medium'].includes(f.lane) ? [{ text: 'its D1 line judges the design: follow it, or write not: <why> after its → and show the owner that one line', plain: true }] : []),

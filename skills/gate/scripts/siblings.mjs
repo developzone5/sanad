@@ -74,7 +74,7 @@ const MIN_REASON = 12;
 export const BRIEF = 'siblings-brief.md';
 export const LIST = 'siblings.md';
 export const REPORT = 'siblings-report.md';
-export const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', at most three, the nearest to this job first, or write the single line 'SAME JOB: none' after searching. These are hints: the author designs the change, and you do not choose the design. When the brief carries the author's design, check it for gaps and missed places: each one is a SIBLING line. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines and 'SAME JOB:' lines, or 'SIBLINGS: none' and 'SAME JOB: none'. Do not edit.";
+export const INSTRUCTIONS = "Before any code. Read the ticket lines and the check lines first: they are the goal. Then the places, and the code at each place and around it. Name every OTHER place where the ticket's own rule or defect applies and that is not on the list: another field, another screen or role, another entry point (create, edit, publish, import, a job), an API field, an export. A place with a different problem, or one the ticket lines do not reach, is no sibling: write it as 'OUTSIDE PR: <file>:<line> — <what>', and the user decides it at the end. Then, separately: how does this repo already do the same KIND of job the ticket needs? Search by what the code does, not by the names above (for example 'send a change to another system after a save' → an outbox table and the worker that sends it; 'a list with filters' → the screen that already pages and filters). Name each one as 'SAME JOB: <file>:<line> · <what> — <how it does the job>', at most three, the nearest to this job first, or write the single line 'SAME JOB: none' after searching. These are hints: the author designs the change, and you do not choose the design. When the brief carries the author's design, check it for gaps and missed places: each one is a SIBLING line. Answer only with lines 'SIBLING: <file>:<line> · <function or field> — <why it is the ticket's rule>', 'OUTSIDE PR:' lines and 'SAME JOB:' lines, or 'SIBLINGS: none' and 'SAME JOB: none', plus the one 'DESIGN:' line when the brief holds the author's design. Do not edit.";
 // A planning seat, never a review (2026-11-14): a prompt that starts "You are the independent reviewer" is
 // counted by the stop and push hooks as a finished review, so this check, run before any code, could have
 // stood in for the real review of the code written after it.
@@ -147,8 +147,8 @@ export function buildBrief({ repo, ticket, checks, list, dropped = [], design = 
     // 2026-11-22: the author's own design, when written, is what the second look checks for gaps; it never picks one.
     // Indented as a block, so a "- T1." or "- C1." line of the design is never read back as a ticket or check line.
     // 2026-11-28 (owner, batch c task 4): the second look judges it before any code, in one DESIGN line.
-    ...(String(design).trim() ? ["## The author's design (design.md) — judge it before any code", '',
-      'Judge this design against the ticket lines and the places, before any code, in one line: `DESIGN: agree — <why>`, or, when the project already does the same kind of job in a better way, `DESIGN: better — <file>:<line> · <that way> — <why it is better here>`. Check it for gaps and missed places too.', '',
+    ...(String(design).trim() ? [DESIGN_SECTION, '',
+      'Judge this design against the ticket lines and the places, before any code, in one line: `DESIGN: agree — <why>`, or, when the project already does the same kind of job in a better way, `DESIGN: better — <file>:<line> · <that way> — <why it is better here>`. Check it for gaps and missed places too. Your answer always holds this DESIGN line: an answer without it is refused.', '',
       ...String(design).trim().split(/\r?\n/).map((l) => '    ' + l), ''] : []),
   ].join('\n');
 }
@@ -158,7 +158,25 @@ export function launchLine(brief) {
     'Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is only the SIBLING, OUTSIDE PR and SAME JOB lines (or SIBLINGS: none and SAME JOB: none), and the DESIGN line when the brief holds the author\'s design.';
 }
 
-export function writeBrief({ notes, repo }) {
+// 2026-11-28 (owner, batch c notes 24 and 25): the design judgement is asked on Small and Medium, always, and never on
+// Big (Big keeps its two designers and the boss). The size is the one given (--size), else the one the size check saved
+// in the notes folder (the larger of size.json and size.txt, as sanad.mjs reads them); '' when none is known yet.
+const SIZE_ORDER = ['tiny', 'small', 'medium', 'big'];
+export function taskSize(notes, given = '') {
+  const g = String(given || '').trim().toLowerCase();
+  if (SIZE_ORDER.includes(g)) return g;
+  let saved = '', typed = '';
+  try { saved = String(JSON.parse(readText(path.join(notes, 'size.json'))).saved || '').trim().toLowerCase(); } catch { /* none */ }
+  try { typed = readText(path.join(notes, 'size.txt')).trim().split(/\s+/)[0].toLowerCase(); } catch { /* none */ }
+  const known = [saved, typed].filter((s) => SIZE_ORDER.includes(s));
+  return known.sort((a, b) => SIZE_ORDER.indexOf(b) - SIZE_ORDER.indexOf(a))[0] || '';
+}
+// true: asked and required; false: never asked; null: the size is not known (the design is asked when design.md exists).
+export const designAsked = (size) => (size === 'small' || size === 'medium' ? true : size === 'big' || size === 'tiny' ? false : null);
+// The brief's design section heading: --record reads it to know the DESIGN line is required.
+export const DESIGN_SECTION = "## The author's design (design.md) — judge it before any code";
+
+export function writeBrief({ notes, repo, size = '' }) {
   const top = toplevel(repo);
   if (!top) throw usage('not inside a git repository: ' + repo);
   // lines.md is numbered "T1. text"; readLines turns that into "T1: text", and the number is written here again.
@@ -175,9 +193,13 @@ export function writeBrief({ notes, repo }) {
   const brief = path.join(notes, BRIEF);
   const dropped = ticket.filter((t) => t.dropped).map((t) => t.n);
   const designFile = path.join(notes, 'design.md');
-  const design = fs.existsSync(designFile) ? readText(designFile) : '';
+  const sized = taskSize(notes, size);
+  const asked = designAsked(sized);
+  const written = fs.existsSync(designFile) ? readText(designFile) : '';
+  if (asked === true && !String(written).trim()) throw usage(`a ${sized} task's second look judges the design: write ${slash(designFile)} first (the design in three lines, then NOT: <one way you turned down> — <why>) and run --brief again`);
+  const design = asked === false ? '' : written;
   fs.writeFileSync(brief, buildBrief({ repo: top, ticket: live, checks, list, dropped, design }));
-  return { brief, ticket, checks, dropped, design: Boolean(String(design).trim()), places: list.places.filter((p) => p.mark !== 'gone').length };
+  return { brief, ticket, checks, dropped, design: Boolean(String(design).trim()), size: sized, asked, places: list.places.filter((p) => p.mark !== 'gone').length };
 }
 
 // A report line without list marks, quotes or bold: "- `SIBLING: …`" and "**SIBLINGS: none**" read plainly.
@@ -354,6 +376,10 @@ export function recordSiblings({ report, notes, now = new Date() }) {
   const out = path.join(notes, LIST);
   const oldText = fs.existsSync(out) ? readText(out) : '';
   const old = parseSiblings(oldText);
+  // 2026-11-28 (owner, batch c note 24): a brief that asked to judge the design needs the DESIGN line in the answer.
+  if (readText(brief).split(/\r?\n/).includes(DESIGN_SECTION) && !(found.design || []).length) {
+    throw usage(`${report} has no DESIGN line, and the brief asked the second look to judge the design: launch the brief's line again, save its answer there and record again.`);
+  }
   if (!found.jobs.length && !found.jobNone && !old.jobs.length && !old.jobNone) {
     throw usage(`${report} has no SAME JOB line and no "SAME JOB: none" line: the same-job search did not run. Launch the brief's line again (it asks how the repo already does this kind of job), save its answer there and record again.`);
   }
@@ -602,7 +628,7 @@ function parse(argv) {
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--brief') { o.brief = true; continue; }
-    if (!['--notes', '--repo', '--record', '--check', '--places', '--lines', '--check-lines', '--close', '--set'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
+    if (!['--notes', '--repo', '--record', '--check', '--places', '--lines', '--check-lines', '--close', '--set', '--size'].includes(k) || argv[i + 1] === undefined) throw usage('Unknown or empty option: ' + k);
     if (k === '--set') {
       const v = argv[++i], eq = v.indexOf('=');
       if (eq < 1) throw usage('--set needs "<S or J numbers>=<outcome>", e.g. --set "S1,S3=none: another screen\'s own rule" --set "J2=reuse"');
@@ -613,6 +639,7 @@ function parse(argv) {
   }
   if ([o.brief, o.record, o.check, o.close].filter(Boolean).length !== 1) throw usage('give one of --brief, --record <report>, --check <siblings.md> or --close <siblings.md>');
   if (o.brief && (!o.notes || !o.repo)) throw usage('--brief needs --notes <dir> and --repo <repo>');
+  if (o.size !== undefined && (!o.brief || !SIZE_ORDER.includes(String(o.size).toLowerCase()))) throw usage('--size goes with --brief and is one of tiny, small, medium, big');
   if (o.record && !o.notes) throw usage('--record needs --notes <dir>');
   if (o.close && !o.set.length) throw usage('--close needs at least one --set "<S or J numbers>=<outcome>"');
   if (o.set.length && !o.close) throw usage('--set goes with --close');
@@ -643,9 +670,9 @@ function main() {
     const o = parse(process.argv.slice(2));
     if (o.brief) {
       const notes = path.resolve(o.notes);
-      const b = writeBrief({ notes, repo: path.resolve(o.repo) });
+      const b = writeBrief({ notes, repo: path.resolve(o.repo), size: o.size || '' });
       process.stdout.write(`SIBLINGS BRIEF: ${b.brief} · T1..T${b.ticket.length}${b.dropped.length ? ` (${b.dropped.map((n) => 'T' + n).join(', ')} dropped)` : ''} · ${b.checks.length ? `C1..C${b.checks.length}` : 'no check line yet'} · ${b.places} place(s)${b.design ? ' · your design (design.md)' : ''}\n` +
-        (b.design ? '' : `NOTE: no design.md: on a small or medium task, write the design in three lines and one way you turned down (NOT: <way> — <why>) as ${slash(path.join(notes, 'design.md'))} and run --brief again, so the second look judges it before any code\n`) +
+        (b.design || b.asked === false ? '' : `NOTE: no design.md: on a small or medium task, write the design in three lines and one way you turned down (NOT: <way> — <why>) as ${slash(path.join(notes, 'design.md'))} and run --brief again, so the second look judges it before any code\n`) +
         launchLine(b.brief) + '\n' +
         `THEN: save the agent's final message as ${slash(path.join(notes, REPORT))}, then run: node ${slash(path.join(here, 'siblings.mjs'))} --record ${slash(path.join(notes, REPORT))} --notes ${slash(notes)}\n`);
     } else if (o.record) {

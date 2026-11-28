@@ -69,6 +69,47 @@ test('the DESIGN line is kept as D1 for the builder, keeps its answer when recor
   assert.equal(check.status, 0, check.stdout + check.stderr);
 });
 
+// 2026-11-28 (owner, notes 24 and 25): on Small and Medium the judgement is always given; on Big it is never asked.
+test('a small or medium task cannot start the second look without design.md, and its answer must hold the DESIGN line', () => {
+  for (const size of ['small', 'medium']) {
+    const none = notesFolder({ design: false });
+    fs.writeFileSync(path.join(none.notes, 'size.txt'), size + '\n');
+    const refused = run(['--brief', '--notes', none.notes, '--repo', none.repo]);
+    assert.equal(refused.status, 2, size + ': ' + refused.stdout + refused.stderr);
+    assert.match(refused.stderr, new RegExp(`a ${size} task's second look judges the design: write .*design\\.md first`));
+    const f = notesFolder();
+    assert.equal(run(['--brief', '--notes', f.notes, '--repo', f.repo, '--size', size]).status, 0, size);
+    const report = path.join(f.notes, 'siblings-report.md');
+    fs.writeFileSync(report, 'SIBLINGS: none\nSAME JOB: none\n');
+    const r = run(['--record', report, '--notes', f.notes]);
+    assert.equal(r.status, 2, size + ': no DESIGN line is refused');
+    assert.match(r.stderr, /has no DESIGN line, and the brief asked the second look to judge the design/);
+    fs.writeFileSync(report, 'SIBLINGS: none\nSAME JOB: none\nDESIGN: agree — paging on the server is how the reports screen does it\n');
+    assert.equal(run(['--record', report, '--notes', f.notes]).status, 0, size);
+  }
+});
+
+test('a big task is never asked for the design judgement, even with a design.md', () => {
+  for (const how of ['--size', 'size.txt', 'size.json']) {
+    const f = notesFolder();
+    if (how === 'size.txt') fs.writeFileSync(path.join(f.notes, 'size.txt'), 'small\n');
+    if (how === 'size.json') fs.writeFileSync(path.join(f.notes, 'size.json'), JSON.stringify({ saved: 'big' }));
+    if (how === 'size.txt') fs.writeFileSync(path.join(f.notes, 'size.json'), JSON.stringify({ saved: 'big' }));
+    const b = run(['--brief', '--notes', f.notes, '--repo', f.repo, ...(how === '--size' ? ['--size', 'big'] : [])]);
+    assert.equal(b.status, 0, how + ': ' + b.stderr);
+    const brief = fs.readFileSync(path.join(f.notes, 'siblings-brief.md'), 'utf8');
+    assert.doesNotMatch(brief, /^## The author's design|Judge this design/m, how);
+    assert.doesNotMatch(b.stdout, /NOTE: no design\.md/, how);
+    const report = path.join(f.notes, 'siblings-report.md');
+    fs.writeFileSync(report, 'SIBLINGS: none\nSAME JOB: none\n');
+    assert.equal(run(['--record', report, '--notes', f.notes]).status, 0, how + ': no DESIGN line needed');
+  }
+  const second = STEPS.find((s) => s.id === 'second-look');
+  const c = { gate: 'G', repo: 'R', notes: 'N', base: 'origin/x', engine: 'claude', ticket: '', sides: [] };
+  assert.match(second.lines(c, { lane: 'big', size: 'big', switches: {} })[0].text, / --size big$/);
+  assert.doesNotMatch(second.lines(c, { lane: 'small', size: '', switches: {} }).map((l) => l.text).join('\n'), /--size/);
+});
+
 test('the printed steps ask for the design on Small and Medium only; tiny has none and Big keeps its designers', () => {
   const second = STEPS.find((s) => s.id === 'second-look');
   const start = STEPS.find((s) => s.id === 'start');
