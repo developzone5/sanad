@@ -79,10 +79,21 @@ const recheck = { id: 'r2', seat: 're-check', launchAt: '2026-11-28T09:30:00Z', 
 // The reviewer launch prompts of the session (review, task 1 PR): each names a brief in this task's notes folder.
 class Prompts extends Map { constructor(text) { super(); this.text = text; } get(id) { return super.has(id) ? super.get(id) : this.text; } }
 const promptsFor = (fx) => new Prompts(`You are the independent reviewer — FRESH EYES. Read the brief at ${fx.notes.replace(/\\/g, '/')}/brief-fresh.md`);
-// Everything trusted for a small task: the review record, the fresh-eyes run, the suite receipt and the whole pre-review run.
+// The other engine's report file in the notes folder, finished at `at` (codex-review.md on a Claude task).
+function otherReport(fx, at, name = 'codex-review.md') {
+  const file = path.join(fx.notes, name);
+  fs.writeFileSync(file, 'RECOMMEND: PASS\n');
+  fs.utimesSync(file, new Date(at), new Date(at));
+  return file;
+}
+// Everything trusted for a small task: the review record, the fresh-eyes run, the other engine's report, the suite
+// receipt and the whole pre-review run.
 function allTrusted(fx) {
   fx.notesList = { known: true, all: [], reviews: [fresh], passing: passingFor(fx), transcript: '' };
   fx.trust = { size: 'small', reviewStore: store(fx), runs: [startRun(fx), evidenceRun(fx), fullRun(fx)], prompts: promptsFor(fx) };
+  // 2026-11-28 (owner, batch c task 2): a small change has the other engine's seat too: its report file, after the
+  // first round began.
+  otherReport(fx, '2026-11-28T09:15:00Z');
   process.env.SANAD_STATE_DIR = fx.state;
   writeEntry(fx.repo, 'k1', { ok: true, breaks: 2, code: codeFingerprint(fx.repo), files: {}, targets: {}, caught: {} });
 }
@@ -114,7 +125,7 @@ test('ready: a re-check never fills a first-round seat', async () => {
   await task(fx);
   allTrusted(fx);
   fx.notesList.reviews = [recheck];
-  assert.match(item((await cmd(fx, 'ready')).out, 'review'), /^READY NOT DONE — review: .*0 of 1 first-round seat\(s\) of a small change .*missing fresh eyes \(a re-check never fills a first-round seat\)/);
+  assert.match(item((await cmd(fx, 'ready')).out, 'review'), /^READY NOT DONE — review: .*0 of 2 first-round seat\(s\) of a small change .*missing fresh eyes/);
   // A run that names no seat ('reviewer') is no fresh-eyes run either.
   fx.notesList.reviews = [{ ...fresh, seat: 'reviewer' }, recheck];
   assert.match(item((await cmd(fx, 'ready')).out, 'review'), /missing fresh eyes/);
@@ -122,21 +133,31 @@ test('ready: a re-check never fills a first-round seat', async () => {
   assert.match(item((await cmd(fx, 'ready')).out, 'review'), /^READY done/);
 });
 
-test('ready: a big change needs each of its four first-round seats; the other engine is its report file after the first round began', async () => {
+// 2026-11-28 (owner, batch c task 2): a Claude task's big round is fresh eyes, the risk files and the other engine (no
+// whole-diff seat); a Codex task keeps its whole diff, four seats.
+test('ready: a big change needs each of its first-round seats; the other engine is its report file after the first round began', async () => {
   const fx = fixture();
   await task(fx);
   allTrusted(fx);
   fx.trust.size = 'big';
   const seat = (s, id) => ({ id, seat: s, launchAt: '2026-11-28T09:00:00Z', doneAt: '2026-11-28T09:20:00Z' });
-  fx.notesList.reviews = [seat('fresh eyes', 'a'), seat('risk files', 'b'), recheck];
+  const file = otherReport(fx, '2026-11-28T08:00:00Z');
+  fx.notesList.reviews = [seat('fresh eyes', 'a'), recheck];
   let out = item((await cmd(fx, 'ready')).out, 'review');
-  assert.match(out, /2 of 4 first-round seat\(s\) of a big change .*missing whole diff, other engine/);
-  fx.notesList.reviews.push(seat('whole diff', 'c'));
-  const file = path.join(fx.notes, 'codex-review.md');
-  fs.writeFileSync(file, 'RECOMMEND: PASS\n');
-  fs.utimesSync(file, new Date('2026-11-28T08:00:00Z'), new Date('2026-11-28T08:00:00Z'));
+  assert.match(out, /1 of 3 first-round seat\(s\) of a big change .*missing risk files, other engine/);
+  fx.notesList.reviews.push(seat('risk files', 'b'));
   assert.match(item((await cmd(fx, 'ready')).out, 'review'), /missing other engine/);
   fs.utimesSync(file, new Date('2026-11-28T09:15:00Z'), new Date('2026-11-28T09:15:00Z'));
+  out = item((await cmd(fx, 'ready')).out, 'review');
+  assert.match(out, /^READY done/, out);
+  // A Codex task: its own whole-diff seat is still needed, and the other engine is a claude-* report.
+  note(fx, 'engine.txt', 'codex\n');
+  const task2 = path.join(fx.notes, 'task.json');
+  fs.writeFileSync(task2, JSON.stringify({ ...JSON.parse(fs.readFileSync(task2, 'utf8')), engine: 'codex' }));
+  out = item((await cmd(fx, 'ready')).out, 'review');
+  assert.match(out, /of 4 first-round seat\(s\) of a big change .*missing whole diff, other engine/, out);
+  fx.notesList.reviews.push(seat('whole diff', 'c'));
+  otherReport(fx, '2026-11-28T09:15:00Z', 'claude-fresh.md');
   out = item((await cmd(fx, 'ready')).out, 'review');
   assert.match(out, /^READY done/, out);
   // A size typed into the notes folder may raise the seats, never lower them.
@@ -424,6 +445,7 @@ test('review: the other engine\'s re-check report never fills its first-round se
   await task(fx);
   allTrusted(fx);
   fx.trust.size = 'medium';
+  fs.rmSync(path.join(fx.notes, 'codex-review.md'));   // the setup's first-round report: this test adds its own
   const file = path.join(fx.notes, 'codex-recheck-2.md');
   fs.writeFileSync(file, 'RECOMMEND: PASS\n');
   fs.utimesSync(file, new Date('2026-11-28T09:40:00Z'), new Date('2026-11-28T09:40:00Z'));
