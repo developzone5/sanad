@@ -326,10 +326,13 @@ export function chooseSize(facts, routed) {
 // the kind can be counted by kind across tasks (hooks/lib/transcript-scan.js noteClass, review-score.mjs).
 // 2026-11-19: the finding line's shape stands once, here; the review brief and the re-check brief both use it.
 export const FINDING_SHAPE = '`Blocker|Bug|Gap|Question — file:line — <input> → <wrong result> — <one-line fix>`';
+// 2026-11-28 (owner, batch c task 1, text part; first reviewer run: 36 notes started with a status emoji and went
+// unread): the grade word comes first, and the owner's chat rules are not this report's rules.
+export const GRADE_FIRST = 'each line starts with its grade word, with no status emoji, number, bullet or bold before it (the owner\'s chat rules do not apply to this report)';
 // 2026-11-22 (owner, PR 3 item 3): a Bug or a Blocker brings the test that shows it, fenced so the scanner never reads
 // its lines as notes or a verdict. The reviewer stays read-only; the author adds the test and runs it.
 export const TEST_IN_NOTE = 'Where a test can show a Bug or a Blocker, put that test\'s code under the note, always inside a fenced code block (```); you run no test: the author adds it and runs it on the reviewed code.';
-const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; or "no findings" and what you checked. When a finding falls under a line of the review checklist, name that line in round brackets ( ) after the kind, as the checklist names it (CALLERS, CLIENT STATE, DATABASE, FAILURES / LOCALES, USERS FOUND BY SEARCH, …): `Bug (CLIENT STATE) — file:line — …`. ' + TEST_IN_NOTE + ' Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any. Last, one line `ONE JOB: yes|no`: does this PR do more than one thing? A yes is also a `Question` finding that names the jobs (user rule 2026-11-15).';
+const ROLE = 'You are a code reviewer. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; ' + GRADE_FIRST + '; or "no findings" and what you checked. When a finding falls under a line of the review checklist, name that line in round brackets ( ) after the kind, as the checklist names it (CALLERS, CLIENT STATE, DATABASE, FAILURES / LOCALES, USERS FOUND BY SEARCH, …): `Bug (CLIENT STATE) — file:line — …`. ' + TEST_IN_NOTE + ' Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any. Last, one line `ONE JOB: yes|no`: does this PR do more than one thing? A yes is also a `Question` finding that names the jobs (user rule 2026-11-15).';
 // The standing rules. A new rule replaces one of these or becomes a script check. The last two (2026-11-16, PR #784:
 // a teammate found 6 real issues after 5 reviewers passed the PR): the author's design was never attacked, and weak
 // spots passed because "the old code does it too".
@@ -904,7 +907,7 @@ export function buildRecheckBrief({ repo, branch, from, to, round, fromRound = '
   const list = Array.isArray(notes.list) ? notes.list : [];
   const why = notes.failed || (list.length ? '' : 'the notes reader gave no note for this task');
   return tidy([
-    'You are a code reviewer on a re-check after a fix. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; or "no findings" and what you checked. ' + TEST_IN_NOTE + ' Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any.', '',
+    'You are a code reviewer on a re-check after a fix. Read-only: no builds, no tests, no edits. Report: `RECOMMEND: PASS|FAIL` first, then the findings, most severe first, one line each: ' + FINDING_SHAPE + '; ' + GRADE_FIRST + '; or "no findings" and what you checked. ' + TEST_IN_NOTE + ' Then `OUTSIDE PR:` and `EXTRA TEST:` lines, if any.', '',
     ...(short ? [
       `Short check after round ${short.afterRound}, the last review round: it is no new round. Report every finding you see, as always. Only a Blocker, a security note or a ticket-line note opens a new round; each Bug or Gap goes to the owner's end list, one line each.`,
       ...(short.testsOnly ? ['Only test files changed in this fix: read each changed test and the product code it tests; can each changed test still fail?'] : []),
