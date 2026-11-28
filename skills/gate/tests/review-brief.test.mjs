@@ -658,7 +658,8 @@ const stripEngine = t => t.replace(/^Engine: [^\n]*\n\n/m, '');
 test('the Claude plan is unchanged except its engine line', () => {
   // 2026-11-28 (owner, batch c task 2): the small hash and the big hash were updated on purpose: a small plan now holds the
   // Codex fresh eyes, and a big plan has no Claude whole-diff seat. The medium hash is untouched.
-  const gold = { small: '792094eb97c4c7542611bd800c44149d2368b045a617c386262d2faa15e9c7f6', medium: '00ea58022c234baf316d7607cb991573fa324b64f820b7c6edc3dfac98b80179', big: 'dd61fadece53cda783cf811e0424f9e88f39bfbbe4e096bbdb2d028331afe26f' };
+  // 2026-11-28 (owner, note 23): all three updated on purpose: the Codex fresh-eyes line names its reviewer role.
+  const gold = { small: '6244c793b537e15b260c20fb539e4a064f38e6170fbe1c1b84e4af7e3bb2ae94', medium: 'b89e630aa488ea0d197352f31e03047e3f46238b43e0d09364233293c09ca9ad', big: '726389b05dffbcaec590622452906cbbc84ed3cba23fb471efd74a59075e4e98' };
   // 2026-11-19 (the pinned-review release): the big hash was updated on purpose. The Big plan's risk and whole-diff
   // seats each got their own question, and the trace list with no signal named holds the after-save question.
   // 2026-11-19: small and medium hashes are untouched (those plans hold no Codex line). The big hash was updated once: it is

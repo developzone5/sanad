@@ -734,9 +734,11 @@ export function buildLaunch({ brief, fresh, repo, branch, size = '', sizeNote = 
   // -m comes from the fresh-eyes role's settings file (codexRoleModel), read when the plan is written.
   // 2026-11-18 (audit finding 5): every value goes through shq, as in the Codex plan. The folder is escaped first and
   // joined after, so an ordinary path keeps the separators it had.
+  // 2026-11-28 (owner, batch c note 23): the Codex fresh eyes names its role on every size, so the role's rules (a
+  // missing test, a file outside the change, behavior the ticket asks for are not notes) reach it.
   const codexFresh = [
     '## Fresh eyes (Codex) — Bash, run_in_background', '',
-    '```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shqPath(path.join(path.dirname(brief), 'codex-review.md'))}"${freshModel.flag} "${shq(`You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shqPath(path.join(path.dirname(brief), 'codex.log'))}" 2>&1`, '```', '', ...freshModel.note,
+    '```bash', `cd "${shq(repo)}" && codex exec -s read-only -c model_reasoning_effort="xhigh" -C "${shq(repo)}" -o "${shqPath(path.join(path.dirname(brief), 'codex-review.md'))}"${freshModel.flag} "${shq(`You are the independent reviewer — FRESH EYES. Read and follow only the brief at ${fresh}, including its Rules section. Do not open any other file in that folder. ${roleSentence(CODEX_ROLE.fresh)} Read-only: no builds, no tests, no edits. Your final message is the report in the shape the brief gives.`)}" < /dev/null > "${shqPath(path.join(path.dirname(brief), 'codex.log'))}" 2>&1`, '```', '', ...freshModel.note,
   ];
   return [
     '# Launch lines (copy as they are)', '',

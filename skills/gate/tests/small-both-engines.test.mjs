@@ -39,6 +39,17 @@ test('a Big round has no Claude whole-diff seat; a Codex task keeps its own', ()
   assert.equal(reviewReported(big, [run('a', 1), run('b', 1)], [], []), false, 'no other-engine report');
 });
 
+// 2026-11-28 (owner, note 23): on a Claude task the Codex fresh eyes names its role on every size, as on Medium was meant.
+test('the Codex fresh-eyes line of a Claude plan names its reviewer role on tiny, small, medium and big', async () => {
+  const { buildLaunch } = await import('../scripts/review-brief.mjs');
+  for (const size of ['tiny', 'small', 'medium', 'big']) {
+    const plan = buildLaunch({ brief: 'C:/n/brief.md', fresh: 'C:/n/brief-fresh.md', repo: 'C:/r', branch: 'b', size, engine: 'claude' });
+    const codex = plan.split('\n').filter((l) => l.includes('codex exec -s read-only'));
+    assert.equal(codex.length, 1, size);
+    assert.match(codex[0], /Your Codex role is sanad-risk-reviewer: read ~\/\.codex\/agents\/sanad-risk-reviewer\.toml first and follow it\./, size);
+  }
+});
+
 // The text half: the Codex reviewer roles get the one "not a note" rule, and the rule pages say the new seats. Read from
 // the staged candidate when there is one, else from the installed copy.
 const here = path.dirname(fileURLToPath(import.meta.url));
